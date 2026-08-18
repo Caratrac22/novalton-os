@@ -1,17 +1,18 @@
 # Novalton OS — Agent Model
 
-> Version: 0.1 — 18 August 2026
+> Version: 0.2 — 18 August 2026
 >
 > Status: Foundational draft
 
 ## 1. Purpose
 
-This document defines what an **agent** is inside Novalton OS.
+This document defines what an **agent** is inside Novalton OS, how agents are instantiated, supervised, allowed to delegate work, challenged by other agents, and connected to models, tools, memory, and policy.
 
 An agent is **not** a model, a prompt, or a standalone chatbot.
 
 An agent is a governed execution role with:
 
+- a stable definition;
 - a mission;
 - capabilities;
 - permissions;
@@ -21,72 +22,127 @@ An agent is a governed execution role with:
 - structured inputs and outputs;
 - execution constraints;
 - observability;
-- lifecycle state.
+- lifecycle state;
+- versioned operational lessons.
 
-The same agent role should be able to run with different models over time without changing its identity.
+The same agent role must be able to run with different models over time without changing its identity.
 
 ---
 
-# 2. Core definition
+# 2. Core separation: system components vs agents
 
-Conceptually:
+Novalton OS separates **core system components** from **specialized agents**.
 
 ```text
-Agent
-  = Identity
-  + Mission
-  + Capabilities
-  + Permissions
-  + Tools
-  + Memory Scope
-  + Model Policy
-  + Input Contract
-  + Output Contract
-  + Runtime State
-  + Audit Trail
+CORE SYSTEM
+├── Orchestrator
+├── Policy Engine
+├── Memory Engine
+├── Model Router
+└── Event / Runtime Layer
+
+SPECIALIZED AGENTS
+├── Project Manager
+├── Developer
+├── Tester / QA
+├── Legal Research Assistant
+├── Outreach / Commercial Assistant
+└── Personal Assistant
 ```
 
-An agent is therefore a **logical worker** managed by the orchestrator.
+The **Orchestrator is not a normal agent**.
 
-It does not own the workflow.
+It is a privileged coordination component responsible for:
 
-It receives work, produces a structured result, and returns control to the orchestrator.
+- understanding user intent;
+- proposing workflows;
+- selecting capabilities and agents;
+- inspecting agent results;
+- choosing what should happen next;
+- consulting the Model Router;
+- submitting actions to the Policy Engine;
+- requesting user input or approval;
+- stopping, adapting, or continuing workflows.
+
+The Orchestrator may use an LLM internally, but its architectural role is different from that of a specialized agent.
 
 ---
 
-# 3. Agent identity
+# 3. Agent definition and Agent Run
 
-Every agent has a stable identity independent of the model used.
+Novalton OS distinguishes a persistent **Agent Definition** from a temporary **Agent Run**.
 
-Minimum identity fields:
+```text
+Agent Definition
+Developer v3
+     |
+     ├── Agent Run #184
+     ├── Agent Run #185
+     └── Agent Run #186
+```
+
+## 3.1 Agent Definition
+
+The Agent Definition contains the durable role configuration:
 
 ```yaml
-id: agent_dev_default
+id: developer.default
 name: Developer
 slug: developer
-version: 1
+version: 3
 status: enabled
 workspace_id: default
+category: engineering
 ```
 
-Recommended metadata:
+It also contains:
+
+- mission;
+- capability profile;
+- permission profile;
+- allowed tools;
+- memory policy;
+- model policy;
+- delegation policy;
+- output contract;
+- operational lessons.
+
+## 3.2 Agent Run
+
+Each execution creates an isolated Agent Run.
+
+Example:
 
 ```yaml
-description: Builds, reviews, and modifies software
-category: engineering
-icon: code
-created_at: ...
-updated_at: ...
-created_by: ...
+run_id: run_01JXYZ
+agent_id: developer.default
+agent_version: 3
+task_id: task_123
+status: running
+started_at: ...
+model_route: ...
 ```
 
-The `version` field allows an agent definition to evolve without silently changing historical executions.
+Each run has its own:
+
+- task context;
+- selected model;
+- tool calls;
+- runtime state;
+- events;
+- cost;
+- outputs;
+- errors;
+- approval state;
+- audit trail.
+
+Historical runs must remain traceable even after the Agent Definition evolves.
 
 ---
 
 # 4. Agent mission
 
-Each agent must have a clear mission.
+Every agent must have a clear, narrow mission.
 
 Bad mission:
 
@@ -96,9 +152,9 @@ Good mission:
 
 > Design, implement, review, and document software changes inside approved repositories while respecting project constraints, security policies, coding standards, and tool permissions.
 
-The mission defines **what the agent is responsible for**, but not what it is allowed to execute.
+Mission defines **responsibility**, not **authority**.
 
-Mission and permission are separate concepts.
+Permissions are separate and enforced outside the model.
 
 ---
 
@@ -106,7 +162,7 @@ Mission and permission are separate concepts.
 
 Capabilities describe what an agent knows how to do.
 
-Examples for a Developer Agent:
+Example Developer capabilities:
 
 ```yaml
 capabilities:
@@ -122,7 +178,7 @@ capabilities:
   - code_review
 ```
 
-Examples for a Legal Research Agent:
+Example Legal capabilities:
 
 ```yaml
 capabilities:
@@ -134,18 +190,9 @@ capabilities:
   - legal_summary
 ```
 
-Capabilities are used by the orchestrator to match tasks to agents.
+Capabilities are used by the Orchestrator to match tasks to workers.
 
-They should eventually support metadata such as:
-
-```yaml
-- id: python
-  proficiency: advanced
-  confidence: 0.95
-  source: built_in
-```
-
-The initial version does not need sophisticated proficiency scoring, but the schema should allow it later.
+Later, capabilities may support metadata such as proficiency, evidence, historical success, and confidence.
 
 ---
 
@@ -160,39 +207,37 @@ Example:
 ```yaml
 permissions:
   files:
-    read: true
-    write: true
-    delete: false
+    read: allow
+    write: require_policy_check
+    delete: deny
 
   git:
-    read: true
-    write: true
-    push: false
+    read: allow
+    commit: require_policy_check
+    push: require_confirmation
 
   email:
-    read: false
-    draft: false
-    send: false
+    read: deny
+    draft: deny
+    send: deny
 
   shell:
-    execute: true
-    destructive_commands: false
+    execute: require_policy_check
+    destructive: deny
 
   web:
-    research: true
-
-  finance:
-    spend: false
+    research: allow
 ```
 
-Permissions should support at least:
+Permissions should support:
 
 - allow;
 - deny;
+- require policy check;
 - require confirmation;
 - scoped allow.
 
-Example:
+Example scoped permission:
 
 ```yaml
 filesystem_write:
@@ -201,16 +246,17 @@ filesystem_write:
     - /workspace/projects/**
 ```
 
+An agent cannot grant itself new permissions.
+
 ---
 
 # 7. Tool access
 
-Tools are the concrete mechanisms through which agents act.
+Tools are concrete mechanisms used by agents.
 
 Examples:
 
-- filesystem reader;
-- filesystem writer;
+- filesystem;
 - terminal;
 - GitHub;
 - web search;
@@ -223,31 +269,17 @@ Examples:
 - project manager;
 - document generator.
 
-An agent may only request tools explicitly available to it.
+An agent may only request tools explicitly exposed to it.
 
-Example:
+Every tool call must independently pass a permission/policy check.
 
-```yaml
-tools:
-  - id: filesystem.read
-  - id: filesystem.write
-  - id: git.read
-  - id: git.diff
-  - id: terminal.run
-  - id: web.research
-```
-
-A tool must independently verify permission before execution.
-
-The model must never be trusted as the sole permission boundary.
+The model is never the final security boundary.
 
 ---
 
 # 8. Memory scope
 
-Agents should not automatically receive access to all stored memory.
-
-Each agent receives a memory scope appropriate to the task.
+Agents do not automatically receive all stored memory.
 
 Possible scopes:
 
@@ -276,54 +308,112 @@ memory_scope:
   sensitive_access: false
 ```
 
-A Developer Agent working on Project A should not automatically receive unrelated client data from Project B.
+The Memory Engine should construct the smallest useful context for a run.
 
-The orchestrator and Memory Engine are responsible for constructing the smallest useful context.
+A Developer working on Project A must not automatically receive unrelated data from Project B.
 
 ---
 
-# 9. Model policy
+# 9. Personal Assistant context model
 
-An agent should declare **requirements**, not a hard-coded model name.
+The Personal Assistant is a special case because it needs broad situational awareness without becoming an all-powerful super-agent.
+
+The selected design is:
+
+> **Broad synthesized context, narrow direct permissions.**
+
+The Personal Assistant may receive a concise general context containing information such as:
+
+- current active projects;
+- current priorities;
+- relevant user preferences;
+- upcoming obligations;
+- recent important decisions;
+- currently active tasks;
+- selected long-term context.
+
+However, this does **not** imply unrestricted raw access to every source system.
+
+For example, the Personal Assistant may know that an important client conversation exists without receiving the entire mailbox unless the current task requires it.
+
+When deeper access is needed, the agent requests an appropriate tool or memory scope and the Policy Engine evaluates it.
+
+Conceptually:
+
+```text
+General Personal Context
+        |
+        v
+Personal Assistant
+        |
+        +--> Need email detail?
+        |       -> request scoped access
+        |
+        +--> Need project file?
+                -> request scoped access
+```
+
+This preserves usefulness without creating an agent with permanent unrestricted access to everything.
+
+---
+
+# 10. Task-aware Model Router
+
+Model selection is performed **per Agent Run**, not permanently per Agent Definition.
+
+The system should normally choose the **least expensive model expected to complete the task reliably**, while respecting minimum quality requirements.
+
+Conceptually:
+
+```text
+Agent + Task
+    |
+    v
+Task difficulty / required capability
+    |
+    v
+Model Router
+    |
+    ├── Free / local model if sufficient
+    ├── Low-cost API model if needed
+    └── Stronger paid model if justified
+```
+
+The Model Router may consider:
+
+- task complexity;
+- required capabilities;
+- tool-use support;
+- structured-output support;
+- code/reasoning quality;
+- context window;
+- latency;
+- provider availability;
+- privacy constraints;
+- historical performance;
+- remaining budget;
+- expected cost.
 
 Example:
 
-```yaml
-model_policy:
-  capabilities_required:
-    - tool_use
-    - structured_output
-    - strong_code_generation
+```text
+Developer + rename/refactor small function
+→ free/cheap coding model
 
-  preferences:
-    reasoning: high
-    latency: medium
-    cost: low
+Developer + major distributed architecture design
+→ stronger reasoning/coding model
 
-  allow_local: true
-  allow_cloud: true
-  max_cost_per_run_eur: 0.05
+Orchestrator + high-impact ambiguous decision
+→ high-quality orchestration model
 ```
 
-The Model Router selects a model according to:
-
-- required capabilities;
-- current availability;
-- cost budget;
-- latency target;
-- privacy constraints;
-- context window;
-- provider health;
-- fallback policy;
-- historical performance.
-
-Example routing candidates for a Developer Agent might include a free or low-cost coding model first, then a stronger paid fallback if the task requires it.
+The exact provider is replaceable.
 
 ---
 
-# 10. Agent input contract
+# 11. Agent input contract
 
-Agents should receive structured inputs rather than only a raw text message.
+Agents receive structured inputs rather than only raw user text.
 
 Example:
 
@@ -333,39 +423,38 @@ Example:
   "objective": "Review the authentication implementation",
   "context": {
     "project_id": "novalton-os",
-    "files": [
-      "backend/auth.py",
-      "backend/models/user.py"
-    ]
+    "files": ["backend/auth.py"]
   },
   "constraints": [
     "Do not modify files",
-    "Focus on security and correctness"
+    "Focus on security"
   ],
   "expected_output": "code_review_report"
 }
 ```
 
-The input may contain:
+Inputs may include:
 
-- task objective;
-- relevant context;
+- objective;
 - approved plan scope;
+- context;
 - constraints;
-- source references;
+- relevant memories;
+- prior agent results;
+- sources;
 - budget;
-- deadline/priority;
-- required output schema;
-- tool availability;
+- priority;
+- expected output schema;
+- permitted tools;
 - policy context.
 
 ---
 
-# 11. Agent output contract
+# 12. Agent output contract
 
-Every agent should return a structured result.
+Every agent returns a structured result.
 
-Minimum conceptual structure:
+Baseline contract:
 
 ```json
 {
@@ -374,8 +463,11 @@ Minimum conceptual structure:
   "findings": [],
   "artifacts": [],
   "sources": [],
+  "assumptions": [],
   "risks": [],
   "uncertainties": [],
+  "blocking_issues": [],
+  "challenge": null,
   "recommended_next_steps": [],
   "requested_actions": []
 }
@@ -392,13 +484,60 @@ FAILED
 CANCELLED
 ```
 
-An agent should never silently pretend success if the task was incomplete.
+The `assumptions` field is mandatory when the agent had to make non-trivial assumptions.
+
+An agent must never silently present an assumption as a verified fact.
 
 ---
 
-# 12. Requested actions
+# 13. Challenge and disagreement mechanism
 
-An agent may propose actions, but proposals are not execution rights.
+Agents are explicitly allowed to challenge the proposed continuation of a workflow.
+
+A challenge may use levels such as:
+
+```text
+NONE
+WARNING
+HUMAN_REVIEW_RECOMMENDED
+BLOCK_RECOMMENDED
+```
+
+Example:
+
+```json
+{
+  "challenge": {
+    "level": "HUMAN_REVIEW_RECOMMENDED",
+    "reason": "The proposed contract is missing a data-processing clause",
+    "evidence": ["src_12"],
+    "suggested_action": "Ask the user before sending the contract"
+  }
+}
+```
+
+A challenge does not automatically become a hard technical veto unless a policy says so.
+
+However, the Orchestrator is **required to reconsider the workflow** when a meaningful challenge is raised.
+
+It may then:
+
+- revise the plan;
+- ask another agent for an independent opinion;
+- request additional research;
+- stop the workflow;
+- ask the user;
+- continue only if policy allows and it can justify the decision operationally.
+
+For high-risk challenge categories, the Policy Engine may require human confirmation automatically.
+
+The Orchestrator must never silently ignore `BLOCK_RECOMMENDED` or `HUMAN_REVIEW_RECOMMENDED`.
+
+---
+
+# 14. Requested actions
+
+Agents propose actions, but proposals are not execution rights.
 
 Example:
 
@@ -415,9 +554,7 @@ Example:
 }
 ```
 
-The orchestrator sends requested actions to the Policy Engine.
-
-The Policy Engine then returns one of:
+The action goes through the Policy Engine, which returns:
 
 ```text
 ALLOW
@@ -425,37 +562,240 @@ REQUIRE_CONFIRMATION
 BLOCK
 ```
 
-Only after authorization may the tool execute the action.
+Only then may the tool execute it.
 
 ---
 
-# 13. Agent lifecycle
+# 15. Hierarchical agent teams
 
-An agent execution should have an explicit lifecycle.
+Some agents may act as **domain managers** for multiple worker runs.
+
+The Developer Agent is the first planned example.
+
+Conceptually:
+
+```text
+Orchestrator
+     |
+     v
+Developer Manager
+     |
+     ├── Backend Worker
+     ├── Frontend Worker
+     ├── Test Worker
+     └── Documentation Worker
+```
+
+This hierarchy is bounded.
+
+The Developer Manager may analyze a development task and propose how to divide it among workers.
+
+Example proposal:
+
+```json
+{
+  "delegation_plan": {
+    "reason": "Frontend and backend work are independent",
+    "workers": [
+      {
+        "role": "backend",
+        "objective": "Implement project API"
+      },
+      {
+        "role": "frontend",
+        "objective": "Build project dashboard"
+      }
+    ]
+  }
+}
+```
+
+The **Developer has a real say in how development work should be executed** because it has domain expertise.
+
+The Orchestrator then evaluates the proposal.
+
+It may:
+
+```text
+APPROVE
+MODIFY
+REJECT
+REQUEST_MORE_DETAIL
+ASK_USER
+```
+
+The Orchestrator does not micromanage implementation blindly. It coordinates overall goals, policy, budget, and cross-domain dependencies, while the Developer Manager provides the technical execution strategy.
+
+---
+
+# 16. Worker agents
+
+A worker agent is a temporary specialized Agent Run created under an approved delegation plan.
+
+Workers may be based on:
+
+- the same Agent Definition with different task scopes;
+- specialized child definitions;
+- dynamically constrained worker profiles.
+
+Examples:
+
+```text
+Developer Manager
+├── run_backend_001
+├── run_frontend_002
+└── run_tests_003
+```
+
+Workers receive only the context and permissions needed for their assigned work.
+
+A worker cannot recursively create unlimited workers.
+
+Any further delegation must follow the configured delegation policy.
+
+---
+
+# 17. Parallelism
+
+Multiple Agent Runs, including multiple runs of the same role, may execute in parallel when tasks are independent.
+
+Example:
+
+```text
+              Developer Manager
+                /      |      \
+               /       |       \
+        Backend      Frontend      Docs
+           |            |           |
+           +------------+-----------+
+                        |
+                        v
+                     Review
+```
+
+Parallelism is controlled by:
+
+- task dependencies;
+- concurrency limits;
+- API budget;
+- hardware capacity;
+- model rate limits;
+- policy;
+- workspace settings.
+
+The runtime must avoid parallel work on conflicting mutable resources unless explicitly coordinated.
+
+---
+
+# 18. Domain-manager principle
+
+The Developer pattern may later apply to other domains.
+
+Examples:
+
+```text
+Commercial Manager
+├── Prospect Research Worker
+├── Offer Draft Worker
+└── Follow-up Worker
+
+Legal Manager
+├── Source Research Worker
+├── Contract Review Worker
+└── Compliance Worker
+```
+
+However, Novalton OS should not create deep hierarchies merely because it can.
+
+Hierarchy must exist only when delegation improves quality, speed, or specialization enough to justify complexity and cost.
+
+---
+
+# 19. Operational learning
+
+Agents may benefit from lessons learned from prior executions.
+
+This does **not** mean allowing an agent to silently rewrite its own prompt or identity.
+
+Instead, Novalton OS stores versioned **Operational Lessons**.
+
+Example:
+
+```yaml
+lesson_id: lesson_dev_042
+agent_id: developer.default
+scope: project
+statement: >
+  When changing database models in this project, verify that a matching migration
+  is included before marking the task complete.
+origin:
+  run_id: run_184
+  detected_by: qa.default
+confidence: high
+status: active
+created_at: ...
+```
+
+Lessons may originate from:
+
+- QA findings;
+- user corrections;
+- failed runs;
+- successful patterns;
+- post-run evaluations;
+- repeated errors.
+
+Operational lessons must have provenance and lifecycle states such as:
+
+```text
+PROPOSED
+VALIDATED
+ACTIVE
+SUPERSEDED
+REJECTED
+ARCHIVED
+```
+
+Important or broad lessons may require user or system validation before becoming active.
+
+Lessons should be retrievable based on scope:
+
+```text
+GLOBAL AGENT
+WORKSPACE
+PROJECT
+CLIENT
+TASK TYPE
+```
+
+The objective is to let Novalton OS improve over time without creating uncontrolled self-modification.
+
+---
+
+# 20. Agent lifecycle
+
+Each Agent Run has an explicit lifecycle.
 
 ```text
 CREATED
    |
-   v
 QUEUED
    |
-   v
 PREPARING_CONTEXT
    |
-   v
+MODEL_SELECTION
+   |
 RUNNING
    |
-   +----> WAITING_FOR_TOOL
+   +--> WAITING_FOR_TOOL
+   +--> WAITING_FOR_APPROVAL
+   +--> WAITING_FOR_INPUT
+   +--> WAITING_FOR_CHILDREN
    |
-   +----> WAITING_FOR_APPROVAL
-   |
-   +----> WAITING_FOR_INPUT
-   |
-   v
 COMPLETED
 ```
 
-Failure branches:
+Failure/terminal branches:
 
 ```text
 FAILED
@@ -464,107 +804,70 @@ TIMED_OUT
 BLOCKED_BY_POLICY
 ```
 
-This lifecycle is essential for the real-time interface.
-
-The UI should be able to display exactly what stage an agent is in without exposing hidden reasoning.
+This lifecycle powers the real-time UI.
 
 ---
 
-# 14. Real-time observability
+# 21. Real-time observability
 
-A core Novalton OS experience is watching agents work in real time.
-
-The runtime should therefore emit structured events.
-
-Examples:
+The runtime emits structured events such as:
 
 ```text
-agent.started
-agent.context_prepared
-agent.model_selected
-agent.tool_requested
-agent.tool_started
-agent.tool_completed
-agent.awaiting_approval
-agent.resumed
-agent.completed
-agent.failed
+agent_run.created
+agent_run.started
+agent_run.context_prepared
+agent_run.model_selected
+agent_run.delegation_proposed
+agent_run.child_started
+agent_run.tool_requested
+agent_run.tool_started
+agent_run.tool_completed
+agent_run.challenge_raised
+agent_run.awaiting_approval
+agent_run.resumed
+agent_run.completed
+agent_run.failed
 ```
 
-Example UI timeline:
+Example UI:
 
 ```text
-[17:02:01] Developer started
-[17:02:02] Qwen selected
-[17:02:04] Reading 5 project files
-[17:02:08] Analysis completed
-[17:02:09] Proposed modification to auth.py
-[17:02:09] Waiting for approval
+Developer Manager
+├─ Backend Worker      ███████░ 78%
+├─ Frontend Worker     ████░░░░ 43%
+└─ QA Worker           waiting
+
+Latest event:
+Backend Worker proposed database migration
 ```
 
-The system must expose operational state, not private chain-of-thought.
+The system exposes operational state and outputs, not private chain-of-thought.
 
 ---
 
-# 15. Agent-to-agent communication
+# 22. Agent-to-agent communication
 
-Direct uncontrolled communication between agents is discouraged.
-
-The default pattern is:
+The default pattern remains orchestrated communication:
 
 ```text
 Agent A
    |
-   v
 Structured Result
    |
-   v
-Orchestrator
+Orchestrator / Parent Manager
    |
-   v
 Agent B
 ```
 
-The orchestrator may pass all or part of Agent A's result to Agent B if relevant.
+Within an approved domain team, a parent manager may aggregate child outputs directly, but all exchanges remain structured, logged, and scoped.
 
-Direct agent-to-agent messaging may be introduced later for tightly scoped workflows, but it must remain observable, permissioned, and bounded.
-
----
-
-# 16. Delegation
-
-By default, specialized agents do **not** independently spawn unlimited subagents.
-
-Delegation is controlled by the orchestrator.
-
-A future agent may request delegation:
-
-```json
-{
-  "delegation_request": {
-    "capability": "security_review",
-    "reason": "Authentication changes require specialist review"
-  }
-}
-```
-
-The orchestrator decides whether to:
-
-- assign another existing agent;
-- select a specialist model;
-- reject the delegation;
-- ask the user;
-- continue without delegation.
-
-This avoids recursive agent explosions and uncontrolled cost.
+Free-form uncontrolled conversations between agents are not the default architecture.
 
 ---
 
-# 17. Error handling
+# 23. Error handling
 
-An agent must classify failures rather than returning vague errors.
-
-Suggested categories:
+Suggested error categories:
 
 ```text
 MODEL_ERROR
@@ -577,45 +880,56 @@ SOURCE_UNAVAILABLE
 BUDGET_EXCEEDED
 TIMEOUT
 OUTPUT_VALIDATION_FAILED
+CHILD_RUN_FAILED
+CONFLICTING_WRITES
 UNKNOWN_ERROR
 ```
 
-The orchestrator may decide whether to retry, change model, change tool, request user input, or stop.
+The responsible manager or Orchestrator decides whether to:
 
-Retries should be bounded.
+- retry;
+- switch model;
+- switch tool;
+- reduce scope;
+- reassign work;
+- request user input;
+- stop.
+
+Retries must be bounded.
 
 ---
 
-# 18. Confidence and uncertainty
+# 24. Confidence, uncertainty and assumptions
 
-Agent outputs should distinguish confidence from certainty.
+Agent outputs should represent:
 
-Possible representation:
+- known information;
+- likely conclusions;
+- uncertainty;
+- conflicting evidence;
+- unknowns;
+- assumptions.
+
+Example:
 
 ```yaml
 confidence:
   level: medium
-  score: 0.68
-  reason: "Two official sources agree, but one implementation detail is undocumented"
+  reason: "Two primary sources agree, but one implementation detail is undocumented"
+
+assumptions:
+  - "PostgreSQL is available in the target environment"
 ```
 
-Numerical confidence must not be presented as mathematically precise truth unless it is actually calibrated.
-
-The most important requirement is semantic clarity:
-
-- known;
-- likely;
-- uncertain;
-- conflicting;
-- unknown.
+Numerical confidence scores must not be presented as mathematically precise truth unless they are actually calibrated.
 
 ---
 
-# 19. Sources and provenance
+# 25. Sources and provenance
 
-Agents performing research should preserve source provenance.
+Research agents preserve source provenance.
 
-A source record may contain:
+Example:
 
 ```json
 {
@@ -631,22 +945,13 @@ A source record may contain:
 
 Derived claims should reference source IDs where practical.
 
-This is especially important for:
-
-- legal research;
-- finance;
-- security;
-- compliance;
-- technical specifications;
-- business intelligence.
+This is particularly important for legal, financial, security, compliance, technical, and business-intelligence work.
 
 ---
 
-# 20. Agent versioning
+# 26. Versioning
 
-Agent definitions will change over time.
-
-Historical runs must preserve which version was used.
+Historical runs must preserve the exact execution configuration.
 
 Example:
 
@@ -656,25 +961,28 @@ agent_version: 3
 prompt_version: 5
 policy_version: 2
 model_route_version: 4
+lesson_set_version: 7
 ```
 
-This makes debugging and audit possible when behavior changes.
+This enables debugging, audit, and behavioral comparison.
 
 ---
 
-# 21. Prompts
+# 27. Prompts
 
-Prompts are implementation details of an agent, not its identity.
+Prompts are implementation details, not agent identity.
 
-An agent may use multiple prompt layers:
+Prompt composition may include:
 
 ```text
 Platform rules
-  + Workspace rules
-  + Agent mission
-  + Task instructions
-  + Retrieved memory/context
-  + Tool descriptions
++ Workspace rules
++ Agent mission
++ Operational lessons
++ Task instructions
++ Retrieved memory/context
++ Prior structured results
++ Tool descriptions
 ```
 
 Prompts should be versioned.
@@ -683,86 +991,49 @@ Secrets must never be embedded directly in prompts.
 
 ---
 
-# 22. Initial built-in agents
+# 28. Initial specialized agents
 
-## 22.1 Orchestrator
+## 28.1 Project Manager
 
-Mission:
+Converts objectives into projects, tasks, dependencies, priorities, milestones, and progress reports.
 
-> Understand user intent, construct or adapt workflows, choose capabilities, route tasks, inspect results, enforce approval flow, and produce final synthesis.
+## 28.2 Developer Manager
 
-Important limitation:
+Owns technical execution strategy inside approved development tasks.
 
-The Orchestrator coordinates permissions but does not bypass the Policy Engine.
+It may propose worker decomposition, implementation approach, tool usage, and sequencing.
 
-## 22.2 Project Manager
+Its delegation plans are subject to Orchestrator and Policy Engine control.
 
-Mission:
+## 28.3 Tester / QA
 
-> Convert objectives into structured projects, tasks, dependencies, priorities, milestones, and progress updates.
+Independently verifies behavior, identifies regressions, designs tests, challenges developer assumptions, and may raise workflow challenges.
 
-Primary capabilities:
+QA must not blindly trust Developer conclusions.
 
-- planning;
-- backlog creation;
-- dependency analysis;
-- prioritization;
-- project status synthesis.
+## 28.4 Legal Research Assistant
 
-## 22.3 Developer
+Researches and summarizes legal information from reliable sources, identifies uncertainty and risk, and prepares material for human review.
 
-Mission:
+It is not a substitute for a qualified lawyer.
 
-> Design, write, modify, review, and document software within approved project scope.
+## 28.5 Outreach / Commercial Assistant
 
-Primary capabilities:
+Researches prospects, prepares outreach, organizes sales context, drafts offers, and proposes follow-up actions.
 
-- architecture;
-- coding;
-- debugging;
-- code review;
-- Git;
-- testing support.
+External communication remains governed by policy.
 
-## 22.4 Tester / QA
+## 28.6 Personal Assistant
 
-Mission:
-
-> Independently verify software behavior, identify regressions, design tests, and challenge developer assumptions.
-
-A key rule is that QA should not blindly trust the Developer Agent's conclusions.
-
-## 22.5 Legal Research Assistant
-
-Mission:
-
-> Research and summarize legal information from reliable sources, identify uncertainty and risk, and prepare material for human review.
-
-It must never present itself as a substitute for a qualified lawyer.
-
-## 22.6 Outreach / Commercial Assistant
-
-Mission:
-
-> Research prospects, prepare outreach material, organize sales context, draft proposals, and recommend follow-up actions.
-
-External sending actions remain subject to policy.
-
-## 22.7 Personal Assistant
-
-Mission:
-
-> Help the user organize tasks, information, reminders, projects, communications, and daily workflow across Novalton OS.
-
-Its access must remain tightly scoped because it may touch broad personal context.
+Maintains broad situational awareness through synthesized personal context while using narrow scoped permissions for raw systems and sensitive data.
 
 ---
 
-# 23. Future agent builder
+# 29. Future Agent Builder
 
-Novalton OS should eventually allow an authorized user to create an agent without editing code.
+Authorized users should eventually be able to create agents without editing code.
 
-Conceptual form:
+Example:
 
 ```text
 Name: Security Reviewer
@@ -780,133 +1051,83 @@ Tools:
 Memory:
   Project only
 
+Delegation:
+  Maximum workers: 0
+
 Model policy:
   Prefer strong reasoning
-  Max cost/run: 0.10 EUR
+  Prefer low cost
 ```
 
-Custom agents must use the same Policy Engine and runtime as built-in agents.
+Custom agents use the same Policy Engine and runtime as built-in agents.
 
 No custom agent receives unrestricted access by default.
 
 ---
 
-# 24. Example complete agent definition
+# 30. Invariants
 
-```yaml
-id: developer.default
-name: Developer
-version: 1
-status: enabled
-category: engineering
-
-mission: >
-  Design, implement, review, and document software changes inside approved
-  projects while respecting project constraints, coding standards, security
-  policies, and tool permissions.
-
-capabilities:
-  - software_architecture
-  - python
-  - typescript
-  - fastapi
-  - nextjs
-  - debugging
-  - testing
-  - git
-
-permissions:
-  filesystem:
-    read: allow
-    write: require_policy_check
-    delete: deny
-  git:
-    read: allow
-    commit: require_policy_check
-    push: require_confirmation
-  shell:
-    execute: require_policy_check
-    destructive: deny
-  email:
-    read: deny
-    send: deny
-
-memory_scope:
-  read:
-    - project
-    - task
-  write:
-    - project
-    - task
-
-model_policy:
-  required:
-    - structured_output
-    - tool_use
-  preferred:
-    reasoning: high
-    coding: high
-    cost: low
-  allow_local: true
-  allow_cloud: true
-  max_cost_per_run_eur: 0.05
-
-output_schema: agent_result.v1
-```
-
----
-
-# 25. Invariants
-
-The following rules should remain true across all agent implementations:
+The following rules apply across all implementations:
 
 1. An agent is not tied to one model.
-2. An agent cannot grant itself new permissions.
-3. An agent cannot bypass the Policy Engine.
-4. An agent cannot silently expand task scope.
-5. An agent result must have a known status.
-6. Significant actions must be auditable.
+2. The Orchestrator is a core system component, not a normal agent.
+3. Every execution is an isolated Agent Run.
+4. An agent cannot grant itself new permissions.
+5. An agent cannot bypass the Policy Engine.
+6. An agent cannot silently expand task scope.
 7. Tool use must be permission-checked.
 8. Memory access must be scoped.
-9. Agent runs must be observable in real time.
-10. Failures and uncertainty must be representable.
-11. Historical runs must preserve agent/model/policy versions.
-12. The orchestrator retains control over inter-agent workflow by default.
+9. Agent Runs must be observable in real time.
+10. Multiple independent Agent Runs may execute concurrently.
+11. Domain managers may propose bounded delegation plans.
+12. The Orchestrator may approve, modify, reject, or escalate delegation plans.
+13. Worker agents cannot recursively create unlimited workers.
+14. Agents may challenge workflow continuation.
+15. Significant challenges must be explicitly reconsidered by the Orchestrator.
+16. Assumptions must not be silently represented as facts.
+17. Operational learning must be versioned and traceable.
+18. Historical runs preserve agent/model/policy/lesson versions.
+19. The Personal Assistant has broad synthesized context but narrow direct permissions.
+20. The Model Router normally seeks the least expensive sufficiently capable model.
 
 ---
 
-# 26. Open design questions
+# 31. Open design questions
 
-The following details should be resolved in later specifications:
+The following details remain for later specifications:
 
-- exact JSON schemas for agents and results;
-- whether agent definitions live in PostgreSQL, version-controlled YAML, or both;
-- how capability matching is scored;
-- how model quality history influences routing;
-- exact approval token/scope format;
-- sandboxing strategy for code execution;
-- agent concurrency limits;
-- per-agent token/cost budgets;
-- whether long-running agents can checkpoint and resume;
-- how custom agents are signed/trusted in a future plugin ecosystem.
+- exact JSON schemas;
+- database representation of Agent Definitions and Agent Runs;
+- capability matching algorithm;
+- model performance scoring;
+- exact delegation depth and worker limits;
+- sandboxing for code execution;
+- shared-file locking between parallel workers;
+- lesson validation and decay;
+- how general personal context is generated and refreshed;
+- exact challenge-to-policy escalation rules;
+- long-running run checkpoints;
+- custom-agent trust model.
 
 ---
 
-# 27. Next document
+# 32. Next document
 
-The next specification should define the **Task and Workflow Model**.
+The next specification is `02-task-workflow-model.md`.
 
-That document must answer:
+It must define:
 
-- what a task is;
-- what a workflow is;
-- how dependencies work;
-- how plans are approved;
-- how workflows adapt after an agent result;
-- what happens when the orchestrator wants to add a new step;
-- how cancellation and rollback work;
-- how real-time progress is represented;
-- how retries and fallbacks work;
-- how workflow state survives restart.
-
-This is the next critical layer between the user, orchestrator, agents, and Policy Engine.
+- tasks;
+- workflow plans;
+- dependencies;
+- user approval scope;
+- adaptive continuation;
+- domain-manager delegation;
+- parallel execution;
+- challenge handling;
+- retries and fallback;
+- cancellation and rollback;
+- persisted workflow state;
+- real-time progress;
+- budget boundaries;
+- what happens when a new unapproved step becomes necessary.
