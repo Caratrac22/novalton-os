@@ -1,6 +1,6 @@
 # Novalton OS
 
-Novalton OS is an AI-native operating system foundation for coordinating governed, specialized AI capabilities. This repository currently contains only the I-001 monorepo scaffold; agents, authentication, memory, policy, and orchestration are intentionally out of scope.
+Novalton OS is an AI-native operating system foundation for coordinating governed, specialized AI capabilities. This repository currently contains the initial monorepo and local development infrastructure; agents, authentication, memory, policy, and orchestration are intentionally out of scope.
 
 ## Prerequisites
 
@@ -10,22 +10,32 @@ Novalton OS is an AI-native operating system foundation for coordinating governe
 
 ## Configuration
 
-Copy the development environment template and keep local values out of Git:
+Create the ignored local environment file from the safe development template:
 
 ```bash
-cp .env.example .env
+make setup-env
 ```
 
-The defaults are suitable for the development containers. No provider credentials are required for this scaffold.
+The command is repeatable and never overwrites an existing `.env`. The documented defaults bind infrastructure ports to localhost and are intended only for local development. No provider credentials are required.
 
 ## Start infrastructure
 
 ```bash
-docker compose --env-file .env -f infra/compose.yaml up -d
-docker compose --env-file .env -f infra/compose.yaml ps
+make infra-config
+make infra-up
+make infra-status
 ```
 
-PostgreSQL, Redis, and Qdrant use named volumes and expose development-only ports on localhost.
+`make infra-up` waits until PostgreSQL, Redis, and Qdrant report healthy. They use named volumes and predictable localhost ports:
+
+| Service | Local endpoint | Default port |
+|---|---|---:|
+| PostgreSQL | `localhost` | `5432` |
+| Redis | `localhost` | `6379` |
+| Qdrant HTTP | <http://localhost:6333> | `6333` |
+| Qdrant gRPC | `localhost` | `6334` |
+
+Ports and development credentials can be changed in `.env`. Docker Compose remains the source of truth in `infra/compose.yaml`.
 
 ## Run the API
 
@@ -46,15 +56,32 @@ npm run dev
 
 The web app is available at <http://localhost:3000>.
 
-## Verification
+## Development checks
+
+Run each application check set independently:
 
 ```bash
-npm run lint
-npm run typecheck
-apps/api/.venv/bin/ruff check apps/api
-apps/api/.venv/bin/pytest apps/api
-docker compose --env-file .env.example -f infra/compose.yaml config
+make backend-check
+make frontend-check
 ```
+
+`backend-check` runs Ruff linting, Ruff formatting validation, and pytest. `frontend-check` runs ESLint, TypeScript checking, and a production Next.js build.
+
+Run the complete deterministic local verification set, including Compose validation:
+
+```bash
+make verify
+```
+
+## Stop infrastructure
+
+```bash
+make infra-down
+```
+
+This stops and removes the development containers and network while preserving the named PostgreSQL, Redis, and Qdrant volumes. A later `make infra-up` reuses the stored development data.
+
+Run `make help` to list the supported developer commands.
 
 ## Repository layout
 
