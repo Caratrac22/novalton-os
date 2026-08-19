@@ -1,0 +1,1 @@
+{"name":"novalton-os","version":"0.1.0","private":true,"workspaces":["apps/web"],"scripts":{"dev":"npm run dev --workspace @novalton/web","build":"npm run build --workspace @novalton/web","lint":"npm run lint --workspace @novalton/web","typecheck":"npm run typecheck --workspace @novalton/web"},"engines":{"node":">=22"}}
