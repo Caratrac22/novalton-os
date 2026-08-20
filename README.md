@@ -62,7 +62,8 @@ make db-current
 
 `make db-check` runs the full upgrade/current/downgrade/upgrade smoke flow. Revision
 `20260820_0002` adds the I-005 `tenants` and tenant-scoped `workspaces` tables after the empty
-I-004 baseline. Revision `20260820_0003` adds only the I-006 workspace-scoped `projects` table.
+I-004 baseline. Revision `20260820_0003` adds the I-006 workspace-scoped `projects` table, and
+revision `20260820_0004` adds only the I-007 project-scoped `tasks` table.
 
 Create the deterministic local development scope explicitly after migrating:
 
@@ -91,6 +92,13 @@ Every operation first verifies that the workspace belongs to the supplied tenant
 and mutations then retain workspace scope, and inaccessible or unknown scope combinations return
 the same not-found response. Lists use stable creation-time/UUID ordering and accept `limit`
 (default 50, maximum 100) plus `offset`.
+
+Tasks use the same explicit scope with `/projects/{project_id}/tasks` collection and
+`/projects/{project_id}/tasks/{task_id}` item routes for POST, GET, PATCH, and DELETE. Every task
+operation validates tenant, workspace, and project ownership before querying tasks, and every
+task query retains `project_id` scope. Task states are `BACKLOG`, `READY`, `IN_PROGRESS`,
+`BLOCKED`, `REVIEW`, `DONE`, and `CANCELLED`; I-007 validates values without imposing workflow
+transition rules. Lists use the Projects bounds and ordering and optionally accept `status`.
 
 ## Run the web app
 

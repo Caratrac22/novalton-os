@@ -11,6 +11,7 @@ from novalton_api.core.database import Base
 from novalton_api.core.models import TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
+    from novalton_api.modules.tasks.models import Task
     from novalton_api.modules.workspaces.models import Workspace
 
 
@@ -47,3 +48,4 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")
 
     workspace: Mapped["Workspace"] = relationship(back_populates="projects")
+    tasks: Mapped[list["Task"]] = relationship(back_populates="project", passive_deletes=True)

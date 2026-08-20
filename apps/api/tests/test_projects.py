@@ -12,6 +12,7 @@ from novalton_api.core.config import Settings
 from novalton_api.core.database import Base, Database
 from novalton_api.main import create_app
 from novalton_api.modules.projects.models import Project
+from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.workspaces.models import Workspace
 
@@ -34,6 +35,7 @@ async def _reset_and_seed() -> tuple[Scope, Scope, Scope]:
     database = Database.from_settings(Settings())
     try:
         async with database.session_factory.begin() as session:
+            await session.execute(delete(Task))
             await session.execute(delete(Project))
             await session.execute(delete(Workspace))
             await session.execute(delete(Tenant))
@@ -66,6 +68,7 @@ async def _reset() -> None:
     database = Database.from_settings(Settings())
     try:
         async with database.session_factory.begin() as session:
+            await session.execute(delete(Task))
             await session.execute(delete(Project))
             await session.execute(delete(Workspace))
             await session.execute(delete(Tenant))
@@ -97,7 +100,7 @@ def _create(api: ApiContext, scope: Scope, *, slug: str = "alpha", name: str = "
 
 
 def test_project_metadata_has_workspace_scope_and_constraints() -> None:
-    assert set(Base.metadata.tables) == {"tenants", "workspaces", "projects"}
+    assert set(Base.metadata.tables) == {"tenants", "workspaces", "projects", "tasks"}
     table = Base.metadata.tables["projects"]
     names = {constraint.name for constraint in table.constraints}
     assert table.c.id.primary_key
