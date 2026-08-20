@@ -23,6 +23,7 @@ class Base(DeclarativeBase):
 
 
 # Import application models after Base exists so Alembic sees their tables.
+from novalton_api.modules.agents.models import AgentDefinition, AgentRun  # noqa: E402, F401
 from novalton_api.modules.approvals.models import ApprovalRequest  # noqa: E402, F401
 from novalton_api.modules.audit.models import AuditRecord  # noqa: E402, F401
 from novalton_api.modules.model_catalog.models import ModelDefinition  # noqa: E402, F401

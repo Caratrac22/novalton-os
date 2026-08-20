@@ -16,6 +16,7 @@ from novalton_api.core.middleware import CorrelationIdMiddleware
 from novalton_api.infrastructure.providers.catalog import CatalogSourceRegistry
 from novalton_api.infrastructure.providers.openai_compatible import OpenAICompatibleConfig
 from novalton_api.infrastructure.providers.openrouter_catalog import OpenRouterCatalogSource
+from novalton_api.modules.agents.routes import definitions_router, runs_router
 from novalton_api.modules.approvals.routes import router as approvals_router
 from novalton_api.modules.model_catalog.routes import router as model_catalog_router
 from novalton_api.modules.model_router.routes import router as model_router_router
@@ -73,6 +74,8 @@ def create_app(*, catalog_sources: CatalogSourceRegistry | None = None) -> FastA
     application.include_router(tasks_router, prefix="/api/v1")
     application.include_router(runtime_events_router, prefix="/api/v1")
     application.include_router(approvals_router, prefix="/api/v1")
+    application.include_router(definitions_router, prefix="/api/v1")
+    application.include_router(runs_router, prefix="/api/v1")
     application.include_router(policy_router, prefix="/api/v1")
     application.include_router(model_catalog_router, prefix="/api/v1")
     application.include_router(model_router_router, prefix="/api/v1")
