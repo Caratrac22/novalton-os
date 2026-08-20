@@ -5,7 +5,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 
-def test_alembic_configuration_loads_i009_after_i008() -> None:
+def test_alembic_configuration_loads_i013_after_i009() -> None:
     api_root = Path(__file__).parents[1]
     config = Config(api_root / "alembic.ini")
     scripts = ScriptDirectory.from_config(config)
@@ -14,19 +14,19 @@ def test_alembic_configuration_loads_i009_after_i008() -> None:
     revision = scripts.get_revision(head)
     baseline = scripts.get_revision("20260820_0001")
 
-    assert head == "20260820_0006"
+    assert head == "20260820_0007"
     assert revision is not None
-    assert revision.down_revision == "20260820_0005"
+    assert revision.down_revision == "20260820_0006"
     assert baseline is not None
     assert baseline.down_revision is None
 
 
-def test_postgres_migration_downgrades_to_i008_and_reupgrades() -> None:
+def test_postgres_migration_downgrades_to_i009_and_reupgrades() -> None:
     api_root = Path(__file__).parents[1]
     config = Config(api_root / "alembic.ini")
 
     command.upgrade(config, "head")
     try:
-        command.downgrade(config, "20260820_0005")
+        command.downgrade(config, "20260820_0006")
     finally:
         command.upgrade(config, "head")
