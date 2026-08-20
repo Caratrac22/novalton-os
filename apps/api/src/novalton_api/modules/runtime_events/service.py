@@ -212,3 +212,51 @@ async def list_recent_events(
     return await repository.list_recent_events(
         session, tenant_id=tenant_id, workspace_id=workspace_id, limit=limit
     )
+
+
+async def validate_stream_scope(
+    session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID, cursor_id: UUID | None
+) -> RuntimeEvent | None:
+    """Validate a stream scope and resolve a cursor without cross-scope disclosure."""
+    workspace = await get_workspace_by_tenant_and_id(
+        session, tenant_id=tenant_id, workspace_id=workspace_id
+    )
+    if workspace is None:
+        raise _not_found()
+    if cursor_id is None:
+        return None
+    cursor = await repository.get_scoped_event(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        event_id=cursor_id,
+    )
+    if cursor is None:
+        raise _not_found()
+    return cursor
+
+
+async def list_stream_batch(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    cursor: RuntimeEvent | None,
+    limit: int,
+) -> list[RuntimeEvent]:
+    """Read one bounded, deterministic stream batch within a validated scope."""
+    if not 1 <= limit <= 100:
+        raise _invalid_event("Runtime event retrieval limit must be between 1 and 100")
+    if cursor is None:
+        events = await repository.list_recent_events(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, limit=limit
+        )
+        return list(reversed(events))
+    return await repository.list_events_after(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        occurred_at=cursor.occurred_at,
+        event_id=cursor.id,
+        limit=limit,
+    )
