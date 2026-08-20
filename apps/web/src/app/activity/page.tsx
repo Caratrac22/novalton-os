@@ -1,3 +1,4 @@
-import type { Metadata } from "next"; import { PlaceholderPage } from "@/components/placeholder-page";
+import type { Metadata } from "next";
+import { ActivityFeed } from "@/components/activity-feed";
 export const metadata: Metadata = { title: "Activity" };
-export default function ActivityPage() { return <PlaceholderPage eyebrow="Observability" title="Activity" description="The scoped runtime event stream will provide the operational timeline in I-012." />; }
+export default function ActivityPage() { return <div className="page-stack"><section className="page-heading" aria-labelledby="activity-title"><p className="eyebrow">Observability</p><div><h1 id="activity-title">Activity</h1><p>A live, bounded view of operational RuntimeEvents in the configured workspace.</p></div></section><ActivityFeed /></div>; }

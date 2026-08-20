@@ -119,15 +119,19 @@ npm run dev
 
 The web app is available at <http://localhost:3000>.
 
-The I-011 application shell uses `NOVALTON_API_BASE_URL` (default
+The application shell uses `NOVALTON_API_BASE_URL` (default
 `http://127.0.0.1:8000`) only in the Next.js server process. The overview performs bounded,
 uncached server-side requests to the API liveness and PostgreSQL dependency-health endpoints and
 shows a sanitized unavailable state when the backend cannot be reached. Do not rename this setting
 with a `NEXT_PUBLIC_` prefix: browser code does not need the backend origin or any credentials.
 
-The shell routes are `/` (Overview), `/projects`, `/tasks`, and `/activity`. The latter three are
-intentional navigation placeholders; their data views, mutations, and SSE-backed activity feed are
-deferred to I-012.
+`NOVALTON_TENANT_ID` and `NOVALTON_WORKSPACE_ID` define the single explicit frontend scope in the
+same server-only configuration boundary. Their development defaults match the deterministic local
+bootstrap UUIDs. Projects are fetched once with a 100-item bound. Tasks fetch that same bounded
+project list and only the selected project's bounded 100-item task list. Activity uses native
+`EventSource` against a same-origin Next.js route; the route adds the server-only backend/scope and
+forwards the browser's standard `Last-Event-ID` header so reconnects resume through the I-010 cursor.
+No activity is persisted in browser storage.
 
 ## Development checks
 
