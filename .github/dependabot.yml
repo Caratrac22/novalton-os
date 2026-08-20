@@ -1,0 +1,36 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /apps/api
+    schedule:
+      interval: weekly
+    groups:
+      python-maintenance:
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      npm-maintenance:
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: docker
+    directory: /infra
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: postgres
+        versions: [">=18"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

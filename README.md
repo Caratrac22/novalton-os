@@ -4,8 +4,8 @@ Novalton OS is an AI-native operating system foundation for coordinating governe
 
 ## Prerequisites
 
-- Python 3.12 or newer
-- Node.js 22 or newer and npm 10 or newer
+- Python 3.13.x (3.13.15 is the pinned CI/development baseline; Python 3.14 is not yet supported)
+- Node.js 24.x LTS (24.19.0 is the pinned CI/development baseline) with its bundled npm
 - Docker with Docker Compose v2
 
 ## Configuration
@@ -69,9 +69,13 @@ make backend-check
 make frontend-check
 ```
 
-`backend-check` runs Ruff linting, Ruff formatting validation, and pytest. `frontend-check` runs ESLint, TypeScript checking, and a production Next.js build.
+`backend-check` runs Ruff linting, Ruff formatting validation, and pytest. `frontend-check` runs ESLint, TypeScript checking, and a production Next.js build. Audit installed Python dependencies and the npm lockfile with:
 
-Run the complete deterministic local verification set, including Compose validation:
+```bash
+make dependency-audit
+```
+
+Run the complete local verification set, including Compose validation and dependency vulnerability audits:
 
 ```bash
 make verify

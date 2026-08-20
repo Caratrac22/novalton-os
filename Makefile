@@ -7,7 +7,7 @@ API_PYTHON := $(API_VENV)/bin/python
 API_RUFF := $(API_VENV)/bin/ruff
 API_PYTEST := $(API_VENV)/bin/pytest
 
-.PHONY: help setup-env infra-config infra-up infra-down infra-status backend-check frontend-check verify
+.PHONY: help setup-env infra-config infra-up infra-down infra-status backend-check frontend-check dependency-audit verify
 
 help:
 	@echo "Novalton OS development commands"
@@ -18,6 +18,7 @@ help:
 	@echo "  make infra-down      Stop infrastructure while preserving named volumes"
 	@echo "  make backend-check   Run backend lint, format check, and tests"
 	@echo "  make frontend-check  Run frontend lint, typecheck, and production build"
+	@echo "  make dependency-audit Audit Python and npm dependencies for vulnerabilities"
 	@echo "  make verify          Run Compose validation and all application checks"
 
 setup-env:
@@ -54,4 +55,8 @@ frontend-check:
 	npm run typecheck
 	npm run build
 
-verify: infra-config backend-check frontend-check
+dependency-audit:
+	$(API_PYTHON) -m pip_audit
+	npm audit --audit-level=high
+
+verify: infra-config backend-check frontend-check dependency-audit

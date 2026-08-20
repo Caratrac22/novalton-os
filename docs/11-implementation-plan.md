@@ -155,12 +155,12 @@ The exact naming may evolve, but business logic must not be placed directly insi
 ## Backend
 
 ```text
-Python 3.12+
+Python 3.13.x (supported range: >=3.13,<3.14)
 FastAPI
 Pydantic v2
 SQLAlchemy 2.x
 Alembic
-PostgreSQL
+PostgreSQL 17.x
 Redis
 Qdrant
 httpx
@@ -174,6 +174,7 @@ Async database access should be used where it materially simplifies concurrent w
 ## Frontend
 
 ```text
+Node.js 24.x LTS
 Next.js
 React
 TypeScript
@@ -190,7 +191,7 @@ Three.js / React Three Fiber should not be installed until the Command Center fu
 V1 development infrastructure:
 
 ```text
-PostgreSQL
+PostgreSQL 17.x
 Redis
 Qdrant
 ```
