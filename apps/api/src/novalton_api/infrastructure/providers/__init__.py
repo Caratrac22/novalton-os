@@ -1,7 +1,9 @@
 """Provider-neutral model invocation boundary."""
 
 from novalton_api.infrastructure.providers.base import ModelProvider
+from novalton_api.infrastructure.providers.catalog import CatalogSourceRegistry, ModelCatalogSource
 from novalton_api.infrastructure.providers.contracts import (
+    CatalogModel,
     GenerationRequest,
     GenerationResult,
     Message,
@@ -15,6 +17,9 @@ __all__ = [
     "Message",
     "MessageRole",
     "ModelProvider",
+    "CatalogModel",
+    "CatalogSourceRegistry",
+    "ModelCatalogSource",
     "ProviderError",
     "ProviderFailure",
 ]

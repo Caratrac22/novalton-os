@@ -1,13 +1,22 @@
 """Validated, environment-backed application configuration."""
 
 import logging
+import re
 from functools import lru_cache
 from os import environ
 from typing import ClassVar, Literal, Self
 from urllib.parse import urlparse
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from novalton_api.infrastructure.providers.urls import validate_provider_base_url
 
@@ -28,6 +37,11 @@ class Settings(BaseModel):
     qdrant_url: str = "http://localhost:6333"
     openai_compatible_base_url: str | None = None
     openai_compatible_api_key: SecretStr | None = None
+    openai_compatible_provider_id: str = Field(
+        default="openrouter", min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
+    )
+    openrouter_catalog_enabled: bool = False
+    model_catalog_free_allowlist: tuple[str, ...] = ()
     provider_connect_timeout_seconds: float = Field(default=5.0, ge=0.1, le=60.0)
     provider_read_timeout_seconds: float = Field(default=30.0, ge=0.1, le=300.0)
     provider_write_timeout_seconds: float = Field(default=10.0, ge=0.1, le=60.0)
@@ -48,6 +62,9 @@ class Settings(BaseModel):
         "qdrant_url": "QDRANT_URL",
         "openai_compatible_base_url": "NOVALTON_OPENAI_COMPATIBLE_BASE_URL",
         "openai_compatible_api_key": "NOVALTON_OPENAI_COMPATIBLE_API_KEY",
+        "openai_compatible_provider_id": "NOVALTON_OPENAI_COMPATIBLE_PROVIDER_ID",
+        "openrouter_catalog_enabled": "NOVALTON_OPENROUTER_CATALOG_ENABLED",
+        "model_catalog_free_allowlist": "NOVALTON_MODEL_CATALOG_FREE_ALLOWLIST",
         "provider_connect_timeout_seconds": "NOVALTON_PROVIDER_CONNECT_TIMEOUT_SECONDS",
         "provider_read_timeout_seconds": "NOVALTON_PROVIDER_READ_TIMEOUT_SECONDS",
         "provider_write_timeout_seconds": "NOVALTON_PROVIDER_WRITE_TIMEOUT_SECONDS",
@@ -90,6 +107,38 @@ class Settings(BaseModel):
         if value is None:
             return None
         return validate_provider_base_url(value)
+
+    @field_validator("model_catalog_free_allowlist", mode="before")
+    @classmethod
+    def validate_model_catalog_free_allowlist(cls, value: object) -> object:
+        entries = (
+            (
+                tuple(item.strip() for item in value.split(","))
+                if isinstance(value, str) and value
+                else ()
+            )
+            if isinstance(value, str)
+            else value
+        )
+        if not isinstance(entries, tuple) or len(entries) > 32:
+            raise ValueError("model catalog free allowlist must contain at most 32 entries")
+        pattern = re.compile(r"^[a-z][a-z0-9_-]{0,63}::[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
+        if any(not isinstance(item, str) or pattern.fullmatch(item) is None for item in entries):
+            raise ValueError("invalid model catalog free allowlist entry")
+        if len(entries) != len(set(entries)):
+            raise ValueError("duplicate model catalog free allowlist entry")
+        return entries
+
+    @property
+    def model_catalog_free_allowlist_pairs(self) -> frozenset[tuple[str, str]]:
+        """Return explicit exact provider/model pairs; price never affects membership."""
+        return frozenset(tuple(entry.split("::", 1)) for entry in self.model_catalog_free_allowlist)
+
+    @model_validator(mode="after")
+    def validate_catalog_source_configuration(self) -> Self:
+        if self.openrouter_catalog_enabled and self.openai_compatible_base_url is None:
+            raise ValueError("OpenRouter catalog requires a configured provider base URL")
+        return self
 
     @staticmethod
     def _validate_url(value: str, schemes: set[str], label: str) -> str:

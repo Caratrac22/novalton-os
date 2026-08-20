@@ -115,6 +115,7 @@ def test_project_metadata_has_workspace_scope_and_constraints() -> None:
         "runtime_events",
         "audit_records",
         "policy_rules",
+        "model_definitions",
     }
     table = Base.metadata.tables["projects"]
     names = {constraint.name for constraint in table.constraints}

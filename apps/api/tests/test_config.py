@@ -8,6 +8,11 @@ SETTING_VARIABLES = (
     "DATABASE_URL",
     "REDIS_URL",
     "QDRANT_URL",
+    "NOVALTON_OPENAI_COMPATIBLE_BASE_URL",
+    "NOVALTON_OPENAI_COMPATIBLE_API_KEY",
+    "NOVALTON_OPENAI_COMPATIBLE_PROVIDER_ID",
+    "NOVALTON_OPENROUTER_CATALOG_ENABLED",
+    "NOVALTON_MODEL_CATALOG_FREE_ALLOWLIST",
     "NOVALTON_BOOTSTRAP_TENANT_ID",
     "NOVALTON_BOOTSTRAP_TENANT_NAME",
     "NOVALTON_BOOTSTRAP_TENANT_SLUG",
@@ -33,6 +38,29 @@ def test_settings_have_safe_local_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     assert settings.database_url.startswith("postgresql://")
     assert settings.redis_url == "redis://localhost:6379/0"
     assert settings.qdrant_url == "http://localhost:6333"
+    assert settings.openrouter_catalog_enabled is False
+    assert settings.model_catalog_free_allowlist_pairs == set()
+
+
+def test_catalog_source_and_allowlist_require_explicit_valid_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_settings_environment(monkeypatch)
+    monkeypatch.setenv("NOVALTON_OPENROUTER_CATALOG_ENABLED", "true")
+    with pytest.raises(SettingsError):
+        Settings.from_environment()
+
+    monkeypatch.setenv("NOVALTON_OPENAI_COMPATIBLE_BASE_URL", "https://provider.example/v1")
+    monkeypatch.setenv(
+        "NOVALTON_MODEL_CATALOG_FREE_ALLOWLIST",
+        "openrouter::vendor/model-a,openrouter::vendor/model-b",
+    )
+    settings = Settings.from_environment()
+    assert settings.openrouter_catalog_enabled is True
+    assert settings.model_catalog_free_allowlist_pairs == {
+        ("openrouter", "vendor/model-a"),
+        ("openrouter", "vendor/model-b"),
+    }
 
 
 def test_settings_load_supported_environment_values(monkeypatch: pytest.MonkeyPatch) -> None:

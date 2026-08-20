@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -14,6 +15,7 @@ from novalton_api.infrastructure.providers.base import ModelProvider
 from novalton_api.infrastructure.providers.contracts import (
     MAX_MESSAGE_CHARACTERS,
     MAX_REQUEST_CHARACTERS,
+    CatalogModel,
     GenerationRequest,
     GenerationResult,
     Message,
@@ -29,6 +31,7 @@ from novalton_api.infrastructure.providers.openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProvider,
 )
+from novalton_api.infrastructure.providers.openrouter_catalog import OpenRouterCatalogSource
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.infrastructure.providers.urls import validate_provider_base_url
 
@@ -96,6 +99,111 @@ def test_request_and_result_are_strict_bounded_and_serializable() -> None:
             content="answer",
             raw_response={"not": "allowed"},
         )
+
+
+def test_catalog_contract_is_strict_conservative_and_decimal() -> None:
+    model = CatalogModel(
+        provider_model_id="vendor/model-free",
+        display_name="Model Free",
+        input_price_per_million=Decimal("0"),
+        output_price_per_million=Decimal("0.0000000001"),
+        currency="USD",
+    )
+    assert model.reasoning is None
+    assert model.coding is None
+    assert model.tool_calling is None
+    assert model.structured_output is None
+    assert model.vision is None
+    assert model.input_price_per_million == Decimal("0")
+    with pytest.raises(ValidationError):
+        CatalogModel(provider_model_id="bad model", display_name="Bad")
+    with pytest.raises(ValidationError):
+        CatalogModel(provider_model_id="model", display_name="Bad", context_window=0)
+    with pytest.raises(ValidationError):
+        CatalogModel(
+            provider_model_id="model",
+            display_name="Bad",
+            input_price_per_million=Decimal("-1"),
+            currency="USD",
+        )
+    with pytest.raises(ValidationError):
+        CatalogModel(
+            provider_model_id="model",
+            display_name="Bad",
+            input_price_per_million=Decimal("1"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_openrouter_catalog_normalizes_bounded_metadata_without_raw_payload() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == "https://provider.example/v1/models"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "vendor/model-free",
+                        "name": "Vendor Model Free",
+                        "context_length": 131072,
+                        "supported_parameters": ["tools", "response_format"],
+                        "architecture": {"input_modalities": ["text", "image"]},
+                        "pricing": {"prompt": "0", "completion": "0.00000125"},
+                        "raw_secret_metadata": "must-not-survive",
+                    }
+                ]
+            },
+        )
+
+    source = OpenRouterCatalogSource(config(), transport=httpx.MockTransport(handler))
+    try:
+        models = await source.list_models()
+    finally:
+        await source.aclose()
+    assert models == [
+        CatalogModel(
+            provider_model_id="vendor/model-free",
+            display_name="Vendor Model Free",
+            context_window=131072,
+            tool_calling=True,
+            structured_output=True,
+            vision=True,
+            input_price_per_million=Decimal("0"),
+            output_price_per_million=Decimal("1.25000000"),
+            currency="USD",
+        )
+    ]
+    assert "raw_secret_metadata" not in repr(models)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "failure"),
+    [
+        (401, ProviderFailure.AUTHENTICATION),
+        (429, ProviderFailure.RATE_LIMIT),
+        (504, ProviderFailure.TIMEOUT),
+        (503, ProviderFailure.TRANSIENT),
+    ],
+)
+async def test_openrouter_catalog_failures_are_sanitized(
+    status: int, failure: ProviderFailure, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret = "raw-provider-secret"
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, content=secret)
+
+    source = OpenRouterCatalogSource(config(), transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ProviderError) as error:
+            await source.list_models()
+    finally:
+        await source.aclose()
+    assert error.value.failure == failure
+    assert secret not in str(error.value)
+    assert secret not in caplog.text
+    assert API_KEY not in caplog.text
 
 
 @pytest.mark.parametrize(

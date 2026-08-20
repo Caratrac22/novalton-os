@@ -16,6 +16,7 @@ _OPTIONAL_CONTEXT_FIELDS = (
     "model_id",
     "outcome_class",
     "duration_ms",
+    "model_count",
 )
 
 
