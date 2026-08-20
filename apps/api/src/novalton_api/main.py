@@ -13,6 +13,7 @@ from novalton_api.core.database import Database
 from novalton_api.core.exceptions import register_exception_handlers
 from novalton_api.core.logging import configure_logging
 from novalton_api.core.middleware import CorrelationIdMiddleware
+from novalton_api.modules.projects.routes import router as projects_router
 
 
 @asynccontextmanager
@@ -35,6 +36,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(application)
     application.add_middleware(CorrelationIdMiddleware)
     application.include_router(health_router, prefix="/api/v1")
+    application.include_router(projects_router, prefix="/api/v1")
     return application
 
 

@@ -15,3 +15,15 @@ async def get_workspace_by_tenant_and_slug(
     return await session.scalar(
         select(Workspace).where(Workspace.tenant_id == tenant_id, Workspace.slug == slug)
     )
+
+
+async def get_workspace_by_tenant_and_id(
+    session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID
+) -> Workspace | None:
+    """Find a workspace only through its owning tenant."""
+    return await session.scalar(
+        select(Workspace).where(
+            Workspace.tenant_id == tenant_id,
+            Workspace.id == workspace_id,
+        )
+    )

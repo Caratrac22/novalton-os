@@ -62,7 +62,7 @@ make db-current
 
 `make db-check` runs the full upgrade/current/downgrade/upgrade smoke flow. Revision
 `20260820_0002` adds the I-005 `tenants` and tenant-scoped `workspaces` tables after the empty
-I-004 baseline.
+I-004 baseline. Revision `20260820_0003` adds only the I-006 workspace-scoped `projects` table.
 
 Create the deterministic local development scope explicitly after migrating:
 
@@ -76,6 +76,21 @@ records, and is disabled when `NOVALTON_ENV=production`. It never creates users 
 records.
 
 Every HTTP response includes `X-Correlation-ID`. A client may supply this header using 1–128 ASCII letters, digits, `.`, `_`, `:`, or `-`; invalid or missing values are replaced with a generated `req_...` identifier. The same identifier is attached to request-scoped structured logs and deterministic API error responses.
+
+Projects are exposed only through an explicit tenant and workspace path:
+
+```text
+POST   /api/v1/tenants/{tenant_id}/workspaces/{workspace_id}/projects
+GET    /api/v1/tenants/{tenant_id}/workspaces/{workspace_id}/projects
+GET    /api/v1/tenants/{tenant_id}/workspaces/{workspace_id}/projects/{project_id}
+PATCH  /api/v1/tenants/{tenant_id}/workspaces/{workspace_id}/projects/{project_id}
+DELETE /api/v1/tenants/{tenant_id}/workspaces/{workspace_id}/projects/{project_id}
+```
+
+Every operation first verifies that the workspace belongs to the supplied tenant. Project reads
+and mutations then retain workspace scope, and inaccessible or unknown scope combinations return
+the same not-found response. Lists use stable creation-time/UUID ordering and accept `limit`
+(default 50, maximum 100) plus `offset`.
 
 ## Run the web app
 

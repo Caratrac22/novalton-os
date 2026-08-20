@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from novalton_api.bootstrap import BootstrapError, bootstrap_local_scope
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Base, Database
+from novalton_api.modules.projects.models import Project
 from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.workspaces.models import Workspace
 from novalton_api.modules.workspaces.queries import get_workspace_by_tenant_and_slug
@@ -27,10 +28,12 @@ async def database() -> Database:
         pytest.fail("PostgreSQL must be migrated to the I-005 head before integration tests")
 
     async with value.session_factory.begin() as session:
+        await session.execute(delete(Project))
         await session.execute(delete(Workspace))
         await session.execute(delete(Tenant))
     yield value
     async with value.session_factory.begin() as session:
+        await session.execute(delete(Project))
         await session.execute(delete(Workspace))
         await session.execute(delete(Tenant))
     await value.dispose()
@@ -43,8 +46,8 @@ async def session(database: Database) -> AsyncSession:
         await value.rollback()
 
 
-def test_model_metadata_has_exact_i005_tables_and_constraints() -> None:
-    assert set(Base.metadata.tables) == {"tenants", "workspaces"}
+def test_model_metadata_retains_i005_tables_and_constraints() -> None:
+    assert {"tenants", "workspaces"}.issubset(Base.metadata.tables)
     tenants = Base.metadata.tables["tenants"]
     workspaces = Base.metadata.tables["workspaces"]
 
