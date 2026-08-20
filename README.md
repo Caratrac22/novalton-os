@@ -60,8 +60,20 @@ make db-upgrade
 make db-current
 ```
 
-`make db-check` runs the full upgrade/current/downgrade/upgrade smoke flow. The I-004 baseline
-contains no application tables; tenant and workspace schema begins in I-005.
+`make db-check` runs the full upgrade/current/downgrade/upgrade smoke flow. Revision
+`20260820_0002` adds the I-005 `tenants` and tenant-scoped `workspaces` tables after the empty
+I-004 baseline.
+
+Create the deterministic local development scope explicitly after migrating:
+
+```bash
+make db-bootstrap
+```
+
+The command creates one `tenant_local` tenant and its `workspace_default` workspace using the
+stable UUIDs configured in `.env`. It is transactionally idempotent, refuses conflicting existing
+records, and is disabled when `NOVALTON_ENV=production`. It never creates users or other business
+records.
 
 Every HTTP response includes `X-Correlation-ID`. A client may supply this header using 1–128 ASCII letters, digits, `.`, `_`, `:`, or `-`; invalid or missing values are replaced with a generated `req_...` identifier. The same identifier is attached to request-scoped structured logs and deterministic API error responses.
 

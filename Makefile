@@ -7,7 +7,7 @@ API_PYTHON := $(API_VENV)/bin/python
 API_RUFF := $(API_VENV)/bin/ruff
 API_PYTEST := $(API_VENV)/bin/pytest
 
-.PHONY: help setup-env infra-config infra-up infra-down infra-status db-upgrade db-current db-downgrade db-check backend-check frontend-check dependency-audit verify
+.PHONY: help setup-env infra-config infra-up infra-down infra-status db-upgrade db-current db-downgrade db-check db-bootstrap backend-check frontend-check dependency-audit verify
 
 help:
 	@echo "Novalton OS development commands"
@@ -20,6 +20,7 @@ help:
 	@echo "  make db-current      Show the current PostgreSQL Alembic revision"
 	@echo "  make db-downgrade    Downgrade PostgreSQL by one Alembic revision"
 	@echo "  make db-check        Run upgrade/current/downgrade/upgrade migration smoke test"
+	@echo "  make db-bootstrap    Create the idempotent local tenant/workspace scope"
 	@echo "  make backend-check   Run backend lint, format check, and tests"
 	@echo "  make frontend-check  Run frontend lint, typecheck, and production build"
 	@echo "  make dependency-audit Audit Python and npm dependencies for vulnerabilities"
@@ -59,6 +60,9 @@ db-check:
 	$(MAKE) db-current
 	$(MAKE) db-downgrade
 	$(MAKE) db-upgrade
+
+db-bootstrap:
+	set -a; . "./$(ENV_FILE)"; set +a; $(API_PYTHON) -m novalton_api.bootstrap
 
 backend-check:
 	@test -x "$(API_PYTHON)" || { \

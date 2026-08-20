@@ -22,6 +22,11 @@ class Base(DeclarativeBase):
     """Declarative base and canonical application metadata."""
 
 
+# Import application models after Base exists so Alembic sees their tables.
+from novalton_api.modules.tenants.models import Tenant  # noqa: E402, F401
+from novalton_api.modules.workspaces.models import Workspace  # noqa: E402, F401
+
+
 def async_database_url(database_url: str) -> URL:
     """Return a PostgreSQL URL using the canonical async driver."""
     url = make_url(database_url)

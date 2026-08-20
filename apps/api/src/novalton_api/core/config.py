@@ -5,6 +5,7 @@ from functools import lru_cache
 from os import environ
 from typing import ClassVar, Literal, Self
 from urllib.parse import urlparse
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
@@ -23,6 +24,12 @@ class Settings(BaseModel):
     database_url: str = "postgresql://novalton:novalton_dev_only@localhost:5432/novalton"
     redis_url: str = "redis://localhost:6379/0"
     qdrant_url: str = "http://localhost:6333"
+    bootstrap_tenant_id: UUID = UUID("89cfc055-366e-5bcb-b65f-4f367185bf6d")
+    bootstrap_tenant_name: str = "Local Tenant"
+    bootstrap_tenant_slug: str = "tenant_local"
+    bootstrap_workspace_id: UUID = UUID("b640b64f-8e55-53e8-a5b2-3beff9d5af82")
+    bootstrap_workspace_name: str = "Default Workspace"
+    bootstrap_workspace_slug: str = "workspace_default"
 
     _environment_names: ClassVar[dict[str, str]] = {
         "environment": "NOVALTON_ENV",
@@ -30,6 +37,12 @@ class Settings(BaseModel):
         "database_url": "DATABASE_URL",
         "redis_url": "REDIS_URL",
         "qdrant_url": "QDRANT_URL",
+        "bootstrap_tenant_id": "NOVALTON_BOOTSTRAP_TENANT_ID",
+        "bootstrap_tenant_name": "NOVALTON_BOOTSTRAP_TENANT_NAME",
+        "bootstrap_tenant_slug": "NOVALTON_BOOTSTRAP_TENANT_SLUG",
+        "bootstrap_workspace_id": "NOVALTON_BOOTSTRAP_WORKSPACE_ID",
+        "bootstrap_workspace_name": "NOVALTON_BOOTSTRAP_WORKSPACE_NAME",
+        "bootstrap_workspace_slug": "NOVALTON_BOOTSTRAP_WORKSPACE_SLUG",
     }
 
     @field_validator("log_level")
