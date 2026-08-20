@@ -17,6 +17,9 @@ _OPTIONAL_CONTEXT_FIELDS = (
     "outcome_class",
     "duration_ms",
     "model_count",
+    "provider_model_id",
+    "candidate_count",
+    "result_codes",
 )
 
 
@@ -36,7 +39,8 @@ class JsonFormatter(logging.Formatter):
             payload["request_id"] = correlation_id
             payload["correlation_id"] = correlation_id
         for field in _OPTIONAL_CONTEXT_FIELDS:
-            if value := getattr(record, field, None):
+            value = getattr(record, field, None)
+            if value is not None:
                 payload[field] = value
         return json.dumps(payload, ensure_ascii=False)
 

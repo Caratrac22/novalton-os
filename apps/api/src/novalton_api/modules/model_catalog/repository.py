@@ -40,6 +40,18 @@ async def get_model(session: AsyncSession, *, model_id: UUID) -> ModelDefinition
     return await session.get(ModelDefinition, model_id)
 
 
+async def list_routing_candidates(session: AsyncSession) -> list[ModelDefinition]:
+    """Return the complete authoritative catalog in stable identity order."""
+    result = await session.scalars(
+        select(ModelDefinition).order_by(
+            ModelDefinition.provider_id.asc(),
+            ModelDefinition.provider_model_id.asc(),
+            ModelDefinition.id.asc(),
+        )
+    )
+    return list(result)
+
+
 async def upsert_model(
     session: AsyncSession,
     *,
