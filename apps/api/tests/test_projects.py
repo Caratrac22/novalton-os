@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Base, Database
 from novalton_api.main import create_app
+from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tasks.models import Task
@@ -36,6 +37,7 @@ async def _reset_and_seed() -> tuple[Scope, Scope, Scope]:
     database = Database.from_settings(Settings())
     try:
         async with database.session_factory.begin() as session:
+            await session.execute(delete(AuditRecord))
             await session.execute(delete(RuntimeEvent))
             await session.execute(delete(Task))
             await session.execute(delete(Project))
@@ -70,6 +72,7 @@ async def _reset() -> None:
     database = Database.from_settings(Settings())
     try:
         async with database.session_factory.begin() as session:
+            await session.execute(delete(AuditRecord))
             await session.execute(delete(RuntimeEvent))
             await session.execute(delete(Task))
             await session.execute(delete(Project))
@@ -109,6 +112,7 @@ def test_project_metadata_has_workspace_scope_and_constraints() -> None:
         "projects",
         "tasks",
         "runtime_events",
+        "audit_records",
     }
     table = Base.metadata.tables["projects"]
     names = {constraint.name for constraint in table.constraints}

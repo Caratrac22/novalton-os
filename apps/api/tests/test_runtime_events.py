@@ -13,6 +13,7 @@ from novalton_api.core.config import Settings
 from novalton_api.core.context import reset_correlation_id, set_correlation_id
 from novalton_api.core.database import Base, Database
 from novalton_api.core.exceptions import ApplicationError
+from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.projects import service as project_service
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.projects.schemas import ProjectCreate
@@ -36,6 +37,7 @@ async def _reset() -> None:
     database = Database.from_settings(Settings())
     try:
         async with database.session_factory.begin() as session:
+            await session.execute(delete(AuditRecord))
             await session.execute(delete(RuntimeEvent))
             await session.execute(delete(Task))
             await session.execute(delete(Project))

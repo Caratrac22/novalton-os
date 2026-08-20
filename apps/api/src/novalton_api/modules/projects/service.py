@@ -6,6 +6,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.exceptions import ApplicationError
+from novalton_api.modules.audit.schemas import AuditRecordCreate
+from novalton_api.modules.audit.service import append_record
 from novalton_api.modules.projects import repository
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.projects.schemas import ProjectCreate, ProjectUpdate
@@ -120,6 +122,21 @@ async def update_project(
         )
         if project is None:
             raise _not_found()
+        await append_record(
+            session,
+            data=AuditRecordCreate(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                resource_type="project",
+                resource_id=project_id,
+                action="project.update",
+                actor_type="api",
+                outcome="success",
+                metadata={"changed_fields": sorted(changes)},
+            ),
+            commit=False,
+        )
         await session.commit()
     except IntegrityError:
         await session.rollback()
