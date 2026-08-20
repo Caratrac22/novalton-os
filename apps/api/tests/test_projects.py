@@ -107,6 +107,7 @@ def _create(api: ApiContext, scope: Scope, *, slug: str = "alpha", name: str = "
 
 def test_project_metadata_has_workspace_scope_and_constraints() -> None:
     assert set(Base.metadata.tables) == {
+        "approval_requests",
         "tenants",
         "workspaces",
         "projects",
