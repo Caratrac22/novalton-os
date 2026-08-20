@@ -14,12 +14,20 @@ _OPTIONAL_CONTEXT_FIELDS = (
     "agent_run_id",
     "provider_id",
     "model_id",
+    "model_run_id",
     "outcome_class",
     "duration_ms",
     "model_count",
     "provider_model_id",
     "candidate_count",
     "result_codes",
+    "status",
+    "failure_code",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cost",
+    "currency",
 )
 
 

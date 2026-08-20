@@ -114,7 +114,7 @@ def test_model_catalog_metadata_has_only_i017_global_schema() -> None:
         "ck_model_definitions_output_price_non_negative",
         "ck_model_definitions_status_value",
     }.issubset(names)
-    assert "model_runs" not in Base.metadata.tables
+    assert "usage_events" not in Base.metadata.tables
     assert "usage_events" not in Base.metadata.tables
 
 

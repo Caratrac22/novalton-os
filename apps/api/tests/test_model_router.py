@@ -15,6 +15,7 @@ from novalton_api.main import create_app
 from novalton_api.modules.approvals.models import ApprovalRequest
 from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.model_catalog.models import ModelDefinition
+from novalton_api.modules.model_usage.models import ModelRun
 from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.workspaces.models import Workspace
@@ -319,12 +320,12 @@ def test_context_no_suitable_never_relaxes_requirement(api: RouterApi) -> None:
     assert body["reason_codes"] == ["CONTEXT_UNSATISFIED"]
 
 
-async def _side_effect_counts() -> tuple[int, int, int]:
+async def _side_effect_counts() -> tuple[int, int, int, int]:
     database = Database.from_settings(Settings())
     try:
         async with database.session_factory() as session:
             values = []
-            for model in (ApprovalRequest, AuditRecord, RuntimeEvent):
+            for model in (ApprovalRequest, AuditRecord, RuntimeEvent, ModelRun):
                 values.append(await session.scalar(select(func.count()).select_from(model)) or 0)
             return tuple(values)  # type: ignore[return-value]
     finally:
@@ -360,5 +361,6 @@ def test_scope_validation_no_side_effect_writes_and_no_execution_surface(
         ).status_code
         == 422
     )
-    assert "model_runs" not in ModelDefinition.metadata.tables
+    assert "model_runs" in ModelDefinition.metadata.tables
+    assert "usage_events" not in ModelDefinition.metadata.tables
     assert "usage_events" not in ModelDefinition.metadata.tables
