@@ -100,23 +100,7 @@ async def evaluate(
     session: AsyncSession, *, request: PolicyEvaluationRequest
 ) -> PolicyEvaluationResult:
     """Evaluate effective tenant/workspace rules and audit non-silent outcomes."""
-    await _validate_evaluation_scope(session, request)
-    records = await repository.list_applicable_rules(
-        session, tenant_id=request.tenant_id, workspace_id=request.workspace_id
-    )
-    rules = [
-        EvaluationRule(
-            id=rule.id,
-            name=rule.name,
-            action_pattern=rule.action_pattern,
-            effect=rule.effect,
-            actor_type=rule.actor_type,
-            resource_type=rule.resource_type,
-            conditions=rule.conditions_json,
-        )
-        for rule in records
-    ]
-    result = evaluate_rules(request, rules)
+    result = await evaluate_decision(session, request=request)
     if result.audit_required:
         outcome = "blocked" if result.effect.value == "BLOCK" else "success"
         await append_record(
@@ -140,3 +124,26 @@ async def evaluate(
             commit=True,
         )
     return result
+
+
+async def evaluate_decision(
+    session: AsyncSession, *, request: PolicyEvaluationRequest
+) -> PolicyEvaluationResult:
+    """Return the authoritative policy decision without integration side effects."""
+    await _validate_evaluation_scope(session, request)
+    records = await repository.list_applicable_rules(
+        session, tenant_id=request.tenant_id, workspace_id=request.workspace_id
+    )
+    rules = [
+        EvaluationRule(
+            id=rule.id,
+            name=rule.name,
+            action_pattern=rule.action_pattern,
+            effect=rule.effect,
+            actor_type=rule.actor_type,
+            resource_type=rule.resource_type,
+            conditions=rule.conditions_json,
+        )
+        for rule in records
+    ]
+    return evaluate_rules(request, rules)

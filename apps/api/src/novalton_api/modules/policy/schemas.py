@@ -5,7 +5,14 @@ from enum import StrEnum
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 ACTION_PATTERN = re.compile(r"^(?:\*|[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*(?:\.\*)?)$")
 ACTION = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
@@ -13,6 +20,16 @@ TYPE_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 ENVIRONMENT = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 PolicyName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+ActorReference = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    ),
+]
+_SECRET_REFERENCE = re.compile(r"(?:^(?:bearer|basic)[._:-]|^sk-[A-Za-z0-9_-]{8,}$)", re.IGNORECASE)
 
 
 class PolicyEffect(StrEnum):
@@ -97,6 +114,16 @@ class PolicyEvaluationContext(BaseModel):
     environment: str | None = Field(default=None, min_length=1, max_length=32)
     reversible: bool | None = None
 
+    @field_validator("risk_level", mode="before")
+    @classmethod
+    def validate_risk_level(cls, value: object) -> object:
+        if isinstance(value, str):
+            try:
+                return RiskLevel(value)
+            except ValueError:
+                raise ValueError("unsupported risk_level") from None
+        return value
+
     @model_validator(mode="after")
     def validate_environment(self) -> Self:
         if self.environment is not None and ENVIRONMENT.fullmatch(self.environment) is None:
@@ -151,3 +178,45 @@ class PolicyEvaluationResult(BaseModel):
     reasons: list[str]
     confirmation_required: bool
     audit_required: bool
+
+
+class PolicySimulationRequest(BaseModel):
+    """Bounded proposed action; route scope is deliberately not caller-controlled."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    action: str = Field(min_length=3, max_length=100)
+    actor_type: Literal["api", "agent", "model", "service", "tool"] | None = None
+    actor_id: ActorReference | None = None
+    resource_type: str | None = Field(default=None, min_length=1, max_length=64)
+    resource_id: UUID | None = None
+    project_id: UUID | None = None
+    task_id: UUID | None = None
+    context: PolicyEvaluationContext = Field(default_factory=PolicyEvaluationContext)
+
+    @model_validator(mode="after")
+    def validate_request(self) -> Self:
+        if ACTION.fullmatch(self.action) is None:
+            raise ValueError("action must be a lowercase dot-separated identifier")
+        if self.actor_id is not None and self.actor_type is None:
+            raise ValueError("actor_id requires actor_type")
+        if self.actor_id is not None and _SECRET_REFERENCE.search(self.actor_id):
+            raise ValueError("actor reference contains credential material")
+        if self.resource_type is not None and TYPE_IDENTIFIER.fullmatch(self.resource_type) is None:
+            raise ValueError("resource_type must be a lowercase identifier")
+        if (self.resource_type is None) != (self.resource_id is None):
+            raise ValueError("resource_type and resource_id must be supplied together")
+        if self.task_id is not None and self.project_id is None:
+            raise ValueError("task_id requires project_id")
+        if self.resource_type == "project" and self.resource_id != self.project_id:
+            raise ValueError("project resource must match project_id")
+        if self.resource_type == "task" and self.resource_id != self.task_id:
+            raise ValueError("task resource must match task_id")
+        return self
+
+
+class PolicySimulationResult(PolicyEvaluationResult):
+    """Canonical policy decision with an explicit non-execution statement."""
+
+    simulated: Literal[True] = True
+    executed: Literal[False] = False
