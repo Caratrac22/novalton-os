@@ -45,9 +45,23 @@ apps/api/.venv/bin/pip install -e './apps/api[dev]'
 apps/api/.venv/bin/uvicorn novalton_api.main:app --reload --app-dir apps/api/src
 ```
 
-The health endpoint is available at <http://127.0.0.1:8000/api/v1/health>.
+The liveness endpoint is available at <http://127.0.0.1:8000/api/v1/health>. PostgreSQL
+connectivity is reported separately at <http://127.0.0.1:8000/api/v1/health/dependencies>;
+failures return a sanitized `503` response.
 
-The backend reads `NOVALTON_ENV`, `NOVALTON_LOG_LEVEL`, `DATABASE_URL`, `REDIS_URL`, and `QDRANT_URL` from the process environment. I-003 validates these settings at startup but does not connect to the services; database wiring remains a later ticket.
+The backend reads `NOVALTON_ENV`, `NOVALTON_LOG_LEVEL`, `DATABASE_URL`, `REDIS_URL`, and
+`QDRANT_URL` from the process environment. SQLAlchemy uses asyncpg for PostgreSQL access;
+credentials and credential-bearing URLs are never included in application health responses.
+
+Apply and inspect the Alembic baseline after PostgreSQL is healthy:
+
+```bash
+make db-upgrade
+make db-current
+```
+
+`make db-check` runs the full upgrade/current/downgrade/upgrade smoke flow. The I-004 baseline
+contains no application tables; tenant and workspace schema begins in I-005.
 
 Every HTTP response includes `X-Correlation-ID`. A client may supply this header using 1–128 ASCII letters, digits, `.`, `_`, `:`, or `-`; invalid or missing values are replaced with a generated `req_...` identifier. The same identifier is attached to request-scoped structured logs and deterministic API error responses.
 

@@ -7,7 +7,7 @@ API_PYTHON := $(API_VENV)/bin/python
 API_RUFF := $(API_VENV)/bin/ruff
 API_PYTEST := $(API_VENV)/bin/pytest
 
-.PHONY: help setup-env infra-config infra-up infra-down infra-status backend-check frontend-check dependency-audit verify
+.PHONY: help setup-env infra-config infra-up infra-down infra-status db-upgrade db-current db-downgrade db-check backend-check frontend-check dependency-audit verify
 
 help:
 	@echo "Novalton OS development commands"
@@ -16,6 +16,10 @@ help:
 	@echo "  make infra-up        Start infrastructure and wait for healthy services"
 	@echo "  make infra-status    Show infrastructure container and health status"
 	@echo "  make infra-down      Stop infrastructure while preserving named volumes"
+	@echo "  make db-upgrade      Upgrade PostgreSQL to the latest Alembic revision"
+	@echo "  make db-current      Show the current PostgreSQL Alembic revision"
+	@echo "  make db-downgrade    Downgrade PostgreSQL by one Alembic revision"
+	@echo "  make db-check        Run upgrade/current/downgrade/upgrade migration smoke test"
 	@echo "  make backend-check   Run backend lint, format check, and tests"
 	@echo "  make frontend-check  Run frontend lint, typecheck, and production build"
 	@echo "  make dependency-audit Audit Python and npm dependencies for vulnerabilities"
@@ -40,6 +44,21 @@ infra-down:
 
 infra-status:
 	$(COMPOSE) ps
+
+db-upgrade:
+	set -a; . "./$(ENV_FILE)"; set +a; $(API_VENV)/bin/alembic -c apps/api/alembic.ini upgrade head
+
+db-current:
+	set -a; . "./$(ENV_FILE)"; set +a; $(API_VENV)/bin/alembic -c apps/api/alembic.ini current
+
+db-downgrade:
+	set -a; . "./$(ENV_FILE)"; set +a; $(API_VENV)/bin/alembic -c apps/api/alembic.ini downgrade -1
+
+db-check:
+	$(MAKE) db-upgrade
+	$(MAKE) db-current
+	$(MAKE) db-downgrade
+	$(MAKE) db-upgrade
 
 backend-check:
 	@test -x "$(API_PYTHON)" || { \
