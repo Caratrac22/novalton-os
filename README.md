@@ -119,6 +119,16 @@ npm run dev
 
 The web app is available at <http://localhost:3000>.
 
+The I-011 application shell uses `NOVALTON_API_BASE_URL` (default
+`http://127.0.0.1:8000`) only in the Next.js server process. The overview performs bounded,
+uncached server-side requests to the API liveness and PostgreSQL dependency-health endpoints and
+shows a sanitized unavailable state when the backend cannot be reached. Do not rename this setting
+with a `NEXT_PUBLIC_` prefix: browser code does not need the backend origin or any credentials.
+
+The shell routes are `/` (Overview), `/projects`, `/tasks`, and `/activity`. The latter three are
+intentional navigation placeholders; their data views, mutations, and SSE-backed activity feed are
+deferred to I-012.
+
 ## Development checks
 
 Run each application check set independently:

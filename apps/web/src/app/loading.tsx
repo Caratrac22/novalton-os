@@ -1,0 +1,1 @@
+export default function Loading() { return <div className="placeholder-panel" role="status" aria-live="polite"><strong>Loading workspace</strong><p>Checking the current Novalton OS service state…</p></div>; }
