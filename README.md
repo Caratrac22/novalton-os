@@ -47,6 +47,10 @@ apps/api/.venv/bin/uvicorn novalton_api.main:app --reload --app-dir apps/api/src
 
 The health endpoint is available at <http://127.0.0.1:8000/api/v1/health>.
 
+The backend reads `NOVALTON_ENV`, `NOVALTON_LOG_LEVEL`, `DATABASE_URL`, `REDIS_URL`, and `QDRANT_URL` from the process environment. I-003 validates these settings at startup but does not connect to the services; database wiring remains a later ticket.
+
+Every HTTP response includes `X-Correlation-ID`. A client may supply this header using 1–128 ASCII letters, digits, `.`, `_`, `:`, or `-`; invalid or missing values are replaced with a generated `req_...` identifier. The same identifier is attached to request-scoped structured logs and deterministic API error responses.
+
 ## Run the web app
 
 ```bash

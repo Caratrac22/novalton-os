@@ -3,7 +3,7 @@
 from fastapi import APIRouter
 
 from novalton_api import __version__
-from novalton_api.config import get_settings
+from novalton_api.core.config import get_settings
 from novalton_api.schemas import HealthResponse
 
 router = APIRouter(tags=["health"])
