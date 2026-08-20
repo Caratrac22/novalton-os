@@ -12,6 +12,10 @@ _OPTIONAL_CONTEXT_FIELDS = (
     "workspace_id",
     "workflow_run_id",
     "agent_run_id",
+    "provider_id",
+    "model_id",
+    "outcome_class",
+    "duration_ms",
 )
 
 
