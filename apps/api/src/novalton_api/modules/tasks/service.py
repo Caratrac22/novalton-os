@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.modules.projects import repository as projects_repository
+from novalton_api.modules.runtime_events.schemas import RuntimeEventCreate
+from novalton_api.modules.runtime_events.service import append_event
 from novalton_api.modules.tasks import repository
 from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tasks.schemas import TaskCreate, TaskStatus, TaskUpdate
@@ -50,6 +52,19 @@ async def create_task(
             title=data.title,
             description=data.description,
             status=data.status.value,
+        )
+        await append_event(
+            session,
+            data=RuntimeEventCreate(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                task_id=task.id,
+                event_type="task.created",
+                source="task_service",
+                payload={"status": data.status.value},
+            ),
+            commit=False,
         )
         await session.commit()
     except IntegrityError:

@@ -9,6 +9,8 @@ from novalton_api.core.exceptions import ApplicationError
 from novalton_api.modules.projects import repository
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.projects.schemas import ProjectCreate, ProjectUpdate
+from novalton_api.modules.runtime_events.schemas import RuntimeEventCreate
+from novalton_api.modules.runtime_events.service import append_event
 from novalton_api.modules.workspaces.queries import get_workspace_by_tenant_and_id
 
 
@@ -55,6 +57,18 @@ async def create_project(
             slug=data.slug,
             description=data.description,
             status=data.status.value,
+        )
+        await append_event(
+            session,
+            data=RuntimeEventCreate(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                project_id=project.id,
+                event_type="project.created",
+                source="project_service",
+                payload={"status": data.status.value},
+            ),
+            commit=False,
         )
         await session.commit()
     except IntegrityError:

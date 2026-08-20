@@ -64,6 +64,7 @@ make db-current
 `20260820_0002` adds the I-005 `tenants` and tenant-scoped `workspaces` tables after the empty
 I-004 baseline. Revision `20260820_0003` adds the I-006 workspace-scoped `projects` table, and
 revision `20260820_0004` adds only the I-007 project-scoped `tasks` table.
+Revision `20260820_0005` adds the I-008 append-only `runtime_events` table.
 
 Create the deterministic local development scope explicitly after migrating:
 
@@ -99,6 +100,15 @@ operation validates tenant, workspace, and project ownership before querying tas
 task query retains `project_id` scope. Task states are `BACKLOG`, `READY`, `IN_PROGRESS`,
 `BLOCKED`, `REVIEW`, `DONE`, and `CANCELLED`; I-007 validates values without imposing workflow
 transition rules. Lists use the Projects bounds and ordering and optionally accept `status`.
+
+Runtime events are an internal service in I-008; there are no event HTTP routes and no
+update/delete operations. Each event has required tenant/workspace scope, a lowercase
+dot-separated type (for example `task.created`), a lowercase producer source, a timezone-aware
+occurrence time, and optional correlation/project/task links. Payloads are optional JSON objects,
+canonicalized and limited to 8 KiB, 256 values, eight nesting levels, and 2,048 characters per
+string. Secret-bearing fields, credential-bearing URLs, non-finite numbers, and non-JSON values
+are rejected. Payload contents are not logged. Project and task creation append one small status
+event in the same database transaction; descriptions and request bodies are never copied.
 
 ## Run the web app
 

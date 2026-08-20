@@ -24,6 +24,7 @@ class Base(DeclarativeBase):
 
 # Import application models after Base exists so Alembic sees their tables.
 from novalton_api.modules.projects.models import Project  # noqa: E402, F401
+from novalton_api.modules.runtime_events.models import RuntimeEvent  # noqa: E402, F401
 from novalton_api.modules.tasks.models import Task  # noqa: E402, F401
 from novalton_api.modules.tenants.models import Tenant  # noqa: E402, F401
 from novalton_api.modules.workspaces.models import Workspace  # noqa: E402, F401

@@ -11,6 +11,7 @@ from novalton_api.bootstrap import BootstrapError, bootstrap_local_scope
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Base, Database
 from novalton_api.modules.projects.models import Project
+from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.workspaces.models import Workspace
@@ -29,12 +30,14 @@ async def database() -> Database:
         pytest.fail("PostgreSQL must be migrated to the I-005 head before integration tests")
 
     async with value.session_factory.begin() as session:
+        await session.execute(delete(RuntimeEvent))
         await session.execute(delete(Task))
         await session.execute(delete(Project))
         await session.execute(delete(Workspace))
         await session.execute(delete(Tenant))
     yield value
     async with value.session_factory.begin() as session:
+        await session.execute(delete(RuntimeEvent))
         await session.execute(delete(Task))
         await session.execute(delete(Project))
         await session.execute(delete(Workspace))
