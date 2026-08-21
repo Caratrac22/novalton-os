@@ -29,6 +29,8 @@ from novalton_api.modules.policy.routes import router as policy_router
 from novalton_api.modules.projects.routes import router as projects_router
 from novalton_api.modules.runtime_events.routes import router as runtime_events_router
 from novalton_api.modules.tasks.routes import router as tasks_router
+from novalton_api.modules.workflows.routes import plans_router
+from novalton_api.modules.workflows.routes import runs_router as workflow_runs_router
 
 
 @asynccontextmanager
@@ -112,6 +114,8 @@ def create_app(
     application.include_router(model_catalog_router, prefix="/api/v1")
     application.include_router(model_router_router, prefix="/api/v1")
     application.include_router(model_usage_router, prefix="/api/v1")
+    application.include_router(plans_router, prefix="/api/v1")
+    application.include_router(workflow_runs_router, prefix="/api/v1")
     return application
 
 
