@@ -25,7 +25,7 @@ export default async function TasksPage({ searchParams }: Readonly<{ searchParam
   const selectedTask = tasks?.find((task) => task.id === requestedTaskId) ?? tasks?.[0];
   let workflowRuns = null;
   if (selectedTask) { try { workflowRuns = (await getWorkflowRuns()).filter((run) => run.task_id === selectedTask.id); } catch { workflowRuns = null; } }
-  const initialRun = workflowRuns?.[0] ?? null;
+  const initialRun = workflowRuns?.at(-1) ?? null;
   let initialPlan = null;
   let planUnavailable = false;
   if (initialRun) { try { initialPlan = await getWorkflowPlan(initialRun.workflow_plan_id); } catch { planUnavailable = true; } }
