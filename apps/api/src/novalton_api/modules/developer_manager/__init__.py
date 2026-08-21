@@ -1,0 +1,1 @@
+"""Governed Developer Manager specialization."""

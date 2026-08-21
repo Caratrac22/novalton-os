@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from novalton_api.bootstrap import BootstrapError, bootstrap_local_scope
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Base, Database
+from novalton_api.modules.agents.models import AgentDefinition
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tasks.models import Task
@@ -31,6 +32,7 @@ async def database() -> Database:
 
     async with value.session_factory.begin() as session:
         await session.execute(delete(RuntimeEvent))
+        await session.execute(delete(AgentDefinition))
         await session.execute(delete(Task))
         await session.execute(delete(Project))
         await session.execute(delete(Workspace))
@@ -38,6 +40,7 @@ async def database() -> Database:
     yield value
     async with value.session_factory.begin() as session:
         await session.execute(delete(RuntimeEvent))
+        await session.execute(delete(AgentDefinition))
         await session.execute(delete(Task))
         await session.execute(delete(Project))
         await session.execute(delete(Workspace))
@@ -139,6 +142,9 @@ async def test_bootstrap_creates_expected_utc_timestamped_scope(database: Databa
     assert result.tenant.id == settings.bootstrap_tenant_id
     assert result.workspace.id == settings.bootstrap_workspace_id
     assert result.workspace.tenant_id == result.tenant.id
+    assert result.developer_manager.slug == "developer_manager"
+    assert result.developer_manager.category == "development"
+    assert result.developer_manager.permissions == []
     assert result.tenant.created_at.tzinfo is not None
     assert result.tenant.created_at.astimezone(UTC).utcoffset().total_seconds() == 0
 
@@ -152,11 +158,14 @@ async def test_bootstrap_is_idempotent(database: Database) -> None:
         second = await bootstrap_local_scope(session, settings)
         tenant_count = await session.scalar(select(func.count()).select_from(Tenant))
         workspace_count = await session.scalar(select(func.count()).select_from(Workspace))
+        manager_count = await session.scalar(select(func.count()).select_from(AgentDefinition))
 
     assert second.tenant.id == first.tenant.id
     assert second.workspace.id == first.workspace.id
     assert tenant_count == 1
     assert workspace_count == 1
+    assert manager_count == 1
+    assert second.developer_manager.id == first.developer_manager.id
 
 
 @pytest.mark.asyncio

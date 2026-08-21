@@ -10,6 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.config import Settings, get_settings
 from novalton_api.core.database import Database
+from novalton_api.modules.agents.models import AgentDefinition
+from novalton_api.modules.developer_manager.service import (
+    DEVELOPER_MANAGER_CAPABILITIES,
+    DEVELOPER_MANAGER_CATEGORY,
+    DEVELOPER_MANAGER_MISSION,
+    DEVELOPER_MANAGER_NAME,
+    DEVELOPER_MANAGER_SLUG,
+)
 from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.workspaces.models import Workspace
 from novalton_api.modules.workspaces.queries import get_workspace_by_tenant_and_slug
@@ -25,6 +33,7 @@ class BootstrapResult:
 
     tenant: Tenant
     workspace: Workspace
+    developer_manager: AgentDefinition
 
 
 async def bootstrap_local_scope(session: AsyncSession, settings: Settings) -> BootstrapResult:
@@ -66,7 +75,50 @@ async def bootstrap_local_scope(session: AsyncSession, settings: Settings) -> Bo
         settings.bootstrap_workspace_name,
     ):
         raise BootstrapError("configured bootstrap workspace conflicts with existing data")
-    return BootstrapResult(tenant=tenant, workspace=workspace)
+    developer_manager = await session.scalar(
+        select(AgentDefinition).where(
+            AgentDefinition.tenant_id == tenant.id,
+            AgentDefinition.workspace_id == workspace.id,
+            AgentDefinition.slug == DEVELOPER_MANAGER_SLUG,
+            AgentDefinition.version == 1,
+        )
+    )
+    expected = (
+        DEVELOPER_MANAGER_NAME,
+        1,
+        "ENABLED",
+        DEVELOPER_MANAGER_CATEGORY,
+        DEVELOPER_MANAGER_MISSION,
+        DEVELOPER_MANAGER_CAPABILITIES,
+        [],
+    )
+    if developer_manager is None:
+        developer_manager = AgentDefinition(
+            tenant_id=tenant.id,
+            workspace_id=workspace.id,
+            name=DEVELOPER_MANAGER_NAME,
+            slug=DEVELOPER_MANAGER_SLUG,
+            version=1,
+            status="ENABLED",
+            category=DEVELOPER_MANAGER_CATEGORY,
+            mission=DEVELOPER_MANAGER_MISSION,
+            capabilities=DEVELOPER_MANAGER_CAPABILITIES,
+            permissions=[],
+        )
+        session.add(developer_manager)
+        await session.flush()
+    actual = (
+        developer_manager.name,
+        developer_manager.version,
+        developer_manager.status,
+        developer_manager.category,
+        developer_manager.mission,
+        developer_manager.capabilities,
+        developer_manager.permissions,
+    )
+    if actual != expected:
+        raise BootstrapError("Developer Manager definition conflicts with existing data")
+    return BootstrapResult(tenant=tenant, workspace=workspace, developer_manager=developer_manager)
 
 
 async def run_bootstrap() -> BootstrapResult:

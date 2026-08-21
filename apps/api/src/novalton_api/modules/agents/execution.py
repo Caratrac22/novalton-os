@@ -97,10 +97,18 @@ def _routing_request(definition: AgentDefinition, data: AgentInput) -> RoutingRe
 
 
 def _generation_request(
-    definition: AgentDefinition, data: AgentInput, *, provider_model_id: str
+    definition: AgentDefinition,
+    data: AgentInput,
+    *,
+    provider_model_id: str,
+    result_contract: type[AgentResult] = AgentResult,
+    contract_instructions: str | None = None,
 ) -> GenerationRequest:
     result_schema = json.dumps(
-        AgentResult.model_json_schema(), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        result_contract.model_json_schema(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
     )
     system = (
         f"You are the Novalton Agent '{definition.name}'. Mission: {definition.mission}\n"
@@ -109,6 +117,7 @@ def _generation_request(
         "Use only contract fields; requested_actions are proposals only. You have no tools, "
         "execution authority, hidden authority, or permission to approve actions. Do not reveal "
         "or invent hidden reasoning."
+        + (f" {contract_instructions}" if contract_instructions is not None else "")
     )
     user = json.dumps(
         {"agent_input": data.model_dump(mode="json")},
@@ -164,7 +173,7 @@ async def _fail_agent(
     )
 
 
-async def execute(
+async def execute[AgentResultT: AgentResult](
     session: AsyncSession,
     *,
     registry: ProviderRegistry,
@@ -172,6 +181,8 @@ async def execute(
     workspace_id: UUID,
     definition_id: UUID,
     data: AgentInput,
+    result_contract: type[AgentResultT] = AgentResult,
+    contract_instructions: str | None = None,
 ) -> AgentExecutionResponse:
     """Execute one provider call without retries, fallback, tools, or content persistence."""
     definition = await service.get_definition(
@@ -270,7 +281,13 @@ async def execute(
         if provider.provider_id != routed.provider_id:
             raise ProviderError(ProviderFailure.INVALID_REQUEST, provider_id="registry")
         generation = await provider.complete(
-            _generation_request(definition, data, provider_model_id=routed.provider_model_id)
+            _generation_request(
+                definition,
+                data,
+                provider_model_id=routed.provider_model_id,
+                result_contract=result_contract,
+                contract_instructions=contract_instructions,
+            )
         )
     except (ProviderCancellationError, asyncio.CancelledError):
         await usage_service.cancel_run(
@@ -414,7 +431,7 @@ async def execute(
             error_code="invalid_provider_json",
         )
     try:
-        result = AgentResult.model_validate_json(generation.content, strict=True)
+        result = result_contract.model_validate_json(generation.content, strict=True)
     except ValidationError:
         run = await _fail_agent(
             session,
