@@ -1,0 +1,1 @@
+"""Governed QA Worker specialization."""

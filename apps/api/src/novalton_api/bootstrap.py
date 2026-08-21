@@ -26,6 +26,13 @@ from novalton_api.modules.developer_worker.service import (
     DEVELOPER_WORKER_NAME,
     DEVELOPER_WORKER_SLUG,
 )
+from novalton_api.modules.qa_worker.service import (
+    QA_WORKER_CAPABILITIES,
+    QA_WORKER_CATEGORY,
+    QA_WORKER_MISSION,
+    QA_WORKER_NAME,
+    QA_WORKER_SLUG,
+)
 from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.workspaces.models import Workspace
 from novalton_api.modules.workspaces.queries import get_workspace_by_tenant_and_slug
@@ -43,6 +50,7 @@ class BootstrapResult:
     workspace: Workspace
     developer_manager: AgentDefinition
     developer_worker: AgentDefinition
+    qa_worker: AgentDefinition
 
 
 async def _bootstrap_agent_definition(
@@ -153,11 +161,22 @@ async def bootstrap_local_scope(session: AsyncSession, settings: Settings) -> Bo
         mission=DEVELOPER_WORKER_MISSION,
         capabilities=DEVELOPER_WORKER_CAPABILITIES,
     )
+    qa_worker = await _bootstrap_agent_definition(
+        session,
+        tenant_id=tenant.id,
+        workspace_id=workspace.id,
+        name=QA_WORKER_NAME,
+        slug=QA_WORKER_SLUG,
+        category=QA_WORKER_CATEGORY,
+        mission=QA_WORKER_MISSION,
+        capabilities=QA_WORKER_CAPABILITIES,
+    )
     return BootstrapResult(
         tenant=tenant,
         workspace=workspace,
         developer_manager=developer_manager,
         developer_worker=developer_worker,
+        qa_worker=qa_worker,
     )
 
 

@@ -148,6 +148,9 @@ async def test_bootstrap_creates_expected_utc_timestamped_scope(database: Databa
     assert result.developer_worker.slug == "developer_worker"
     assert result.developer_worker.category == "development"
     assert result.developer_worker.permissions == []
+    assert result.qa_worker.slug == "qa_worker"
+    assert result.qa_worker.category == "quality"
+    assert result.qa_worker.permissions == []
     assert result.tenant.created_at.tzinfo is not None
     assert result.tenant.created_at.astimezone(UTC).utcoffset().total_seconds() == 0
 
@@ -167,9 +170,10 @@ async def test_bootstrap_is_idempotent(database: Database) -> None:
     assert second.workspace.id == first.workspace.id
     assert tenant_count == 1
     assert workspace_count == 1
-    assert definition_count == 2
+    assert definition_count == 3
     assert second.developer_manager.id == first.developer_manager.id
     assert second.developer_worker.id == first.developer_worker.id
+    assert second.qa_worker.id == first.qa_worker.id
 
 
 @pytest.mark.asyncio
