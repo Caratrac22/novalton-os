@@ -10,9 +10,16 @@ from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.errors import ProviderCancellationError
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.modules.agents import execution as agent_execution
-from novalton_api.modules.agents.contracts import AgentInput, ChallengeLevel, ModelRequirementHints
+from novalton_api.modules.agents.contracts import (
+    AgentInput,
+    AgentResultStatus,
+    ChallengeLevel,
+    ModelRequirementHints,
+)
 from novalton_api.modules.agents.schemas import AgentRunStatus
+from novalton_api.modules.orchestrator import specializations
 from novalton_api.modules.orchestrator.schemas import OrchestrationOutcome, OrchestrationResult
+from novalton_api.modules.qa_worker.contracts import QAVerdict, QAWorkerResult
 from novalton_api.modules.runtime_events.schemas import RuntimeEventCreate
 from novalton_api.modules.runtime_events.service import append_event
 from novalton_api.modules.workflows import repository
@@ -62,6 +69,8 @@ async def _event(
     agent_run_id: UUID | None = None,
     reason_code: str | None = None,
     challenge_level: ChallengeLevel | None = None,
+    specialization_role: str | None = None,
+    qa_verdict: str | None = None,
 ) -> None:
     payload: dict[str, object] = {
         "workflow_run_id": str(run.id),
@@ -77,6 +86,10 @@ async def _event(
         payload["reason_code"] = reason_code
     if challenge_level is not None:
         payload["challenge_level"] = challenge_level.value
+    if specialization_role is not None:
+        payload["specialization_role"] = specialization_role
+    if qa_verdict is not None:
+        payload["qa_verdict"] = qa_verdict
     await append_event(
         session,
         data=RuntimeEventCreate(
@@ -356,15 +369,25 @@ async def advance(
         )
     await _event(session, run, "workflow.step.started", step_run=step_run, step=step)
 
+    specialization_role: str | None = None
     try:
-        executed = await agent_execution.execute(
-            session,
-            registry=registry,
-            tenant_id=tenant_id,
-            workspace_id=workspace_id,
-            definition_id=step.agent_definition_id,
-            data=_agent_input(run, step),
+        specialized = await specializations.dispatch(
+            session, registry=registry, run=run, step_run=step_run, step=step
         )
+        if specialized is None:
+            executed = await agent_execution.execute(
+                session,
+                registry=registry,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                definition_id=step.agent_definition_id,
+                data=_agent_input(run, step),
+            )
+        else:
+            executed = specialized.response
+            specialization_role = specialized.role
+    except ApplicationError as error:
+        return await _fail(session, run, step_run, step, error.code)
     except (ProviderCancellationError, asyncio.CancelledError):
         step_run = await workflow_service.transition_step(
             session,
@@ -416,6 +439,7 @@ async def advance(
             agent_run_id=executed.agent_run_id,
             reason_code="agent_challenge",
             challenge_level=challenge,
+            specialization_role=specialization_role,
         )
         return await _result(
             session,
@@ -427,6 +451,42 @@ async def advance(
             reason_code="agent_challenge",
             challenge_level=challenge,
         )
+
+    if (
+        specialization_role in {"developer_manager", "developer_worker"}
+        and executed.result.status != AgentResultStatus.COMPLETED
+    ):
+        return await _fail(
+            session,
+            run,
+            step_run,
+            step,
+            f"{specialization_role}_not_completed",
+            agent_run_id=executed.agent_run_id,
+        )
+    if isinstance(executed.result, QAWorkerResult):
+        if executed.result.verdict == QAVerdict.FAIL:
+            return await _fail(
+                session, run, step_run, step, "qa_failed", agent_run_id=executed.agent_run_id
+            )
+        if executed.result.verdict == QAVerdict.INCONCLUSIVE:
+            return await _fail(
+                session, run, step_run, step, "qa_inconclusive", agent_run_id=executed.agent_run_id
+            )
+        if executed.result.status != AgentResultStatus.COMPLETED:
+            return await _fail(
+                session, run, step_run, step, "qa_not_completed", agent_run_id=executed.agent_run_id
+            )
+
+    if specialization_role in {"developer_manager", "developer_worker"}:
+        try:
+            await specializations.persist_next_handoff(
+                session, run=run, step_run=step_run, result=executed.result
+            )
+        except ApplicationError as error:
+            return await _fail(
+                session, run, step_run, step, error.code, agent_run_id=executed.agent_run_id
+            )
 
     step_run = await workflow_service.transition_step(
         session,
@@ -445,6 +505,10 @@ async def advance(
         step=step,
         agent_run_id=executed.agent_run_id,
         challenge_level=challenge if challenge != ChallengeLevel.NONE else None,
+        specialization_role=specialization_role,
+        qa_verdict=executed.result.verdict.value
+        if isinstance(executed.result, QAWorkerResult)
+        else None,
     )
     counts = await repository.count_step_states(session, run_id=run.id)
     if counts.get("COMPLETED", 0) == len(ordered):

@@ -10,6 +10,8 @@ from novalton_api.core.database import get_async_session
 from novalton_api.modules.workflows import repository, service
 from novalton_api.modules.workflows.models import WorkflowPlan, WorkflowRun
 from novalton_api.modules.workflows.schemas import (
+    DevelopmentWorkflowCreate,
+    DevelopmentWorkflowResponse,
     WorkflowPlanCreate,
     WorkflowPlanListResponse,
     WorkflowPlanResponse,
@@ -156,6 +158,33 @@ async def create_run(
         await service.create_run(
             session, tenant_id=tenant_id, workspace_id=workspace_id, plan_id=plan_id
         ),
+    )
+
+
+@plans_router.post(
+    "/tenants/{tenant_id}/workspaces/{workspace_id}/projects/{project_id}/tasks/{task_id}/development-workflows",
+    response_model=DevelopmentWorkflowResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_development_workflow(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    project_id: UUID,
+    task_id: UUID,
+    data: DevelopmentWorkflowCreate,
+    session: Session,
+) -> DevelopmentWorkflowResponse:
+    plan, run = await service.create_development_workflow(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        task_id=task_id,
+        data=data,
+    )
+    return DevelopmentWorkflowResponse(
+        workflow_plan=await _plan_response(session, plan),
+        workflow_run=await _run_response(session, run),
     )
 
 

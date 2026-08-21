@@ -14,15 +14,20 @@ from novalton_api.core.exceptions import ApplicationError
 from novalton_api.modules.agents import repository as agents_repository
 from novalton_api.modules.audit.schemas import AuditRecordCreate
 from novalton_api.modules.audit.service import append_record
+from novalton_api.modules.developer_manager import service as manager_service
+from novalton_api.modules.developer_worker import service as developer_service
+from novalton_api.modules.qa_worker import service as qa_service
 from novalton_api.modules.workflows import repository
 from novalton_api.modules.workflows.models import (
     WorkflowPlan,
     WorkflowRun,
     WorkflowStep,
     WorkflowStepDependency,
+    WorkflowStepHandoff,
     WorkflowStepRun,
 )
 from novalton_api.modules.workflows.schemas import (
+    DevelopmentWorkflowCreate,
     WorkflowPlanCreate,
     WorkflowPlanVersionCreate,
     WorkflowRunStatus,
@@ -356,6 +361,136 @@ async def create_run(
     await session.commit()
     await session.refresh(run)
     return run
+
+
+def _trusted_definition(
+    definition: object, *, name: str, category: str, mission: str, capabilities: list[str]
+) -> bool:
+    return (
+        getattr(definition, "version", None) == 1
+        and getattr(definition, "name", None) == name
+        and getattr(definition, "category", None) == category
+        and getattr(definition, "mission", None) == mission
+        and getattr(definition, "capabilities", None) == capabilities
+        and getattr(definition, "permissions", None) == []
+    )
+
+
+async def create_development_workflow(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    project_id: UUID,
+    task_id: UUID,
+    data: DevelopmentWorkflowCreate,
+) -> tuple[WorkflowPlan, WorkflowRun]:
+    """Persist the one fixed Manager -> Developer -> QA graph without model execution."""
+    scoped_project = await _task_scope(
+        session, tenant_id=tenant_id, workspace_id=workspace_id, task_id=task_id
+    )
+    if scoped_project != project_id:
+        raise _not_found()
+    manager = await manager_service.resolve_definition(
+        session, tenant_id=tenant_id, workspace_id=workspace_id
+    )
+    developer = await developer_service.resolve_definition(
+        session, tenant_id=tenant_id, workspace_id=workspace_id
+    )
+    qa = await qa_service.resolve_definition(
+        session, tenant_id=tenant_id, workspace_id=workspace_id
+    )
+    checks = (
+        (
+            manager,
+            manager_service.DEVELOPER_MANAGER_NAME,
+            manager_service.DEVELOPER_MANAGER_CATEGORY,
+            manager_service.DEVELOPER_MANAGER_MISSION,
+            manager_service.DEVELOPER_MANAGER_CAPABILITIES,
+        ),
+        (
+            developer,
+            developer_service.DEVELOPER_WORKER_NAME,
+            developer_service.DEVELOPER_WORKER_CATEGORY,
+            developer_service.DEVELOPER_WORKER_MISSION,
+            developer_service.DEVELOPER_WORKER_CAPABILITIES,
+        ),
+        (
+            qa,
+            qa_service.QA_WORKER_NAME,
+            qa_service.QA_WORKER_CATEGORY,
+            qa_service.QA_WORKER_MISSION,
+            qa_service.QA_WORKER_CAPABILITIES,
+        ),
+    )
+    if not all(
+        _trusted_definition(
+            item, name=name, category=category, mission=mission, capabilities=capabilities
+        )
+        for item, name, category, mission, capabilities in checks
+    ):
+        raise ApplicationError(
+            "development_workflow_unavailable",
+            "Trusted development agents are unavailable",
+            status_code=409,
+        )
+    plan = await create_plan(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        task_id=task_id,
+        data=WorkflowPlanCreate(
+            title="Development workflow",
+            summary="Fixed governed Manager to Developer Worker to QA Worker workflow",
+            steps=[
+                {
+                    "step_key": "manager_plan",
+                    "title": "Plan development assignment",
+                    "step_type": "AGENT_TASK",
+                    "assigned_capability": "implementation_planning",
+                    "agent_definition_id": manager.id,
+                    "risk_level": "LOW",
+                    "depends_on": [],
+                },
+                {
+                    "step_key": "developer_execute",
+                    "title": "Execute development assignment",
+                    "step_type": "AGENT_TASK",
+                    "assigned_capability": "software_implementation",
+                    "agent_definition_id": developer.id,
+                    "risk_level": "LOW",
+                    "depends_on": ["manager_plan"],
+                },
+                {
+                    "step_key": "qa_validate",
+                    "title": "Validate development result",
+                    "step_type": "AGENT_TASK",
+                    "assigned_capability": "acceptance_validation",
+                    "agent_definition_id": qa.id,
+                    "risk_level": "LOW",
+                    "depends_on": ["developer_execute"],
+                },
+            ],
+        ),
+    )
+    run = await create_run(session, tenant_id=tenant_id, workspace_id=workspace_id, plan_id=plan.id)
+    ordered = await repository.ordered_step_runs(session, run_id=run.id)
+    manager_step_run = ordered[0][0]
+    await repository.add_handoff(
+        session,
+        WorkflowStepHandoff(
+            workflow_run_id=run.id,
+            workflow_plan_id=plan.id,
+            source_step_run_id=None,
+            destination_step_run_id=manager_step_run.id,
+            handoff_type="DEVELOPMENT_REQUEST",
+            objective=data.objective,
+            acceptance_criteria=data.acceptance_criteria,
+            evidence_items=[],
+        ),
+    )
+    await session.commit()
+    return plan, run
 
 
 async def get_run(

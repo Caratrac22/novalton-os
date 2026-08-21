@@ -12,6 +12,7 @@ from novalton_api.modules.workflows.models import (
     WorkflowRun,
     WorkflowStep,
     WorkflowStepDependency,
+    WorkflowStepHandoff,
     WorkflowStepRun,
 )
 
@@ -286,3 +287,20 @@ async def link_agent_run(
         .values(agent_run_id=agent_run_id)
         .returning(WorkflowStepRun)
     )
+
+
+async def handoff_for_destination(
+    session: AsyncSession, *, run_id: UUID, destination_step_run_id: UUID
+) -> WorkflowStepHandoff | None:
+    return await session.scalar(
+        select(WorkflowStepHandoff).where(
+            WorkflowStepHandoff.workflow_run_id == run_id,
+            WorkflowStepHandoff.destination_step_run_id == destination_step_run_id,
+        )
+    )
+
+
+async def add_handoff(session: AsyncSession, handoff: WorkflowStepHandoff) -> WorkflowStepHandoff:
+    session.add(handoff)
+    await session.flush()
+    return handoff

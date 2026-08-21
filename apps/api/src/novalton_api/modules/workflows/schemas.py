@@ -1,5 +1,6 @@
 """Strict bounded workflow API and internal lifecycle contracts."""
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated
@@ -24,6 +25,9 @@ Capability = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{0,63}$")
 
 MAX_PLAN_STEPS = 100
 MAX_PLAN_EDGES = 500
+_UNSAFE_HANDOFF = re.compile(
+    r"(?:https?://|data:|;base64,|```|\$\(|&&|\|\||\b(?:sudo|curl|wget)\s)", re.IGNORECASE
+)
 
 
 class WorkflowStepType(StrEnum):
@@ -181,3 +185,39 @@ class WorkflowRunListResponse(BaseModel):
     items: list[WorkflowRunResponse]
     limit: Annotated[int, Field(ge=1, le=100)]
     offset: Annotated[int, Field(ge=0)]
+
+
+class DevelopmentWorkflowCreate(BaseModel):
+    """Trusted bounded input for the fixed I-028 graph."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    objective: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1500)
+    ]
+    acceptance_criteria: Annotated[
+        list[
+            Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)]
+        ],
+        Field(min_length=1, max_length=24),
+    ]
+
+    @field_validator("objective")
+    @classmethod
+    def safe_objective(cls, value: str) -> str:
+        if _UNSAFE_HANDOFF.search(value):
+            raise ValueError("executable or externally addressed content is not allowed")
+        return value
+
+    @field_validator("acceptance_criteria")
+    @classmethod
+    def safe_criteria(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("duplicate acceptance criterion")
+        if any(_UNSAFE_HANDOFF.search(value) for value in values):
+            raise ValueError("executable or externally addressed content is not allowed")
+        return values
+
+
+class DevelopmentWorkflowResponse(BaseModel):
+    workflow_plan: WorkflowPlanResponse
+    workflow_run: WorkflowRunResponse

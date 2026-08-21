@@ -38,6 +38,7 @@ from novalton_api.modules.workflows.models import (  # noqa: E402, F401
     WorkflowRun,
     WorkflowStep,
     WorkflowStepDependency,
+    WorkflowStepHandoff,
     WorkflowStepRun,
 )
 from novalton_api.modules.workspaces.models import Workspace  # noqa: E402, F401

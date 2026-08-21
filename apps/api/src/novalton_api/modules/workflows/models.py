@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -227,6 +228,9 @@ class WorkflowStepRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UniqueConstraint(
             "workflow_run_id", "workflow_step_id", name="uq_workflow_step_runs_run_step"
         ),
+        UniqueConstraint(
+            "id", "workflow_run_id", "workflow_plan_id", name="uq_workflow_step_runs_id_run_plan"
+        ),
         CheckConstraint(
             "status IN ('PENDING', 'READY', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED')",
             name="ck_workflow_step_runs_status_value",
@@ -276,3 +280,65 @@ class WorkflowStepRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkflowStepHandoff(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Immutable, typed, metadata-only input for one vertical-workflow step."""
+
+    __tablename__ = "workflow_step_handoffs"
+    __table_args__ = (
+        UniqueConstraint("destination_step_run_id", name="uq_workflow_handoffs_destination"),
+        UniqueConstraint("source_step_run_id", name="uq_workflow_handoffs_source"),
+        CheckConstraint(
+            "handoff_type IN ('DEVELOPMENT_REQUEST', 'MANAGER_ASSIGNMENT', 'WORKER_EVIDENCE')",
+            name="ck_workflow_handoffs_type",
+        ),
+        CheckConstraint(
+            "char_length(objective) BETWEEN 1 AND 2000", name="ck_workflow_handoffs_objective"
+        ),
+        CheckConstraint(
+            "cardinality(acceptance_criteria) BETWEEN 1 AND 24",
+            name="ck_workflow_handoffs_criteria",
+        ),
+        CheckConstraint("cardinality(evidence_items) <= 64", name="ck_workflow_handoffs_evidence"),
+        ForeignKeyConstraint(
+            ["workflow_run_id", "workflow_plan_id"],
+            ["workflow_runs.id", "workflow_runs.workflow_plan_id"],
+            name="fk_workflow_handoffs_run_plan",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["destination_step_run_id", "workflow_run_id", "workflow_plan_id"],
+            [
+                "workflow_step_runs.id",
+                "workflow_step_runs.workflow_run_id",
+                "workflow_step_runs.workflow_plan_id",
+            ],
+            name="fk_workflow_handoffs_destination_scope",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["source_step_run_id", "workflow_run_id", "workflow_plan_id"],
+            [
+                "workflow_step_runs.id",
+                "workflow_step_runs.workflow_run_id",
+                "workflow_step_runs.workflow_plan_id",
+            ],
+            name="fk_workflow_handoffs_source_scope",
+            ondelete="RESTRICT",
+        ),
+    )
+    workflow_run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    workflow_plan_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    source_step_run_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=True
+    )
+    destination_step_run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    handoff_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    objective: Mapped[str] = mapped_column(Text, nullable=False)
+    acceptance_criteria: Mapped[list[str]] = mapped_column(ARRAY(String(1000)), nullable=False)
+    evidence_items: Mapped[list[str]] = mapped_column(
+        ARRAY(String(1000)), nullable=False, default=list
+    )
