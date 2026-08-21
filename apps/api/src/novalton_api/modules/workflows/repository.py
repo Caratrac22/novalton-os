@@ -176,6 +176,28 @@ async def get_step_run(
     )
 
 
+async def ordered_step_runs(
+    session: AsyncSession, *, run_id: UUID
+) -> list[tuple[WorkflowStepRun, WorkflowStep]]:
+    """Return the persisted run graph in its immutable plan order."""
+    rows = await session.execute(
+        select(WorkflowStepRun, WorkflowStep)
+        .join(WorkflowStep, WorkflowStep.id == WorkflowStepRun.workflow_step_id)
+        .where(WorkflowStepRun.workflow_run_id == run_id)
+        .order_by(WorkflowStep.position.asc(), WorkflowStep.step_key.asc(), WorkflowStep.id.asc())
+    )
+    return list(rows.tuples())
+
+
+async def count_step_states(session: AsyncSession, *, run_id: UUID) -> dict[str, int]:
+    rows = await session.execute(
+        select(WorkflowStepRun.status, func.count())
+        .where(WorkflowStepRun.workflow_run_id == run_id)
+        .group_by(WorkflowStepRun.status)
+    )
+    return {status: int(count) for status, count in rows}
+
+
 async def transition_run(
     session: AsyncSession,
     *,

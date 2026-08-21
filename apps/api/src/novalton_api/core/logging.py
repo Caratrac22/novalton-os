@@ -28,6 +28,13 @@ _OPTIONAL_CONTEXT_FIELDS = (
     "total_tokens",
     "cost",
     "currency",
+    "exception_type",
+    "workflow_step_run_id",
+    "step_key",
+    "challenge_level",
+    "reason_code",
+    "remaining_ready",
+    "remaining_pending",
 )
 
 
