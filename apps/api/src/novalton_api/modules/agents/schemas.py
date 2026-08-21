@@ -15,6 +15,8 @@ from pydantic import (
     model_validator,
 )
 
+from novalton_api.modules.agents.contracts import AgentInput, AgentResult
+
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
 
@@ -139,3 +141,28 @@ class AgentRunListResponse(BaseModel):
     items: list[AgentRunResponse]
     limit: int
     offset: int
+
+
+class AgentExecutionRequest(AgentInput):
+    """The I-021 input is the complete public execution request."""
+
+
+class SelectedModelResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    catalog_model_id: UUID
+    provider_id: str
+    provider_model_id: str
+
+
+class AgentExecutionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    agent_run_id: UUID
+    agent_definition_id: UUID
+    agent_definition_version: int
+    status: AgentRunStatus
+    selected_model: SelectedModelResponse | None = None
+    model_run_id: UUID | None = None
+    result: AgentResult | None = None
+    error_code: str | None = None

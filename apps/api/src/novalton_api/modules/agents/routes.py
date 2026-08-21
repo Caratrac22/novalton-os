@@ -3,16 +3,18 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.database import get_async_session
-from novalton_api.modules.agents import service
+from novalton_api.modules.agents import execution, service
 from novalton_api.modules.agents.schemas import (
     AgentDefinitionCreate,
     AgentDefinitionListResponse,
     AgentDefinitionResponse,
     AgentDefinitionVersionCreate,
+    AgentExecutionRequest,
+    AgentExecutionResponse,
     AgentRunListResponse,
     AgentRunResponse,
     AgentRunStatus,
@@ -98,6 +100,25 @@ async def get_definition(
             workspace_id=workspace_id,
             definition_id=agent_definition_id,
         )
+    )
+
+
+@definitions_router.post("/{agent_definition_id}/run", response_model=AgentExecutionResponse)
+async def execute_agent(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    agent_definition_id: UUID,
+    data: AgentExecutionRequest,
+    session: Session,
+    request: Request,
+) -> AgentExecutionResponse:
+    return await execution.execute(
+        session,
+        registry=request.app.state.provider_registry,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        definition_id=agent_definition_id,
+        data=data,
     )
 
 

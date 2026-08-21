@@ -139,3 +139,26 @@ async def transition_run(
         .values(**values)
         .returning(AgentRun)
     )
+
+
+async def link_model_run(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    run_id: UUID,
+    model_run_id: UUID,
+) -> AgentRun | None:
+    """Attach the single trusted model invocation while the agent run is active."""
+    return await session.scalar(
+        update(AgentRun)
+        .where(
+            AgentRun.id == run_id,
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.workspace_id == workspace_id,
+            AgentRun.status == "RUNNING",
+            AgentRun.model_run_id.is_(None),
+        )
+        .values(model_run_id=model_run_id)
+        .returning(AgentRun)
+    )
