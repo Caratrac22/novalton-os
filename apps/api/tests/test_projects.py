@@ -124,6 +124,7 @@ def test_project_metadata_has_workspace_scope_and_constraints() -> None:
         "workflow_step_dependencies",
         "workflow_runs",
         "workflow_step_runs",
+        "workflow_step_handoffs",
     }
     table = Base.metadata.tables["projects"]
     names = {constraint.name for constraint in table.constraints}
