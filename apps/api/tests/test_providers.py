@@ -296,7 +296,7 @@ async def test_openrouter_catalog_normalizes_live_auto_beta_dynamic_pricing() ->
 
 
 @pytest.mark.asyncio
-async def test_openrouter_generation_transport_headers_are_unchanged() -> None:
+async def test_openrouter_generation_transport_headers_request_identity_encoding() -> None:
     captured: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -312,7 +312,7 @@ async def test_openrouter_generation_transport_headers_are_unchanged() -> None:
     assert captured[0].headers["accept"] == "application/json"
     assert captured[0].headers["content-type"] == "application/json"
     assert captured[0].headers["authorization"] == f"Bearer {API_KEY}"
-    assert captured[0].headers["accept-encoding"] != "identity"
+    assert captured[0].headers["accept-encoding"] == "identity"
 
 
 @pytest.mark.asyncio

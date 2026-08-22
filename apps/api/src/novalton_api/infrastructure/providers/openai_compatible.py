@@ -51,7 +51,11 @@ class OpenAICompatibleProvider:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._config = config
-        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+            "Content-Type": "application/json",
+        }
         if config.api_key is not None:
             headers["Authorization"] = f"Bearer {config.api_key.get_secret_value()}"
         self._client = httpx.AsyncClient(
