@@ -147,7 +147,10 @@ def test_catalog_contract_is_strict_conservative_and_decimal() -> None:
 
 @pytest.mark.asyncio
 async def test_openrouter_catalog_normalizes_bounded_metadata_without_raw_payload() -> None:
+    captured: list[httpx.Request] = []
+
     async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
         assert request.url == "https://provider.example/v1/models"
         return httpx.Response(
             200,
@@ -173,6 +176,10 @@ async def test_openrouter_catalog_normalizes_bounded_metadata_without_raw_payloa
         models = await source.list_models()
     finally:
         await source.aclose()
+    assert len(captured) == 1
+    assert captured[0].headers["accept"] == "application/json"
+    assert captured[0].headers["accept-encoding"] == "identity"
+    assert captured[0].headers["authorization"] == f"Bearer {API_KEY}"
     assert models == [
         CatalogModel(
             provider_model_id="vendor/model-free",
@@ -192,6 +199,26 @@ async def test_openrouter_catalog_normalizes_bounded_metadata_without_raw_payloa
         ),
     ]
     assert "raw_secret_metadata" not in repr(models)
+
+
+@pytest.mark.asyncio
+async def test_openrouter_generation_transport_headers_are_unchanged() -> None:
+    captured: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=response_payload())
+
+    async with OpenAICompatibleProvider(
+        config(), transport=httpx.MockTransport(handler)
+    ) as provider:
+        await provider.complete(request())
+
+    assert len(captured) == 1
+    assert captured[0].headers["accept"] == "application/json"
+    assert captured[0].headers["content-type"] == "application/json"
+    assert captured[0].headers["authorization"] == f"Bearer {API_KEY}"
+    assert captured[0].headers["accept-encoding"] != "identity"
 
 
 @pytest.mark.asyncio

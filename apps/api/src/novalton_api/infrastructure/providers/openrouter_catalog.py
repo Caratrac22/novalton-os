@@ -32,7 +32,10 @@ class OpenRouterCatalogSource:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._config = config
-        headers = {"Accept": "application/json"}
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+        }
         if config.api_key is not None:
             headers["Authorization"] = f"Bearer {config.api_key.get_secret_value()}"
         self._client = httpx.AsyncClient(
