@@ -180,8 +180,10 @@ class OpenRouterCatalogSource:
         if pricing is not None:
             if not isinstance(pricing, dict):
                 raise ValueError("invalid pricing")
-            input_price = self._per_million(pricing.get("prompt"))
-            output_price = self._per_million(pricing.get("completion"))
+            input_price = self._per_million(pricing["prompt"]) if "prompt" in pricing else None
+            output_price = (
+                self._per_million(pricing["completion"]) if "completion" in pricing else None
+            )
         currency = "USD" if input_price is not None or output_price is not None else None
         return CatalogModel(
             provider_model_id=model_id,
@@ -201,10 +203,10 @@ class OpenRouterCatalogSource:
 
     @staticmethod
     def _per_million(value: Any) -> Decimal | None:
-        if value is None:
-            return None
         if not isinstance(value, str):
             raise ValueError("price must be a decimal string")
+        if value == "-1":
+            return None
         price = Decimal(value) * _MILLION
         if not price.is_finite() or price < 0:
             raise ValueError("invalid price")

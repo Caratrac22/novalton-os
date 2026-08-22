@@ -202,6 +202,100 @@ async def test_openrouter_catalog_normalizes_bounded_metadata_without_raw_payloa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pricing", "input_price", "output_price", "currency"),
+    [
+        ({"prompt": "-1", "completion": "0.00000125"}, None, Decimal("1.25000000"), "USD"),
+        ({"prompt": "0.0000005", "completion": "-1"}, Decimal("0.5000000"), None, "USD"),
+        ({"prompt": "-1", "completion": "-1"}, None, None, None),
+        (
+            {"prompt": "0.0000005", "completion": "0.00000125"},
+            Decimal("0.5000000"),
+            Decimal("1.25000000"),
+            "USD",
+        ),
+        ({"prompt": "0", "completion": "0"}, Decimal("0"), Decimal("0"), "USD"),
+    ],
+)
+async def test_openrouter_catalog_normalizes_dynamic_pricing_sentinel(
+    pricing: dict[str, object],
+    input_price: Decimal | None,
+    output_price: Decimal | None,
+    currency: str | None,
+) -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "vendor/model-pricing", "pricing": pricing}]},
+        )
+
+    source = OpenRouterCatalogSource(config(), transport=httpx.MockTransport(handler))
+    try:
+        models = await source.list_models()
+    finally:
+        await source.aclose()
+
+    assert models[0].input_price_per_million == input_price
+    assert models[0].output_price_per_million == output_price
+    assert models[0].currency == currency
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "price",
+    ["-0.5", "-2", "bad", "NaN", "Infinity", "-Infinity", None, 1, True, [], {}],
+)
+async def test_openrouter_catalog_rejects_invalid_pricing(price: object) -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "vendor/model-bad-price", "pricing": {"prompt": price}}]},
+        )
+
+    source = OpenRouterCatalogSource(config(), transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ProviderError) as error:
+            await source.list_models()
+    finally:
+        await source.aclose()
+
+    assert error.value.failure == ProviderFailure.MALFORMED_RESPONSE
+
+
+@pytest.mark.asyncio
+async def test_openrouter_catalog_normalizes_live_auto_beta_dynamic_pricing() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "openrouter/auto-beta",
+                        "name": "Auto Router (Beta)",
+                        "pricing": {"prompt": "-1", "completion": "-1"},
+                    }
+                ]
+            },
+        )
+
+    source = OpenRouterCatalogSource(config(), transport=httpx.MockTransport(handler))
+    try:
+        models = await source.list_models()
+    finally:
+        await source.aclose()
+
+    assert models == [
+        CatalogModel(
+            provider_model_id="openrouter/auto-beta",
+            display_name="Auto Router (Beta)",
+            input_price_per_million=None,
+            output_price_per_million=None,
+            currency=None,
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_openrouter_generation_transport_headers_are_unchanged() -> None:
     captured: list[httpx.Request] = []
 
