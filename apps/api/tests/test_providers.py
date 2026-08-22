@@ -83,6 +83,13 @@ def test_request_and_result_are_strict_bounded_and_serializable() -> None:
     }
     with pytest.raises(ValidationError):
         request(model_id="bad model")
+    assert request(model_id="~openai/gpt-latest").model_id == "~openai/gpt-latest"
+    with pytest.raises(ValidationError):
+        request(model_id="openai/~gpt-latest")
+    with pytest.raises(ValidationError):
+        request(model_id="~~openai/gpt-latest")
+    with pytest.raises(ValidationError):
+        request(model_id="~")
     with pytest.raises(ValidationError):
         Message(role=MessageRole.USER, content="x" * (MAX_MESSAGE_CHARACTERS + 1))
     with pytest.raises(ValidationError, match="request limit"):
@@ -99,6 +106,10 @@ def test_request_and_result_are_strict_bounded_and_serializable() -> None:
             content="answer",
             raw_response={"not": "allowed"},
         )
+    with pytest.raises(ValidationError):
+        GenerationResult(provider_id="~openrouter", model_id="model", content="answer")
+    with pytest.raises(ValidationError):
+        config(provider_id="~openrouter")
 
 
 def test_catalog_contract_is_strict_conservative_and_decimal() -> None:
@@ -150,7 +161,9 @@ async def test_openrouter_catalog_normalizes_bounded_metadata_without_raw_payloa
                         "architecture": {"input_modalities": ["text", "image"]},
                         "pricing": {"prompt": "0", "completion": "0.00000125"},
                         "raw_secret_metadata": "must-not-survive",
-                    }
+                    },
+                    {"id": "~z-ai/glm-latest"},
+                    {"id": "vendor/model-after-alias"},
                 ]
             },
         )
@@ -171,9 +184,37 @@ async def test_openrouter_catalog_normalizes_bounded_metadata_without_raw_payloa
             input_price_per_million=Decimal("0"),
             output_price_per_million=Decimal("1.25000000"),
             currency="USD",
-        )
+        ),
+        CatalogModel(provider_model_id="~z-ai/glm-latest", display_name="~z-ai/glm-latest"),
+        CatalogModel(
+            provider_model_id="vendor/model-after-alias",
+            display_name="vendor/model-after-alias",
+        ),
     ]
     assert "raw_secret_metadata" not in repr(models)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [{"id": "vendor/bad model"}],
+        [{"id": "vendor/duplicate"}, {"id": "vendor/duplicate"}],
+    ],
+)
+async def test_openrouter_catalog_rejects_malformed_or_duplicate_model_ids(
+    entries: list[dict[str, str]],
+) -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": entries})
+
+    source = OpenRouterCatalogSource(config(), transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ProviderError) as error:
+            await source.list_models()
+    finally:
+        await source.aclose()
+    assert error.value.failure == ProviderFailure.MALFORMED_RESPONSE
 
 
 @pytest.mark.asyncio
@@ -264,7 +305,7 @@ async def test_successful_normalization_serialization_and_nullable_usage() -> No
         config(), transport=httpx.MockTransport(handler)
     ) as provider:
         assert isinstance(provider, ModelProvider)
-        result = await provider.complete(request())
+        result = await provider.complete(request(model_id="~openai/gpt-latest"))
 
     assert result.model_dump(mode="json", exclude={"duration_ms"}) == {
         "provider_id": "openrouter",
@@ -280,7 +321,7 @@ async def test_successful_normalization_serialization_and_nullable_usage() -> No
     assert len(captured) == 1
     assert captured[0].url == "https://provider.example/v1/chat/completions"
     assert json.loads(captured[0].content) == {
-        "model": "vendor/model-1",
+        "model": "~openai/gpt-latest",
         "messages": [{"role": "user", "content": "Bounded test prompt"}],
         "stream": False,
         "max_tokens": 123,

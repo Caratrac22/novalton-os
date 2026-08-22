@@ -11,7 +11,10 @@ MAX_MESSAGES = 128
 MAX_MESSAGE_CHARACTERS = 65_536
 MAX_REQUEST_CHARACTERS = 262_144
 MAX_RESULT_CHARACTERS = 1_048_576
-MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
+MODEL_ID_PATTERN = re.compile(
+    r"^(?:[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}|~[A-Za-z0-9][A-Za-z0-9._:/+-]{0,254})$"
+)
+PROVIDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
 
 ModelIdentifier = Annotated[
     str,
@@ -117,7 +120,7 @@ class GenerationResult(BaseModel):
 
     @model_validator(mode="after")
     def validate_identifiers(self) -> Self:
-        if MODEL_ID_PATTERN.fullmatch(self.provider_id) is None:
+        if PROVIDER_ID_PATTERN.fullmatch(self.provider_id) is None:
             raise ValueError("provider_id contains unsupported characters")
         if MODEL_ID_PATTERN.fullmatch(self.model_id) is None:
             raise ValueError("model_id contains unsupported characters")
