@@ -466,7 +466,8 @@ async def test_successful_normalization_serialization_and_nullable_usage() -> No
 
     assert result.model_dump(mode="json", exclude={"duration_ms"}) == {
         "provider_id": "openrouter",
-        "model_id": "vendor/model-actual",
+        "model_id": "~openai/gpt-latest",
+        "provider_resolved_model_id": "vendor/model-actual",
         "content": "Normalized answer",
         "finish_reason": "stop",
         "input_tokens": None,
@@ -484,6 +485,34 @@ async def test_successful_normalization_serialization_and_nullable_usage() -> No
         "max_tokens": 123,
     }
     assert captured[0].headers["authorization"] == f"Bearer {API_KEY}"
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_retains_fixed_requested_model_identity() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=response_payload(model="vendor/model-1"))
+
+    async with OpenAICompatibleProvider(
+        config(), transport=httpx.MockTransport(handler)
+    ) as provider:
+        result = await provider.complete(request(model_id="vendor/model-1"))
+
+    assert result.model_id == "vendor/model-1"
+    assert result.provider_resolved_model_id == "vendor/model-1"
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_records_routed_alias_resolution_separately() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=response_payload(model="vendor/free-resolved"))
+
+    async with OpenAICompatibleProvider(
+        config(), transport=httpx.MockTransport(handler)
+    ) as provider:
+        result = await provider.complete(request(model_id="openrouter/free"))
+
+    assert result.model_id == "openrouter/free"
+    assert result.provider_resolved_model_id == "vendor/free-resolved"
 
 
 @pytest.mark.asyncio
@@ -592,6 +621,7 @@ async def test_malformed_and_refusal_responses_are_classified() -> None:
         [
             httpx.Response(200, content=b"not-json"),
             httpx.Response(200, json=response_payload(choices=[])),
+            httpx.Response(200, json=response_payload(model="bad model")),
             httpx.Response(
                 200,
                 json=response_payload(
@@ -617,6 +647,7 @@ async def test_malformed_and_refusal_responses_are_classified() -> None:
         config(), transport=httpx.MockTransport(handler)
     ) as provider:
         expected = [
+            ProviderFailure.MALFORMED_RESPONSE,
             ProviderFailure.MALFORMED_RESPONSE,
             ProviderFailure.MALFORMED_RESPONSE,
             ProviderFailure.REFUSAL,

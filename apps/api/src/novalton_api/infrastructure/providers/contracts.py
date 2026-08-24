@@ -134,6 +134,7 @@ class GenerationResult(BaseModel):
 
     provider_id: ModelIdentifier
     model_id: ModelIdentifier
+    provider_resolved_model_id: ModelIdentifier | None = None
     content: str = Field(min_length=1, max_length=MAX_RESULT_CHARACTERS)
     finish_reason: str | None = Field(default=None, min_length=1, max_length=128)
     input_tokens: int | None = Field(default=None, ge=0)
@@ -148,4 +149,9 @@ class GenerationResult(BaseModel):
             raise ValueError("provider_id contains unsupported characters")
         if MODEL_ID_PATTERN.fullmatch(self.model_id) is None:
             raise ValueError("model_id contains unsupported characters")
+        if (
+            self.provider_resolved_model_id is not None
+            and MODEL_ID_PATTERN.fullmatch(self.provider_resolved_model_id) is None
+        ):
+            raise ValueError("provider_resolved_model_id contains unsupported characters")
         return self

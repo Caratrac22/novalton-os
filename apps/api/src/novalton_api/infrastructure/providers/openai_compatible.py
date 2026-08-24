@@ -198,8 +198,15 @@ class OpenAICompatibleProvider:
         if refusal or finish_reason in {"content_filter", "safety"}:
             raise ProviderError(ProviderFailure.REFUSAL, provider_id=self.provider_id)
         content = message.get("content") if isinstance(message, dict) else None
-        model_id = payload.get("model", requested_model_id)
-        if not isinstance(content, str) or not content or not isinstance(model_id, str):
+        provider_resolved_model_id = payload.get("model")
+        if (
+            not isinstance(content, str)
+            or not content
+            or (
+                provider_resolved_model_id is not None
+                and not isinstance(provider_resolved_model_id, str)
+            )
+        ):
             raise ProviderError(ProviderFailure.MALFORMED_RESPONSE, provider_id=self.provider_id)
 
         usage = payload.get("usage")
@@ -214,7 +221,8 @@ class OpenAICompatibleProvider:
         try:
             return GenerationResult(
                 provider_id=self.provider_id,
-                model_id=model_id,
+                model_id=requested_model_id,
+                provider_resolved_model_id=provider_resolved_model_id,
                 content=content,
                 finish_reason=finish_reason if isinstance(finish_reason, str) else None,
                 input_tokens=input_tokens,

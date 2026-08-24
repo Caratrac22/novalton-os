@@ -95,7 +95,12 @@ class MockProvider:
         )
 
 
-async def _seed(*, model_available: bool = True, definition_status: str = "ENABLED") -> Scope:
+async def _seed(
+    *,
+    model_available: bool = True,
+    definition_status: str = "ENABLED",
+    provider_model_id: str | None = None,
+) -> Scope:
     database = Database.from_settings(Settings())
     try:
         async with database.session_factory.begin() as session:
@@ -123,7 +128,7 @@ async def _seed(*, model_available: bool = True, definition_status: str = "ENABL
             )
             model = ModelDefinition(
                 provider_id="mock",
-                provider_model_id=f"model-{uuid4().hex}",
+                provider_model_id=provider_model_id or f"model-{uuid4().hex}",
                 display_name="Mock model",
                 status="AVAILABLE" if model_available else "UNAVAILABLE",
                 context_window=128_000,
@@ -289,6 +294,58 @@ def test_provider_backed_execution_captures_usage_and_linkage(
         )
         assert "content" not in ModelRun.__table__.columns
         assert (approvals, policies) == (0, 0)
+    finally:
+        asyncio.run(_cleanup(scope))
+
+
+def test_routed_alias_resolution_metadata_does_not_trigger_identity_mismatch() -> None:
+    scope = asyncio.run(_seed(provider_model_id="openrouter/free"))
+
+    class ResolvingProvider(MockProvider):
+        async def complete(self, request: GenerationRequest) -> GenerationResult:
+            self.calls.append(request)
+            return GenerationResult(
+                provider_id=self.provider_id,
+                model_id=request.model_id,
+                provider_resolved_model_id="vendor/free-resolved",
+                content=self.content,
+                input_tokens=100,
+                output_tokens=20,
+                total_tokens=120,
+                provider_request_id="request-safe-1",
+                duration_ms=12.5,
+            )
+
+    provider = ResolvingProvider()
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            body = client.post(_url(scope), json=_input(scope)).json()
+        assert body["status"] == "SUCCEEDED"
+        assert body["error_code"] is None
+        assert provider.calls[0].model_id == "openrouter/free"
+    finally:
+        asyncio.run(_cleanup(scope))
+
+
+def test_true_provider_identity_mismatch_still_fails_closed() -> None:
+    scope = asyncio.run(_seed(provider_model_id="routed-model"))
+
+    class MismatchingProvider(MockProvider):
+        async def complete(self, request: GenerationRequest) -> GenerationResult:
+            self.calls.append(request)
+            return GenerationResult(
+                provider_id=self.provider_id,
+                model_id="different-model",
+                provider_resolved_model_id="vendor/resolved",
+                content=self.content,
+            )
+
+    provider = MismatchingProvider()
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            body = client.post(_url(scope), json=_input(scope)).json()
+        assert body["status"] == "FAILED"
+        assert body["error_code"] == "provider_identity_mismatch"
     finally:
         asyncio.run(_cleanup(scope))
 
