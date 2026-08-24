@@ -19,6 +19,8 @@ from novalton_api.infrastructure.providers.errors import (
 )
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.main import create_app
+from novalton_api.modules.agents.contracts import AgentInput, AgentResult
+from novalton_api.modules.agents.execution import _generation_request
 from novalton_api.modules.agents.models import AgentDefinition, AgentRun
 from novalton_api.modules.approvals.models import ApprovalRequest
 from novalton_api.modules.model_catalog.models import ModelDefinition
@@ -182,6 +184,39 @@ def _url(scope: Scope) -> str:
         f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
         f"/agents/{scope.definition_id}/run"
     )
+
+
+def test_generation_request_propagates_strict_agent_result_schema() -> None:
+    definition = AgentDefinition(
+        tenant_id=uuid4(),
+        workspace_id=uuid4(),
+        name="Reviewer",
+        slug="reviewer",
+        version=1,
+        status="ENABLED",
+        category="review",
+        mission="Review the supplied bounded input.",
+        capabilities=["reasoning"],
+        permissions=[],
+    )
+    data = AgentInput.model_validate(
+        {
+            "objective": "Review this task",
+            "constraints": ["Do not execute actions"],
+            "context_references": [],
+            "source_references": [],
+            "prior_result_references": [],
+            "expected_output_type": "review.report",
+            "permitted_tools": [],
+        }
+    )
+
+    generation = _generation_request(definition, data, provider_model_id="model-1")
+
+    assert generation.structured_output is not None
+    assert generation.structured_output.name == "AgentResult"
+    assert generation.structured_output.json_schema == AgentResult.model_json_schema()
+    assert generation.structured_output.strict is True
 
 
 def test_provider_backed_execution_captures_usage_and_linkage(

@@ -14,6 +14,7 @@ from novalton_api.infrastructure.providers.contracts import (
     GenerationRequest,
     Message,
     MessageRole,
+    StructuredOutputRequest,
 )
 from novalton_api.infrastructure.providers.errors import (
     ProviderCancellationError,
@@ -104,8 +105,9 @@ def _generation_request(
     result_contract: type[AgentResult] = AgentResult,
     contract_instructions: str | None = None,
 ) -> GenerationRequest:
+    result_json_schema = result_contract.model_json_schema()
     result_schema = json.dumps(
-        result_contract.model_json_schema(),
+        result_json_schema,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -132,6 +134,11 @@ def _generation_request(
             Message(role=MessageRole.USER, content=user),
         ],
         max_output_tokens=_EXPECTED_OUTPUT_TOKENS,
+        structured_output=StructuredOutputRequest(
+            name=result_contract.__name__,
+            json_schema=result_json_schema,
+            strict=True,
+        ),
     )
 
 

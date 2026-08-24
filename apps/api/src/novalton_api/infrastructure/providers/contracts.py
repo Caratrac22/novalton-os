@@ -3,7 +3,7 @@
 import re
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated, Self
+from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
@@ -11,10 +11,12 @@ MAX_MESSAGES = 128
 MAX_MESSAGE_CHARACTERS = 65_536
 MAX_REQUEST_CHARACTERS = 262_144
 MAX_RESULT_CHARACTERS = 1_048_576
+MAX_SCHEMA_NAME_CHARACTERS = 64
 MODEL_ID_PATTERN = re.compile(
     r"^(?:[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}|~[A-Za-z0-9][A-Za-z0-9._:/+-]{0,254})$"
 )
 PROVIDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
+SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 ModelIdentifier = Annotated[
     str,
@@ -85,6 +87,27 @@ class Message(BaseModel):
     content: MessageContent
 
 
+class StructuredOutputRequest(BaseModel):
+    """Provider-neutral request for a strict JSON Schema-shaped response."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    name: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True, min_length=1, max_length=MAX_SCHEMA_NAME_CHARACTERS
+        ),
+    ]
+    json_schema: dict[str, Any] = Field(min_length=1)
+    strict: bool = True
+
+    @model_validator(mode="after")
+    def validate_schema_name(self) -> Self:
+        if SCHEMA_NAME_PATTERN.fullmatch(self.name) is None:
+            raise ValueError("structured output name contains unsupported characters")
+        return self
+
+
 class GenerationRequest(BaseModel):
     """Provider-neutral non-streaming text generation request."""
 
@@ -93,6 +116,7 @@ class GenerationRequest(BaseModel):
     model_id: ModelIdentifier
     messages: list[Message] = Field(min_length=1, max_length=MAX_MESSAGES)
     max_output_tokens: int | None = Field(default=None, ge=1, le=65_536)
+    structured_output: StructuredOutputRequest | None = None
 
     @model_validator(mode="after")
     def validate_bounds(self) -> Self:

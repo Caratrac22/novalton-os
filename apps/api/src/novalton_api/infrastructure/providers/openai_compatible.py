@@ -132,6 +132,15 @@ class OpenAICompatibleProvider:
         }
         if request.max_output_tokens is not None:
             payload["max_tokens"] = request.max_output_tokens
+        if request.structured_output is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": request.structured_output.name,
+                    "schema": request.structured_output.json_schema,
+                    "strict": request.structured_output.strict,
+                },
+            }
         http_request = self._client.build_request(
             "POST",
             f"{self._config.base_url}/chat/completions",

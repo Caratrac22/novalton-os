@@ -20,6 +20,7 @@ from novalton_api.infrastructure.providers.contracts import (
     GenerationResult,
     Message,
     MessageRole,
+    StructuredOutputRequest,
 )
 from novalton_api.infrastructure.providers.errors import (
     ProviderCancellationError,
@@ -76,7 +77,7 @@ def response_payload(**changes: object) -> dict[str, object]:
 
 def test_request_and_result_are_strict_bounded_and_serializable() -> None:
     generated = request()
-    assert generated.model_dump(mode="json") == {
+    assert generated.model_dump(mode="json", exclude_none=True) == {
         "model_id": "vendor/model-1",
         "messages": [{"role": "user", "content": "Bounded test prompt"}],
         "max_output_tokens": 123,
@@ -110,6 +111,41 @@ def test_request_and_result_are_strict_bounded_and_serializable() -> None:
         GenerationResult(provider_id="~openrouter", model_id="model", content="answer")
     with pytest.raises(ValidationError):
         config(provider_id="~openrouter")
+
+
+def test_structured_output_request_is_strict_bounded_and_serializable() -> None:
+    structured = StructuredOutputRequest(
+        name="AgentResult",
+        json_schema={
+            "type": "object",
+            "properties": {"status": {"type": "string"}},
+            "required": ["status"],
+            "additionalProperties": False,
+        },
+    )
+
+    assert request(structured_output=structured).model_dump(mode="json", exclude_none=True)[
+        "structured_output"
+    ] == {
+        "name": "AgentResult",
+        "json_schema": {
+            "type": "object",
+            "properties": {"status": {"type": "string"}},
+            "required": ["status"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+    with pytest.raises(ValidationError):
+        StructuredOutputRequest(name="bad name", json_schema={"type": "object"})
+    with pytest.raises(ValidationError):
+        StructuredOutputRequest(name="AgentResult", json_schema={})
+    with pytest.raises(ValidationError):
+        StructuredOutputRequest(
+            name="AgentResult",
+            json_schema={"type": "object"},
+            provider_specific=True,
+        )
 
 
 def test_catalog_contract_is_strict_conservative_and_decimal() -> None:
@@ -448,6 +484,43 @@ async def test_successful_normalization_serialization_and_nullable_usage() -> No
         "max_tokens": 123,
     }
     assert captured[0].headers["authorization"] == f"Bearer {API_KEY}"
+
+
+@pytest.mark.asyncio
+async def test_structured_output_maps_to_openai_compatible_response_format() -> None:
+    captured: list[httpx.Request] = []
+    schema = {
+        "type": "object",
+        "properties": {"status": {"type": "string"}},
+        "required": ["status"],
+        "additionalProperties": False,
+    }
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        captured.append(http_request)
+        return httpx.Response(200, json=response_payload())
+
+    async with OpenAICompatibleProvider(
+        config(), transport=httpx.MockTransport(handler)
+    ) as provider:
+        await provider.complete(
+            request(
+                structured_output=StructuredOutputRequest(
+                    name="AgentResult",
+                    json_schema=schema,
+                    strict=True,
+                )
+            )
+        )
+
+    assert json.loads(captured[0].content)["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "AgentResult",
+            "schema": schema,
+            "strict": True,
+        },
+    }
 
 
 @pytest.mark.asyncio

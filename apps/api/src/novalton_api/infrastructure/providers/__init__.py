@@ -8,6 +8,7 @@ from novalton_api.infrastructure.providers.contracts import (
     GenerationResult,
     Message,
     MessageRole,
+    StructuredOutputRequest,
 )
 from novalton_api.infrastructure.providers.errors import ProviderError, ProviderFailure
 
@@ -16,6 +17,7 @@ __all__ = [
     "GenerationResult",
     "Message",
     "MessageRole",
+    "StructuredOutputRequest",
     "ModelProvider",
     "CatalogModel",
     "CatalogSourceRegistry",
