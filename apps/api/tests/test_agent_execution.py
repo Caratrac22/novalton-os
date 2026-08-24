@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import delete, func, select
 
 from novalton_api.core.config import Settings
@@ -20,7 +21,10 @@ from novalton_api.infrastructure.providers.errors import (
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.main import create_app
 from novalton_api.modules.agents.contracts import AgentInput, AgentResult
-from novalton_api.modules.agents.execution import _generation_request
+from novalton_api.modules.agents.execution import (
+    _bounded_validation_diagnostics,
+    _generation_request,
+)
 from novalton_api.modules.agents.models import AgentDefinition, AgentRun
 from novalton_api.modules.approvals.models import ApprovalRequest
 from novalton_api.modules.model_catalog.models import ModelDefinition
@@ -306,6 +310,23 @@ def test_invalid_provider_output_fails_without_repair(content: str, code: str) -
         assert len(provider.calls) == 1
     finally:
         asyncio.run(_cleanup(scope))
+
+
+def test_invalid_agent_result_diagnostics_are_content_free_and_bounded() -> None:
+    invalid = json.loads(_valid_result())
+    invalid.update({f"secret_extra_{index}": "RAW_MODEL_OUTPUT_SECRET" for index in range(12)})
+    with pytest.raises(ValidationError) as raised:
+        AgentResult.model_validate_json(json.dumps(invalid), strict=True)
+
+    diagnostics = _bounded_validation_diagnostics(raised.value)
+
+    assert diagnostics == {
+        "validation_error_count": 12,
+        "validation_error_types": ["extra_forbidden"],
+        "validation_error_paths": [f"secret_extra_{index}" for index in range(8)],
+    }
+    assert "RAW_MODEL_OUTPUT_SECRET" not in json.dumps(diagnostics)
+    assert len(diagnostics["validation_error_paths"]) == 8
 
 
 @pytest.mark.parametrize(

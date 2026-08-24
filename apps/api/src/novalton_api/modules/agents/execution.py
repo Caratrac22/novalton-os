@@ -45,6 +45,9 @@ from novalton_api.modules.model_usage.schemas import ModelRunStart
 logger = logging.getLogger(__name__)
 _EXPECTED_OUTPUT_TOKENS = 4096
 _CONTEXT_OVERHEAD_TOKENS = 1024
+_MAX_DIAGNOSTIC_ITEMS = 8
+_MAX_DIAGNOSTIC_PATH_PARTS = 8
+_MAX_DIAGNOSTIC_TEXT = 80
 _KNOWN_CAPABILITIES = {capability.value: capability for capability in ModelCapability}
 
 _RESULT_TO_RUN: dict[AgentResultStatus, tuple[AgentRunStatus, str | None]] = {
@@ -60,6 +63,29 @@ _RESULT_TO_RUN: dict[AgentResultStatus, tuple[AgentRunStatus, str | None]] = {
 def map_result_status(status: AgentResultStatus) -> tuple[AgentRunStatus, str | None]:
     """Map the richer result status to the deliberately narrow I-020 lifecycle."""
     return _RESULT_TO_RUN[status]
+
+
+def _bounded_validation_diagnostics(error: ValidationError) -> dict[str, object]:
+    errors = error.errors(include_url=False, include_context=False, include_input=False)
+    error_types: list[str] = []
+    field_paths: list[str] = []
+    for item in errors[:_MAX_DIAGNOSTIC_ITEMS]:
+        error_type = str(item.get("type", "unknown"))[:_MAX_DIAGNOSTIC_TEXT]
+        if error_type not in error_types:
+            error_types.append(error_type)
+        loc = item.get("loc", ())
+        if isinstance(loc, tuple | list):
+            parts = [str(part)[:_MAX_DIAGNOSTIC_TEXT] for part in loc[:_MAX_DIAGNOSTIC_PATH_PARTS]]
+            path = ".".join(parts) if parts else "<root>"
+        else:
+            path = str(loc)[:_MAX_DIAGNOSTIC_TEXT]
+        if path not in field_paths:
+            field_paths.append(path)
+    return {
+        "validation_error_count": len(errors),
+        "validation_error_types": error_types[:_MAX_DIAGNOSTIC_ITEMS],
+        "validation_error_paths": field_paths[:_MAX_DIAGNOSTIC_ITEMS],
+    }
 
 
 def _scope_id(value: str | None) -> UUID | None:
@@ -439,7 +465,19 @@ async def execute[AgentResultT: AgentResult](
         )
     try:
         result = result_contract.model_validate_json(generation.content, strict=True)
-    except ValidationError:
+    except ValidationError as error:
+        logger.warning(
+            "Strict agent result validation failed",
+            extra={
+                "event": "agent.result.validation_failed",
+                "agent_result_contract": result_contract.__name__,
+                "agent_run_id": str(run.id),
+                "model_run_id": str(model_run.id),
+                "provider_id": routed.provider_id,
+                "provider_model_id": routed.provider_model_id,
+                **_bounded_validation_diagnostics(error),
+            },
+        )
         run = await _fail_agent(
             session,
             tenant_id=tenant_id,

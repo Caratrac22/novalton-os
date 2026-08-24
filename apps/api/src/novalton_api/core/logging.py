@@ -35,6 +35,10 @@ _OPTIONAL_CONTEXT_FIELDS = (
     "reason_code",
     "remaining_ready",
     "remaining_pending",
+    "agent_result_contract",
+    "validation_error_count",
+    "validation_error_types",
+    "validation_error_paths",
 )
 
 
