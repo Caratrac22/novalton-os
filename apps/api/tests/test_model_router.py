@@ -303,6 +303,66 @@ def test_provider_preference_cannot_override_hard_capability_constraint(api: Rou
     assert "PROVIDER_PREFERENCE_APPLIED" not in body["reason_codes"]
 
 
+def test_forced_model_restricts_routing_to_exact_provider_model_pair(
+    api: RouterApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forced = Settings(model_router_force_model="other-provider::forced-model")
+    monkeypatch.setattr("novalton_api.modules.model_router.service.get_settings", lambda: forced)
+    asyncio.run(
+        _add_models(
+            _model("cheap", provider_id="openrouter", input_price_per_million=Decimal("0")),
+            _model(
+                "forced-model",
+                provider_id="other-provider",
+                input_price_per_million=Decimal("10"),
+            ),
+        )
+    )
+
+    body = api.client.post(api.url, json=_request()).json()
+
+    assert body["outcome"] == "SELECTED"
+    assert body["eligible_candidate_count"] == 1
+    assert body["selected"]["provider_id"] == "other-provider"
+    assert body["selected"]["provider_model_id"] == "forced-model"
+
+
+@pytest.mark.parametrize(
+    ("forced_pair", "model_changes", "reason_codes"),
+    [
+        ("openrouter::absent", {}, ["NO_AVAILABLE_MODELS"]),
+        ("openrouter::forced", {"status": "STALE"}, ["NO_AVAILABLE_MODELS"]),
+        ("openrouter::forced", {"reasoning": False}, ["CAPABILITY_UNSATISFIED"]),
+        ("openrouter::forced", {"structured_output": False}, ["CAPABILITY_UNSATISFIED"]),
+        ("openrouter::forced", {"context_window": 9_999}, ["CONTEXT_UNSATISFIED"]),
+    ],
+)
+def test_forced_model_still_fails_closed_through_existing_eligibility_rules(
+    api: RouterApi,
+    monkeypatch: pytest.MonkeyPatch,
+    forced_pair: str,
+    model_changes: dict[str, object],
+    reason_codes: list[str],
+) -> None:
+    forced = Settings(model_router_force_model=forced_pair)
+    monkeypatch.setattr("novalton_api.modules.model_router.service.get_settings", lambda: forced)
+    asyncio.run(
+        _add_models(
+            _model("fallback"),
+            _model("forced", **model_changes),
+        )
+    )
+
+    body = api.client.post(api.url, json=_request(structured_output_required=True)).json()
+
+    assert body == {
+        "outcome": "NO_SUITABLE_MODEL",
+        "selected": None,
+        "reason_codes": reason_codes,
+        "eligible_candidate_count": 0,
+    }
+
+
 def test_no_available_and_capability_no_suitable_categories_are_deterministic(
     api: RouterApi,
 ) -> None:

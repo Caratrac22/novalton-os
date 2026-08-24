@@ -42,6 +42,7 @@ class Settings(BaseModel):
     )
     openrouter_catalog_enabled: bool = False
     model_catalog_free_allowlist: tuple[str, ...] = ()
+    model_router_force_model: str | None = None
     provider_connect_timeout_seconds: float = Field(default=5.0, ge=0.1, le=60.0)
     provider_read_timeout_seconds: float = Field(default=30.0, ge=0.1, le=300.0)
     provider_write_timeout_seconds: float = Field(default=10.0, ge=0.1, le=60.0)
@@ -65,6 +66,7 @@ class Settings(BaseModel):
         "openai_compatible_provider_id": "NOVALTON_OPENAI_COMPATIBLE_PROVIDER_ID",
         "openrouter_catalog_enabled": "NOVALTON_OPENROUTER_CATALOG_ENABLED",
         "model_catalog_free_allowlist": "NOVALTON_MODEL_CATALOG_FREE_ALLOWLIST",
+        "model_router_force_model": "NOVALTON_MODEL_ROUTER_FORCE_MODEL",
         "provider_connect_timeout_seconds": "NOVALTON_PROVIDER_CONNECT_TIMEOUT_SECONDS",
         "provider_read_timeout_seconds": "NOVALTON_PROVIDER_READ_TIMEOUT_SECONDS",
         "provider_write_timeout_seconds": "NOVALTON_PROVIDER_WRITE_TIMEOUT_SECONDS",
@@ -129,10 +131,28 @@ class Settings(BaseModel):
             raise ValueError("duplicate model catalog free allowlist entry")
         return entries
 
+    @field_validator("model_router_force_model")
+    @classmethod
+    def validate_model_router_force_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        pattern = re.compile(r"^[a-z][a-z0-9_-]{0,63}::[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
+        if pattern.fullmatch(value) is None:
+            raise ValueError("invalid forced model router entry")
+        return value
+
     @property
     def model_catalog_free_allowlist_pairs(self) -> frozenset[tuple[str, str]]:
         """Return explicit exact provider/model pairs; price never affects membership."""
         return frozenset(tuple(entry.split("::", 1)) for entry in self.model_catalog_free_allowlist)
+
+    @property
+    def model_router_force_model_pair(self) -> tuple[str, str] | None:
+        """Return the optional exact provider/model routing override."""
+        if self.model_router_force_model is None:
+            return None
+        provider_id, provider_model_id = self.model_router_force_model.split("::", 1)
+        return provider_id, provider_model_id
 
     @model_validator(mode="after")
     def validate_catalog_source_configuration(self) -> Self:

@@ -8,6 +8,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from novalton_api.core.config import get_settings
 from novalton_api.core.context import get_correlation_id
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.modules.model_catalog import repository
@@ -144,10 +145,13 @@ async def simulate(
         raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
 
     models = await repository.list_routing_candidates(session)
+    forced_pair = get_settings().model_router_force_model_pair
     required = _requirements(data)
     available = context_rejected = capability_rejected = free_rejected = 0
     eligible: list[_Candidate] = []
     for model in models:
+        if forced_pair is not None and (model.provider_id, model.provider_model_id) != forced_pair:
+            continue
         if model.status != "AVAILABLE":
             continue
         available += 1
