@@ -1,6 +1,7 @@
 """Strict provider-neutral text generation contracts."""
 
 import re
+from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Self
@@ -108,6 +109,31 @@ class StructuredOutputRequest(BaseModel):
         return self
 
 
+class JsonObjectRequest(BaseModel):
+    """Provider-neutral request for JSON object response formatting."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    enabled: bool = True
+
+
+class ProviderRequestOptions(BaseModel):
+    """Provider-neutral request metadata for adapter protocol mapping."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    require_parameters: bool = False
+    response_healing: bool = False
+
+
+@dataclass(frozen=True)
+class ProviderExecutionCapabilities:
+    """Provider-neutral features supported by an adapter at execution time."""
+
+    require_parameters: bool = False
+    response_healing: bool = False
+
+
 class GenerationRequest(BaseModel):
     """Provider-neutral non-streaming text generation request."""
 
@@ -117,11 +143,15 @@ class GenerationRequest(BaseModel):
     messages: list[Message] = Field(min_length=1, max_length=MAX_MESSAGES)
     max_output_tokens: int | None = Field(default=None, ge=1, le=65_536)
     structured_output: StructuredOutputRequest | None = None
+    json_object: JsonObjectRequest | None = None
+    provider_options: ProviderRequestOptions | None = None
 
     @model_validator(mode="after")
     def validate_bounds(self) -> Self:
         if MODEL_ID_PATTERN.fullmatch(self.model_id) is None:
             raise ValueError("model_id contains unsupported characters")
+        if self.structured_output is not None and self.json_object is not None:
+            raise ValueError("structured_output and json_object are mutually exclusive")
         if sum(len(message.content) for message in self.messages) > MAX_REQUEST_CHARACTERS:
             raise ValueError("message content exceeds the request limit")
         return self

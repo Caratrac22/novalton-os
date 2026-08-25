@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
@@ -20,6 +20,12 @@ from novalton_api.infrastructure.providers.errors import (
 )
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.main import create_app
+from novalton_api.modules.agents.contract_execution import (
+    ContractGenerationCapabilities,
+    ContractStrategyTier,
+    compile_contract,
+    select_generation_strategy,
+)
 from novalton_api.modules.agents.contracts import AgentInput, AgentResult
 from novalton_api.modules.agents.execution import (
     _bounded_validation_diagnostics,
@@ -27,6 +33,7 @@ from novalton_api.modules.agents.execution import (
 )
 from novalton_api.modules.agents.models import AgentDefinition, AgentRun
 from novalton_api.modules.approvals.models import ApprovalRequest
+from novalton_api.modules.developer_manager.contracts import DeveloperManagerResult
 from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_router import service as router_service
 from novalton_api.modules.model_usage.models import ModelRun
@@ -74,8 +81,14 @@ def _valid_result(**changes: object) -> str:
 class MockProvider:
     provider_id = "mock"
 
-    def __init__(self, content: str = _valid_result(), failure: ProviderFailure | None = None):
-        self.content = content
+    def __init__(
+        self,
+        content: str | list[str] | None = None,
+        failure: ProviderFailure | None = None,
+    ):
+        if content is None:
+            content = _valid_result()
+        self.content = [content] if isinstance(content, str) else content
         self.failure = failure
         self.calls: list[GenerationRequest] = []
 
@@ -83,10 +96,11 @@ class MockProvider:
         self.calls.append(request)
         if self.failure is not None:
             raise ProviderError(self.failure, provider_id=self.provider_id)
+        index = min(len(self.calls) - 1, len(self.content) - 1)
         return GenerationResult(
             provider_id=self.provider_id,
             model_id=request.model_id,
-            content=self.content,
+            content=self.content[index],
             input_tokens=100,
             output_tokens=20,
             total_tokens=120,
@@ -99,7 +113,9 @@ async def _seed(
     *,
     model_available: bool = True,
     definition_status: str = "ENABLED",
+    provider_id: str = "mock",
     provider_model_id: str | None = None,
+    vision: bool = False,
 ) -> Scope:
     database = Database.from_settings(Settings())
     try:
@@ -127,16 +143,17 @@ async def _seed(
                 permissions=[],
             )
             model = ModelDefinition(
-                provider_id="mock",
+                provider_id=provider_id,
                 provider_model_id=provider_model_id or f"model-{uuid4().hex}",
                 display_name="Mock model",
                 status="AVAILABLE" if model_available else "UNAVAILABLE",
-                context_window=128_000,
+                # Keep this fixture outside the envelope of shared catalog rows.
+                context_window=10_000_000,
                 reasoning=True,
-                coding=False,
+                coding=True,
                 tool_calling=False,
                 structured_output=True,
-                vision=False,
+                vision=vision,
                 input_price_per_million=Decimal("1"),
                 output_price_per_million=Decimal("2"),
                 currency="USD",
@@ -153,8 +170,13 @@ async def _cleanup(scope: Scope) -> None:
     database = Database.from_settings(Settings())
     try:
         async with database.session_factory.begin() as session:
-            await session.execute(delete(AgentRun).where(AgentRun.tenant_id == scope.tenant_id))
+            await session.execute(
+                update(AgentRun)
+                .where(AgentRun.tenant_id == scope.tenant_id)
+                .values(model_run_id=None)
+            )
             await session.execute(delete(ModelRun).where(ModelRun.tenant_id == scope.tenant_id))
+            await session.execute(delete(AgentRun).where(AgentRun.tenant_id == scope.tenant_id))
             await session.execute(
                 delete(AgentDefinition).where(AgentDefinition.id == scope.definition_id)
             )
@@ -169,7 +191,26 @@ async def _cleanup(scope: Scope) -> None:
         await database.dispose()
 
 
-def _input(scope: Scope) -> dict[str, object]:
+async def _model_attempts(scope: Scope, agent_run_id: UUID) -> list[ModelRun]:
+    database = Database.from_settings(Settings())
+    try:
+        async with database.session_factory() as session:
+            return list(
+                await session.scalars(
+                    select(ModelRun)
+                    .where(
+                        ModelRun.tenant_id == scope.tenant_id,
+                        ModelRun.workspace_id == scope.workspace_id,
+                        ModelRun.agent_run_id == agent_run_id,
+                    )
+                    .order_by(ModelRun.created_at.asc(), ModelRun.id.asc())
+                )
+            )
+    finally:
+        await database.dispose()
+
+
+def _input(scope: Scope, *, required_capabilities: list[str] | None = None) -> dict[str, object]:
     return {
         "objective": "Review this task",
         "constraints": ["Do not execute actions"],
@@ -181,7 +222,8 @@ def _input(scope: Scope) -> dict[str, object]:
         "expected_output_type": "review.report",
         "permitted_tools": [],
         "model_requirements": {
-            "required_capabilities": ["reasoning"],
+            "required_capabilities": required_capabilities or ["reasoning"],
+            "minimum_context_tokens": 2_000_000,
             "structured_output_required": True,
             "tool_calling_required": False,
         },
@@ -220,12 +262,73 @@ def test_generation_request_propagates_strict_agent_result_schema() -> None:
         }
     )
 
-    generation = _generation_request(definition, data, provider_model_id="model-1")
+    profile = compile_contract(AgentResult)
+    strategy = select_generation_strategy(
+        ContractGenerationCapabilities(
+            native_structured_output=True,
+            provider_require_parameters=True,
+            response_healing=True,
+        ),
+        native_structured_output_required=True,
+    )
+    assert strategy is not None
+
+    generation = _generation_request(
+        definition,
+        data,
+        provider_model_id="model-1",
+        profile=profile,
+        strategy=strategy,
+    )
 
     assert generation.structured_output is not None
     assert generation.structured_output.name == "AgentResult"
     assert generation.structured_output.json_schema == AgentResult.model_json_schema()
     assert generation.structured_output.strict is True
+    assert generation.provider_options is not None
+    assert generation.provider_options.require_parameters is True
+    assert generation.provider_options.response_healing is True
+
+
+def test_contract_compiler_schema_patterns_and_semantic_guidance_are_deterministic() -> None:
+    first = compile_contract(DeveloperManagerResult)
+    second = compile_contract(DeveloperManagerResult)
+
+    proposed_task = first.json_schema["$defs"]["ProposedWorkerTask"]
+    assert first.fingerprint == second.fingerprint
+    assert proposed_task["properties"]["expected_output"]["pattern"] == (
+        r"^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*$"
+    )
+    assert proposed_task["properties"]["task_key"]["pattern"] == r"^[a-z][a-z0-9_]{0,63}$"
+    assert "dependency_existing_task" in first.semantic_guidance
+    assert "openrouter" not in first.semantic_guidance.lower()
+
+
+def test_generation_strategy_selection_is_capability_driven() -> None:
+    strict = select_generation_strategy(
+        ContractGenerationCapabilities(native_structured_output=True),
+        native_structured_output_required=True,
+    )
+    json_mode = select_generation_strategy(
+        ContractGenerationCapabilities(
+            native_structured_output=False,
+            json_object_output=True,
+        ),
+        native_structured_output_required=False,
+    )
+    instruction = select_generation_strategy(
+        ContractGenerationCapabilities(native_structured_output=False),
+        native_structured_output_required=False,
+    )
+    denied = select_generation_strategy(
+        ContractGenerationCapabilities(native_structured_output=False),
+        native_structured_output_required=True,
+    )
+
+    assert strict is not None and strict.tier == ContractStrategyTier.STRICT_SCHEMA
+    assert json_mode is not None and json_mode.tier == ContractStrategyTier.JSON_OBJECT
+    assert instruction is not None and instruction.tier == ContractStrategyTier.JSON_INSTRUCTION
+    assert denied is None
 
 
 def test_provider_backed_execution_captures_usage_and_linkage(
@@ -255,7 +358,9 @@ def test_provider_backed_execution_captures_usage_and_linkage(
     monkeypatch.setattr(router_service, "simulate", counted_route)
     try:
         with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
-            response = client.post(_url(scope), json=_input(scope))
+            response = client.post(
+                _url(scope), json=_input(scope, required_capabilities=["reasoning", "coding"])
+            )
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "SUCCEEDED"
@@ -268,6 +373,7 @@ def test_provider_backed_execution_captures_usage_and_linkage(
         assert route_calls == 1
         assert len(provider.calls[0].messages) == 2
         assert "tools" not in provider.calls[0].model_dump()
+        assert provider.calls[0].provider_options is None
 
         async def inspect() -> tuple[AgentRun, ModelRun, int, int]:
             database = Database.from_settings(Settings())
@@ -294,12 +400,70 @@ def test_provider_backed_execution_captures_usage_and_linkage(
         )
         assert "content" not in ModelRun.__table__.columns
         assert (approvals, policies) == (0, 0)
+        assert len(asyncio.run(_model_attempts(scope, UUID(body["agent_run_id"])))) == 1
+    finally:
+        asyncio.run(_cleanup(scope))
+
+
+def test_unregistered_routed_provider_is_accounted_without_fallback() -> None:
+    scope = asyncio.run(_seed(provider_id="unregistered-provider"))
+    fallback_provider = MockProvider()
+    try:
+        with TestClient(
+            create_app(provider_registry=ProviderRegistry((fallback_provider,)))
+        ) as client:
+            body = client.post(
+                _url(scope), json=_input(scope, required_capabilities=["reasoning", "coding"])
+            ).json()
+
+        assert (body["status"], body["error_code"], body["result"]) == (
+            "FAILED",
+            "provider_invalid_request",
+            None,
+        )
+        assert fallback_provider.calls == []
+        assert body["selected_model"] == {
+            "catalog_model_id": str(scope.model_id),
+            "provider_id": "unregistered-provider",
+            "provider_model_id": body["selected_model"]["provider_model_id"],
+        }
+
+        async def inspect() -> tuple[AgentRun, list[ModelRun]]:
+            database = Database.from_settings(Settings())
+            try:
+                async with database.session_factory() as session:
+                    agent_run = await session.get(AgentRun, UUID(body["agent_run_id"]))
+                    attempts = list(
+                        await session.scalars(
+                            select(ModelRun).where(
+                                ModelRun.agent_run_id == UUID(body["agent_run_id"])
+                            )
+                        )
+                    )
+                    assert agent_run is not None
+                    return agent_run, attempts
+            finally:
+                await database.dispose()
+
+        agent_run, attempts = asyncio.run(inspect())
+        assert agent_run.status == "FAILED"
+        assert len(attempts) == 1
+        attempt = attempts[0]
+        assert (attempt.status, attempt.failure_code) == ("FAILED", "invalid_request")
+        assert (attempt.provider_id, attempt.provider_model_id) == (
+            "unregistered-provider",
+            body["selected_model"]["provider_model_id"],
+        )
+        assert attempt.input_tokens is None
+        assert attempt.output_tokens is None
+        assert attempt.actual_cost is None
     finally:
         asyncio.run(_cleanup(scope))
 
 
 def test_routed_alias_resolution_metadata_does_not_trigger_identity_mismatch() -> None:
-    scope = asyncio.run(_seed(provider_model_id="openrouter/free"))
+    alias_model_id = f"openrouter/free-{uuid4().hex}"
+    scope = asyncio.run(_seed(provider_model_id=alias_model_id, vision=True))
 
     class ResolvingProvider(MockProvider):
         async def complete(self, request: GenerationRequest) -> GenerationResult:
@@ -308,7 +472,7 @@ def test_routed_alias_resolution_metadata_does_not_trigger_identity_mismatch() -
                 provider_id=self.provider_id,
                 model_id=request.model_id,
                 provider_resolved_model_id="vendor/free-resolved",
-                content=self.content,
+                content=self.content[0],
                 input_tokens=100,
                 output_tokens=20,
                 total_tokens=120,
@@ -319,10 +483,12 @@ def test_routed_alias_resolution_metadata_does_not_trigger_identity_mismatch() -
     provider = ResolvingProvider()
     try:
         with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
-            body = client.post(_url(scope), json=_input(scope)).json()
+            body = client.post(
+                _url(scope), json=_input(scope, required_capabilities=["reasoning", "vision"])
+            ).json()
         assert body["status"] == "SUCCEEDED"
         assert body["error_code"] is None
-        assert provider.calls[0].model_id == "openrouter/free"
+        assert provider.calls[0].model_id == alias_model_id
     finally:
         asyncio.run(_cleanup(scope))
 
@@ -337,7 +503,7 @@ def test_true_provider_identity_mismatch_still_fails_closed() -> None:
                 provider_id=self.provider_id,
                 model_id="different-model",
                 provider_resolved_model_id="vendor/resolved",
-                content=self.content,
+                content=self.content[0],
             )
 
     provider = MismatchingProvider()
@@ -351,20 +517,103 @@ def test_true_provider_identity_mismatch_still_fails_closed() -> None:
 
 
 @pytest.mark.parametrize(
-    ("content", "code"),
+    ("content", "code", "calls"),
     [
-        ("not-json", "invalid_provider_json"),
-        (_valid_result(extra="rejected"), "invalid_agent_result"),
+        ("not-json", "invalid_provider_json", 1),
+        (_valid_result(extra="rejected"), "invalid_agent_result", 2),
     ],
 )
-def test_invalid_provider_output_fails_without_repair(content: str, code: str) -> None:
+def test_invalid_provider_output_fails_closed(content: str, code: str, calls: int) -> None:
     scope = asyncio.run(_seed())
     provider = MockProvider(content)
     try:
         with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
             body = client.post(_url(scope), json=_input(scope)).json()
         assert (body["status"], body["error_code"], body["result"]) == ("FAILED", code, None)
-        assert len(provider.calls) == 1
+        assert len(provider.calls) == calls
+    finally:
+        asyncio.run(_cleanup(scope))
+
+
+def test_semantic_validation_failure_gets_one_safe_repair_attempt() -> None:
+    scope = asyncio.run(_seed())
+    provider = MockProvider([_valid_result(extra="rejected"), _valid_result()])
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            body = client.post(_url(scope), json=_input(scope)).json()
+        assert (body["status"], body["error_code"]) == ("SUCCEEDED", None)
+        assert len(provider.calls) == 2
+        repair_payload = json.loads(provider.calls[1].messages[-1].content)["repair"]
+        assert repair_payload["validation_diagnostics"] == {
+            "validation_error_count": 1,
+            "validation_error_types": ["extra_forbidden"],
+            "validation_error_paths": ["extra"],
+        }
+        assert "rejected" not in json.dumps(repair_payload)
+        attempts = asyncio.run(_model_attempts(scope, UUID(body["agent_run_id"])))
+        assert [attempt.status for attempt in attempts] == ["SUCCEEDED", "SUCCEEDED"]
+        assert [(attempt.input_tokens, attempt.output_tokens) for attempt in attempts] == [
+            (100, 20),
+            (100, 20),
+        ]
+        assert [attempt.actual_cost for attempt in attempts] == [
+            Decimal("0.0001400000"),
+            Decimal("0.0001400000"),
+        ]
+        assert all(attempt.agent_run_id == UUID(body["agent_run_id"]) for attempt in attempts)
+    finally:
+        asyncio.run(_cleanup(scope))
+
+
+def test_failed_semantic_repair_still_fails_closed() -> None:
+    scope = asyncio.run(_seed())
+    provider = MockProvider([_valid_result(extra="first"), _valid_result(extra="second")])
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            body = client.post(_url(scope), json=_input(scope)).json()
+        assert (body["status"], body["error_code"], body["result"]) == (
+            "FAILED",
+            "invalid_agent_result",
+            None,
+        )
+        assert len(provider.calls) == 2
+        attempts = asyncio.run(_model_attempts(scope, UUID(body["agent_run_id"])))
+        assert [attempt.status for attempt in attempts] == ["SUCCEEDED", "SUCCEEDED"]
+        assert [(attempt.input_tokens, attempt.output_tokens) for attempt in attempts] == [
+            (100, 20),
+            (100, 20),
+        ]
+    finally:
+        asyncio.run(_cleanup(scope))
+
+
+def test_repair_provider_failure_is_accounted() -> None:
+    scope = asyncio.run(_seed())
+
+    class RepairFailureProvider(MockProvider):
+        async def complete(self, request: GenerationRequest) -> GenerationResult:
+            self.calls.append(request)
+            if len(self.calls) == 2:
+                raise ProviderError(ProviderFailure.TIMEOUT, provider_id=self.provider_id)
+            return GenerationResult(
+                provider_id=self.provider_id,
+                model_id=request.model_id,
+                content=_valid_result(extra="repair-me"),
+                input_tokens=100,
+                output_tokens=20,
+                total_tokens=120,
+                provider_request_id="request-safe-1",
+                duration_ms=12.5,
+            )
+
+    provider = RepairFailureProvider()
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            body = client.post(_url(scope), json=_input(scope)).json()
+        assert (body["status"], body["error_code"]) == ("FAILED", "invalid_agent_result")
+        attempts = asyncio.run(_model_attempts(scope, UUID(body["agent_run_id"])))
+        assert [attempt.status for attempt in attempts] == ["SUCCEEDED", "FAILED"]
+        assert attempts[1].failure_code == ProviderFailure.TIMEOUT.value
     finally:
         asyncio.run(_cleanup(scope))
 
@@ -440,11 +689,13 @@ def test_cancellation_preserves_asyncio_semantics_and_cancels_both_runs() -> Non
 
 
 def test_no_suitable_model_creates_no_model_run_and_makes_no_provider_call() -> None:
-    scope = asyncio.run(_seed(model_available=False))
+    scope = asyncio.run(_seed(model_available=False, vision=True))
     provider = MockProvider()
     try:
         with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
-            body = client.post(_url(scope), json=_input(scope)).json()
+            body = client.post(
+                _url(scope), json=_input(scope, required_capabilities=["reasoning", "vision"])
+            ).json()
         assert (body["status"], body["error_code"], body["model_run_id"]) == (
             "FAILED",
             "no_suitable_model",

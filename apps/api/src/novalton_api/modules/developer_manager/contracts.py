@@ -3,10 +3,11 @@
 import heapq
 import re
 from enum import StrEnum
-from typing import Annotated, Self
+from typing import Annotated, ClassVar, Self
 
 from pydantic import Field, StringConstraints, field_validator, model_validator
 
+from novalton_api.modules.agents.contract_execution import SemanticConstraint
 from novalton_api.modules.agents.contracts import (
     AgentInput,
     AgentResult,
@@ -23,7 +24,15 @@ from novalton_api.modules.policy.schemas import RiskLevel
 DEVELOPMENT_PLAN_OUTPUT = "development.plan_proposal"
 MAX_PROPOSED_TASKS = 16
 _TASK_KEY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-TaskKey = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+TaskKey = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=64,
+        pattern=_TASK_KEY.pattern,
+    ),
+]
 
 
 class ReviewRecommendation(StrEnum):
@@ -153,5 +162,24 @@ class DevelopmentPlanProposal(ContractModel):
 class DeveloperManagerResult(AgentResult):
     """AgentResult enriched only with the bounded development proposal."""
 
+    semantic_constraints: ClassVar[tuple[SemanticConstraint, ...]] = (
+        SemanticConstraint(
+            code="proposed_task_keys_unique",
+            path="development_plan.proposed_tasks[*].task_key",
+            instruction="Each proposed task_key must be unique within proposed_tasks.",
+        ),
+        SemanticConstraint(
+            code="dependency_existing_task",
+            path="development_plan.proposed_tasks[*].depends_on",
+            instruction="Every dependency must reference a task_key present in proposed_tasks.",
+        ),
+        SemanticConstraint(
+            code="dependency_acyclic",
+            path="development_plan.proposed_tasks",
+            instruction=(
+                "The dependency graph must be acyclic and a task must not depend on itself."
+            ),
+        ),
+    )
     development_plan: DevelopmentPlanProposal
     requested_actions: list[RequestedAction] = Field(default_factory=list, max_length=0)

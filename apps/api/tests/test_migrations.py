@@ -14,9 +14,9 @@ def test_alembic_configuration_loads_i028_after_i023() -> None:
     revision = scripts.get_revision(head)
     baseline = scripts.get_revision("20260820_0001")
 
-    assert head == "20260821_0013"
+    assert head == "20260825_0014"
     assert revision is not None
-    assert revision.down_revision == "20260820_0012"
+    assert revision.down_revision == "20260821_0013"
     assert baseline is not None
     assert baseline.down_revision is None
 

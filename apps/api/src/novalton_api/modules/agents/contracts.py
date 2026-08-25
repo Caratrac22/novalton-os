@@ -30,8 +30,24 @@ _CREDENTIAL = re.compile(
 )
 _EMBEDDED_DATA = re.compile(r"(?:^data:|;base64,|BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY)", re.I)
 
-Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
-ReferenceId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+Identifier = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=100,
+        pattern=_IDENTIFIER.pattern,
+    ),
+]
+ReferenceId = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=128,
+        pattern=_REFERENCE.pattern,
+    ),
+]
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
 
 

@@ -25,6 +25,11 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_model_runs_provider_model_id_length",
         ),
         CheckConstraint(
+            "provider_resolved_model_id IS NULL OR char_length(provider_resolved_model_id) "
+            "BETWEEN 1 AND 256",
+            name="ck_model_runs_provider_resolved_model_id_length",
+        ),
+        CheckConstraint(
             "status IN ('RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')",
             name="ck_model_runs_status_value",
         ),
@@ -97,6 +102,7 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_model_runs_timestamp_order",
         ),
         Index("ix_model_runs_scope_created", "tenant_id", "workspace_id", "created_at", "id"),
+        Index("ix_model_runs_agent_run_created", "agent_run_id", "created_at", "id"),
     )
 
     tenant_id: Mapped[UUID] = mapped_column(
@@ -116,6 +122,13 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("projects.id", name="fk_model_runs_project_id_projects", ondelete="RESTRICT"),
         nullable=True,
     )
+    agent_run_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(
+            "agent_runs.id", name="fk_model_runs_agent_run_id_agent_runs", ondelete="RESTRICT"
+        ),
+        nullable=True,
+    )
     model_definition_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
         ForeignKey(
@@ -127,6 +140,7 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     provider_id: Mapped[str] = mapped_column(String(64), nullable=False)
     provider_model_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    provider_resolved_model_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     provider_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

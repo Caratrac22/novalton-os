@@ -23,6 +23,7 @@ class ModelRunStart(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     model_definition_id: UUID
+    agent_run_id: UUID | None = None
     project_id: UUID | None = None
     estimated_cost: Decimal | None = Field(default=None, ge=0, max_digits=20, decimal_places=10)
     currency: Currency | None = None
@@ -43,9 +44,11 @@ class ModelRunResponse(BaseModel):
     tenant_id: UUID
     workspace_id: UUID
     project_id: UUID | None
+    agent_run_id: UUID | None
     model_definition_id: UUID
     provider_id: str
     provider_model_id: str
+    provider_resolved_model_id: str | None
     status: ModelRunStatus
     correlation_id: str | None
     provider_request_id: str | None

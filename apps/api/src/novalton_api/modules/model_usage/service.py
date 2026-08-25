@@ -65,6 +65,7 @@ async def start_run(
         tenant_id=tenant_id,
         workspace_id=workspace_id,
         project_id=data.project_id,
+        agent_run_id=data.agent_run_id,
         model_definition_id=model.id,
         provider_id=model.provider_id,
         provider_model_id=model.provider_model_id,
@@ -165,6 +166,7 @@ async def mark_succeeded(
         values={
             "status": ModelRunStatus.SUCCEEDED.value,
             "provider_request_id": result.provider_request_id,
+            "provider_resolved_model_id": result.provider_resolved_model_id,
             "input_tokens": result.input_tokens,
             "output_tokens": result.output_tokens,
             "total_tokens": total,

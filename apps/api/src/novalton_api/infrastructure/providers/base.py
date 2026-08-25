@@ -2,7 +2,11 @@
 
 from typing import Protocol, runtime_checkable
 
-from novalton_api.infrastructure.providers.contracts import GenerationRequest, GenerationResult
+from novalton_api.infrastructure.providers.contracts import (
+    GenerationRequest,
+    GenerationResult,
+    ProviderExecutionCapabilities,
+)
 
 
 @runtime_checkable
@@ -11,5 +15,8 @@ class ModelProvider(Protocol):
 
     @property
     def provider_id(self) -> str: ...
+
+    @property
+    def execution_capabilities(self) -> ProviderExecutionCapabilities: ...
 
     async def complete(self, request: GenerationRequest) -> GenerationResult: ...

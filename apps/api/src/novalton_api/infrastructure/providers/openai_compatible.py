@@ -10,7 +10,11 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from novalton_api.infrastructure.providers.contracts import GenerationRequest, GenerationResult
+from novalton_api.infrastructure.providers.contracts import (
+    GenerationRequest,
+    GenerationResult,
+    ProviderExecutionCapabilities,
+)
 from novalton_api.infrastructure.providers.errors import (
     ProviderCancellationError,
     ProviderError,
@@ -36,6 +40,8 @@ class OpenAICompatibleConfig(BaseModel):
     write_timeout_seconds: float = Field(default=10.0, ge=0.1, le=60.0)
     pool_timeout_seconds: float = Field(default=5.0, ge=0.1, le=60.0)
     max_response_bytes: int = Field(default=1_048_576, ge=1_024, le=10_485_760)
+    require_parameters: bool = False
+    response_healing: bool = False
 
     def model_post_init(self, __context: Any) -> None:
         object.__setattr__(self, "base_url", validate_provider_base_url(self.base_url))
@@ -73,6 +79,13 @@ class OpenAICompatibleProvider:
     @property
     def provider_id(self) -> str:
         return self._config.provider_id
+
+    @property
+    def execution_capabilities(self) -> ProviderExecutionCapabilities:
+        return ProviderExecutionCapabilities(
+            require_parameters=self._config.require_parameters,
+            response_healing=self._config.response_healing,
+        )
 
     async def __aenter__(self) -> "OpenAICompatibleProvider":
         return self
@@ -141,6 +154,13 @@ class OpenAICompatibleProvider:
                     "strict": request.structured_output.strict,
                 },
             }
+        elif request.json_object is not None:
+            payload["response_format"] = {"type": "json_object"}
+        provider_options = request.provider_options
+        if provider_options is not None and provider_options.require_parameters:
+            payload["provider"] = {"require_parameters": True}
+        if provider_options is not None and provider_options.response_healing:
+            payload["plugins"] = [{"id": "response-healing"}]
         http_request = self._client.build_request(
             "POST",
             f"{self._config.base_url}/chat/completions",

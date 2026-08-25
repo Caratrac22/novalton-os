@@ -18,8 +18,10 @@ from novalton_api.infrastructure.providers.contracts import (
     CatalogModel,
     GenerationRequest,
     GenerationResult,
+    JsonObjectRequest,
     Message,
     MessageRole,
+    ProviderRequestOptions,
     StructuredOutputRequest,
 )
 from novalton_api.infrastructure.providers.errors import (
@@ -77,6 +79,7 @@ def response_payload(**changes: object) -> dict[str, object]:
 
 def test_request_and_result_are_strict_bounded_and_serializable() -> None:
     generated = request()
+    assert generated.provider_options is None
     assert generated.model_dump(mode="json", exclude_none=True) == {
         "model_id": "vendor/model-1",
         "messages": [{"role": "user", "content": "Bounded test prompt"}],
@@ -352,6 +355,23 @@ async def test_openrouter_generation_transport_headers_request_identity_encoding
 
 
 @pytest.mark.asyncio
+async def test_openai_compatible_execution_capabilities_are_explicit_and_independent() -> None:
+    async with OpenAICompatibleProvider(
+        config(require_parameters=True, response_healing=False),
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=response_payload())),
+    ) as provider:
+        assert provider.execution_capabilities.require_parameters is True
+        assert provider.execution_capabilities.response_healing is False
+
+    async with OpenAICompatibleProvider(
+        config(),
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=response_payload())),
+    ) as provider:
+        assert provider.execution_capabilities.require_parameters is False
+        assert provider.execution_capabilities.response_healing is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "entries",
     [
@@ -550,6 +570,58 @@ async def test_structured_output_maps_to_openai_compatible_response_format() -> 
             "strict": True,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_provider_request_require_parameters_maps_to_openrouter_payload_metadata() -> None:
+    captured: list[httpx.Request] = []
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        captured.append(http_request)
+        return httpx.Response(200, json=response_payload())
+
+    async with OpenAICompatibleProvider(
+        config(), transport=httpx.MockTransport(handler)
+    ) as provider:
+        await provider.complete(
+            request(
+                json_object=JsonObjectRequest(),
+                provider_options=ProviderRequestOptions(
+                    require_parameters=True,
+                ),
+            )
+        )
+
+    payload = json.loads(captured[0].content)
+    assert payload["response_format"] == {"type": "json_object"}
+    assert payload["provider"] == {"require_parameters": True}
+    assert "plugins" not in payload
+
+
+@pytest.mark.asyncio
+async def test_provider_request_response_healing_maps_to_openrouter_payload_plugin() -> None:
+    captured: list[httpx.Request] = []
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        captured.append(http_request)
+        return httpx.Response(200, json=response_payload())
+
+    async with OpenAICompatibleProvider(
+        config(), transport=httpx.MockTransport(handler)
+    ) as provider:
+        await provider.complete(
+            request(
+                json_object=JsonObjectRequest(),
+                provider_options=ProviderRequestOptions(
+                    response_healing=True,
+                ),
+            )
+        )
+
+    payload = json.loads(captured[0].content)
+    assert payload["response_format"] == {"type": "json_object"}
+    assert "provider" not in payload
+    assert payload["plugins"] == [{"id": "response-healing"}]
 
 
 @pytest.mark.asyncio

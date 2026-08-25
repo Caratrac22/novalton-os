@@ -12,8 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.contracts import (
     GenerationRequest,
+    JsonObjectRequest,
     Message,
     MessageRole,
+    ProviderExecutionCapabilities,
+    ProviderRequestOptions,
     StructuredOutputRequest,
 )
 from novalton_api.infrastructure.providers.errors import (
@@ -23,6 +26,13 @@ from novalton_api.infrastructure.providers.errors import (
 )
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.modules.agents import repository, service
+from novalton_api.modules.agents.contract_execution import (
+    ContractGenerationCapabilities,
+    ContractGenerationStrategy,
+    ContractStrategyTier,
+    compile_contract,
+    select_generation_strategy,
+)
 from novalton_api.modules.agents.contracts import AgentInput, AgentResult, AgentResultStatus
 from novalton_api.modules.agents.models import AgentDefinition, AgentRun
 from novalton_api.modules.agents.schemas import (
@@ -32,6 +42,7 @@ from novalton_api.modules.agents.schemas import (
     AgentRunStatus,
     SelectedModelResponse,
 )
+from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_router import service as router_service
 from novalton_api.modules.model_router.schemas import (
     CostPolicy,
@@ -99,6 +110,14 @@ def _scope_id(value: str | None) -> UUID | None:
         ) from None
 
 
+def _native_structured_output_required(data: AgentInput) -> bool:
+    return (
+        data.model_requirements.structured_output_required
+        if data.model_requirements is not None
+        else False
+    )
+
+
 def _routing_request(definition: AgentDefinition, data: AgentInput) -> RoutingRequest:
     hints = data.model_requirements
     names = set(definition.capabilities)
@@ -116,7 +135,7 @@ def _routing_request(definition: AgentDefinition, data: AgentInput) -> RoutingRe
         required_capabilities=required,
         context_tokens_estimate=context_estimate,
         tool_calling_required=hints.tool_calling_required if hints is not None else False,
-        structured_output_required=True,
+        structured_output_required=_native_structured_output_required(data),
         vision_required=ModelCapability.VISION in required,
         expected_output_tokens=_EXPECTED_OUTPUT_TOKENS,
         cost_policy=CostPolicy.LOWEST_COST,
@@ -128,12 +147,13 @@ def _generation_request(
     data: AgentInput,
     *,
     provider_model_id: str,
-    result_contract: type[AgentResult] = AgentResult,
+    profile,
+    strategy: ContractGenerationStrategy,
     contract_instructions: str | None = None,
+    repair_diagnostics: dict[str, object] | None = None,
 ) -> GenerationRequest:
-    result_json_schema = result_contract.model_json_schema()
     result_schema = json.dumps(
-        result_json_schema,
+        profile.json_schema,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -141,18 +161,47 @@ def _generation_request(
     system = (
         f"You are the Novalton Agent '{definition.name}'. Mission: {definition.mission}\n"
         "Return exactly one JSON object and no surrounding text. It must satisfy the strict "
-        f"AgentResult JSON Schema: {result_schema}. "
+        f"{profile.name} JSON Schema: {result_schema}. "
         "Use only contract fields; requested_actions are proposals only. You have no tools, "
         "execution authority, hidden authority, or permission to approve actions. Do not reveal "
         "or invent hidden reasoning."
+        + (
+            " The provider may not enforce this schema; local strict validation remains "
+            "authoritative."
+            if strategy.tier != ContractStrategyTier.STRICT_SCHEMA
+            else ""
+        )
+        + (f"\n{profile.semantic_guidance}" if profile.semantic_guidance else "")
         + (f" {contract_instructions}" if contract_instructions is not None else "")
     )
+    user_payload: dict[str, object] = {"agent_input": data.model_dump(mode="json")}
+    if repair_diagnostics is not None:
+        user_payload["repair"] = {
+            "instruction": "Return the entire corrected result JSON object, not a patch.",
+            "validation_diagnostics": repair_diagnostics,
+        }
     user = json.dumps(
-        {"agent_input": data.model_dump(mode="json")},
+        user_payload,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
     )
+    structured_output = None
+    json_object = None
+    if strategy.native_structured_output:
+        structured_output = StructuredOutputRequest(
+            name=profile.name,
+            json_schema=profile.json_schema,
+            strict=True,
+        )
+    elif strategy.json_object_output:
+        json_object = JsonObjectRequest()
+    provider_options = None
+    if strategy.require_parameters or strategy.response_healing:
+        provider_options = ProviderRequestOptions(
+            require_parameters=strategy.require_parameters,
+            response_healing=strategy.response_healing,
+        )
     return GenerationRequest(
         model_id=provider_model_id,
         messages=[
@@ -160,11 +209,9 @@ def _generation_request(
             Message(role=MessageRole.USER, content=user),
         ],
         max_output_tokens=_EXPECTED_OUTPUT_TOKENS,
-        structured_output=StructuredOutputRequest(
-            name=result_contract.__name__,
-            json_schema=result_json_schema,
-            strict=True,
-        ),
+        structured_output=structured_output,
+        json_object=json_object,
+        provider_options=provider_options,
     )
 
 
@@ -218,6 +265,7 @@ async def execute[AgentResultT: AgentResult](
     contract_instructions: str | None = None,
 ) -> AgentExecutionResponse:
     """Execute one provider call without retries, fallback, tools, or content persistence."""
+    profile = compile_contract(result_contract)
     definition = await service.get_definition(
         session,
         tenant_id=tenant_id,
@@ -272,6 +320,7 @@ async def execute[AgentResultT: AgentResult](
         workspace_id=workspace_id,
         data=ModelRunStart(
             model_definition_id=routed.catalog_model_id,
+            agent_run_id=run.id,
             project_id=project_id,
             estimated_cost=estimate.amount if estimate is not None else None,
             currency=estimate.currency if estimate is not None else None,
@@ -309,16 +358,72 @@ async def execute[AgentResultT: AgentResult](
     await session.commit()
     run = linked
 
+    identity_mismatch = False
     try:
         provider = registry.get(routed.provider_id)
         if provider.provider_id != routed.provider_id:
+            identity_mismatch = True
             raise ProviderError(ProviderFailure.INVALID_REQUEST, provider_id="registry")
+        provider_capabilities = getattr(
+            provider, "execution_capabilities", ProviderExecutionCapabilities()
+        )
+        model_definition = await session.get(ModelDefinition, routed.catalog_model_id)
+        native_structured = bool(
+            model_definition is not None and model_definition.structured_output is True
+        )
+        strategy = select_generation_strategy(
+            ContractGenerationCapabilities(
+                native_structured_output=native_structured,
+                json_object_output=False,
+                provider_require_parameters=provider_capabilities.require_parameters,
+                response_healing=provider_capabilities.response_healing,
+            ),
+            native_structured_output_required=_native_structured_output_required(data),
+        )
+        if strategy is None:
+            await usage_service.mark_failed(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                model_run_id=model_run.id,
+                failure=ProviderFailure.INVALID_REQUEST,
+            )
+            run = await _fail_agent(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                run_id=run.id,
+                code="native_structured_output_required",
+            )
+            return _response(
+                run,
+                definition=definition,
+                selected=selected,
+                model_run_id=model_run.id,
+                error_code="native_structured_output_required",
+            )
+        logger.info(
+            "Agent contract strategy selected",
+            extra={
+                "event": "agent.contract.strategy.selected",
+                "agent_result_contract": profile.name,
+                "contract_fingerprint": profile.fingerprint,
+                "strategy_tier": strategy.tier.value,
+                "native_structured_output": strategy.native_structured_output,
+                "response_healing": strategy.response_healing,
+                "agent_run_id": str(run.id),
+                "model_run_id": str(model_run.id),
+                "provider_id": routed.provider_id,
+                "provider_model_id": routed.provider_model_id,
+            },
+        )
         generation = await provider.complete(
             _generation_request(
                 definition,
                 data,
                 provider_model_id=routed.provider_model_id,
-                result_contract=result_contract,
+                profile=profile,
+                strategy=strategy,
                 contract_instructions=contract_instructions,
             )
         )
@@ -352,7 +457,9 @@ async def execute[AgentResultT: AgentResult](
             model_run_id=model_run.id,
             failure=error.failure,
         )
-        code = f"provider_{error.failure.value}"
+        code = (
+            "provider_identity_mismatch" if identity_mismatch else f"provider_{error.failure.value}"
+        )
         run = await _fail_agent(
             session,
             tenant_id=tenant_id,
@@ -466,18 +573,152 @@ async def execute[AgentResultT: AgentResult](
     try:
         result = result_contract.model_validate_json(generation.content, strict=True)
     except ValidationError as error:
+        diagnostics = _bounded_validation_diagnostics(error)
         logger.warning(
             "Strict agent result validation failed",
             extra={
-                "event": "agent.result.validation_failed",
-                "agent_result_contract": result_contract.__name__,
+                "event": "agent.contract.validation_failed",
+                "agent_result_contract": profile.name,
+                "contract_fingerprint": profile.fingerprint,
                 "agent_run_id": str(run.id),
                 "model_run_id": str(model_run.id),
                 "provider_id": routed.provider_id,
                 "provider_model_id": routed.provider_model_id,
-                **_bounded_validation_diagnostics(error),
+                **diagnostics,
             },
         )
+        if data.permitted_tools == []:
+            repair_model_run = await usage_service.start_run(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                data=ModelRunStart(
+                    model_definition_id=routed.catalog_model_id,
+                    agent_run_id=run.id,
+                    project_id=project_id,
+                    estimated_cost=estimate.amount if estimate is not None else None,
+                    currency=estimate.currency if estimate is not None else None,
+                ),
+            )
+            logger.info(
+                "Agent contract repair started",
+                extra={
+                    "event": "agent.contract.repair.started",
+                    "agent_result_contract": profile.name,
+                    "contract_fingerprint": profile.fingerprint,
+                    "agent_run_id": str(run.id),
+                    "model_run_id": str(repair_model_run.id),
+                    "provider_id": routed.provider_id,
+                    "provider_model_id": routed.provider_model_id,
+                    "repair_attempt": 1,
+                    **diagnostics,
+                },
+            )
+            try:
+                generation = await provider.complete(
+                    _generation_request(
+                        definition,
+                        data,
+                        provider_model_id=routed.provider_model_id,
+                        profile=profile,
+                        strategy=strategy,
+                        contract_instructions=contract_instructions,
+                        repair_diagnostics=diagnostics,
+                    )
+                )
+                if (generation.provider_id, generation.model_id) != (
+                    routed.provider_id,
+                    routed.provider_model_id,
+                ):
+                    raise ProviderError(
+                        ProviderFailure.INVALID_REQUEST, provider_id=routed.provider_id
+                    )
+            except ProviderCancellationError:
+                await usage_service.cancel_run(
+                    session,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    model_run_id=repair_model_run.id,
+                )
+                await service.cancel_run(
+                    session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run.id
+                )
+                raise
+            except ProviderError as error:
+                await usage_service.mark_failed(
+                    session,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    model_run_id=repair_model_run.id,
+                    failure=error.failure,
+                )
+                logger.info(
+                    "Agent contract repair completed",
+                    extra={
+                        "event": "agent.contract.repair.completed",
+                        "agent_result_contract": profile.name,
+                        "contract_fingerprint": profile.fingerprint,
+                        "agent_run_id": str(run.id),
+                        "model_run_id": str(repair_model_run.id),
+                        "provider_id": routed.provider_id,
+                        "provider_model_id": routed.provider_model_id,
+                        "repair_attempt": 1,
+                        "repair_succeeded": False,
+                    },
+                )
+                result = None
+            except Exception:
+                await usage_service.mark_failed(
+                    session,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    model_run_id=repair_model_run.id,
+                    failure=ProviderFailure.UNKNOWN,
+                )
+                result = None
+            else:
+                try:
+                    await usage_service.mark_succeeded(
+                        session,
+                        tenant_id=tenant_id,
+                        workspace_id=workspace_id,
+                        model_run_id=repair_model_run.id,
+                        result=generation,
+                    )
+                except ApplicationError:
+                    await usage_service.mark_failed(
+                        session,
+                        tenant_id=tenant_id,
+                        workspace_id=workspace_id,
+                        model_run_id=repair_model_run.id,
+                        failure=ProviderFailure.MALFORMED_RESPONSE,
+                    )
+                    result = None
+                else:
+                    try:
+                        json.loads(generation.content)
+                        result = result_contract.model_validate_json(
+                            generation.content, strict=True
+                        )
+                    except (json.JSONDecodeError, TypeError, ValidationError):
+                        result = None
+                    logger.info(
+                        "Agent contract repair completed",
+                        extra={
+                            "event": "agent.contract.repair.completed",
+                            "agent_result_contract": profile.name,
+                            "contract_fingerprint": profile.fingerprint,
+                            "agent_run_id": str(run.id),
+                            "model_run_id": str(repair_model_run.id),
+                            "provider_id": routed.provider_id,
+                            "provider_model_id": routed.provider_model_id,
+                            "repair_attempt": 1,
+                            "repair_succeeded": result is not None,
+                        },
+                    )
+        else:
+            result = None
+    if result is None:
         run = await _fail_agent(
             session,
             tenant_id=tenant_id,
