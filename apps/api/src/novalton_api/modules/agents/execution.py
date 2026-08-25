@@ -9,6 +9,7 @@ from uuid import UUID
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from novalton_api.core.config import get_settings
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.contracts import (
     GenerationRequest,
@@ -27,6 +28,7 @@ from novalton_api.infrastructure.providers.errors import (
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.modules.agents import repository, service
 from novalton_api.modules.agents.contract_execution import (
+    ContractExecutionProfile,
     ContractGenerationCapabilities,
     ContractGenerationStrategy,
     ContractStrategyTier,
@@ -37,6 +39,7 @@ from novalton_api.modules.agents.contract_execution import (
 )
 from novalton_api.modules.agents.contracts import AgentInput, AgentResult, AgentResultStatus
 from novalton_api.modules.agents.models import AgentDefinition, AgentRun
+from novalton_api.modules.agents.output_budget import classify_truncation, select_output_budget
 from novalton_api.modules.agents.schemas import (
     AgentDefinitionStatus,
     AgentExecutionResponse,
@@ -56,7 +59,6 @@ from novalton_api.modules.model_usage import service as usage_service
 from novalton_api.modules.model_usage.schemas import ModelRunStart
 
 logger = logging.getLogger(__name__)
-_EXPECTED_OUTPUT_TOKENS = 4096
 _CONTEXT_OVERHEAD_TOKENS = 1024
 _MAX_DIAGNOSTIC_ITEMS = 8
 _MAX_DIAGNOSTIC_PATH_PARTS = 8
@@ -139,7 +141,9 @@ def _native_structured_output_required(data: AgentInput) -> bool:
     )
 
 
-def _routing_request(definition: AgentDefinition, data: AgentInput) -> RoutingRequest:
+def _routing_request(
+    definition: AgentDefinition, data: AgentInput, profile: ContractExecutionProfile | None = None
+) -> RoutingRequest:
     hints = data.model_requirements
     names = set(definition.capabilities)
     if hints is not None:
@@ -152,13 +156,19 @@ def _routing_request(definition: AgentDefinition, data: AgentInput) -> RoutingRe
     context_estimate = max(1, ceil(serialized_size / 4) + _CONTEXT_OVERHEAD_TOKENS)
     if hints is not None and hints.minimum_context_tokens is not None:
         context_estimate = max(context_estimate, hints.minimum_context_tokens)
+    # Routing estimates are deliberately independent from the execution budget. They are
+    # used for eligibility/cost ranking and are derived from the contract complexity.
+    profile_schema_size = (
+        len(json.dumps(profile.json_schema, separators=(",", ":"))) if profile is not None else 0
+    )
+    expected_output_tokens = max(256, ceil((serialized_size + profile_schema_size) / 3))
     return RoutingRequest(
         required_capabilities=required,
         context_tokens_estimate=context_estimate,
         tool_calling_required=hints.tool_calling_required if hints is not None else False,
         structured_output_required=_native_structured_output_required(data),
         vision_required=ModelCapability.VISION in required,
-        expected_output_tokens=_EXPECTED_OUTPUT_TOKENS,
+        expected_output_tokens=expected_output_tokens,
         cost_policy=CostPolicy.LOWEST_COST,
     )
 
@@ -170,6 +180,7 @@ def _generation_request(
     provider_model_id: str,
     profile,
     strategy: ContractGenerationStrategy,
+    max_output_tokens: int,
     contract_instructions: str | None = None,
     repair_diagnostics: dict[str, object] | None = None,
 ) -> GenerationRequest:
@@ -229,7 +240,7 @@ def _generation_request(
             Message(role=MessageRole.SYSTEM, content=system),
             Message(role=MessageRole.USER, content=user),
         ],
-        max_output_tokens=_EXPECTED_OUTPUT_TOKENS,
+        max_output_tokens=max_output_tokens,
         structured_output=structured_output,
         json_object=json_object,
         provider_options=provider_options,
@@ -320,7 +331,7 @@ async def execute[AgentResultT: AgentResult](
         session,
         tenant_id=tenant_id,
         workspace_id=workspace_id,
-        data=_routing_request(definition, data),
+        data=_routing_request(definition, data, profile),
     )
     if route.outcome == RoutingOutcome.NO_SUITABLE_MODEL or route.selected is None:
         run = await _fail_agent(
@@ -384,6 +395,7 @@ async def execute[AgentResultT: AgentResult](
     run = linked
 
     identity_mismatch = False
+    extra_attempt_used = False
     try:
         provider = registry.get(routed.provider_id)
         if provider.provider_id != routed.provider_id:
@@ -393,6 +405,14 @@ async def execute[AgentResultT: AgentResult](
             provider, "execution_capabilities", ProviderExecutionCapabilities()
         )
         model_definition = await session.get(ModelDefinition, routed.catalog_model_id)
+        expected_output_tokens = max(256, ceil(len(profile.json_schema.__repr__()) / 3))
+        budget = select_output_budget(
+            expected_output_tokens=expected_output_tokens,
+            known_model_maximum=(
+                model_definition.max_output_tokens if model_definition is not None else None
+            ),
+            safety_ceiling=get_settings().model_output_token_safety_ceiling,
+        )
         native_structured = bool(
             model_definition is not None and model_definition.structured_output is True
         )
@@ -441,6 +461,9 @@ async def execute[AgentResultT: AgentResult](
                 "model_run_id": str(model_run.id),
                 "provider_id": routed.provider_id,
                 "provider_model_id": routed.provider_model_id,
+                "selected_output_budget": budget.tokens,
+                "known_model_maximum": budget.known_model_maximum,
+                "budget_policy_source": budget.source,
             },
         )
         generation = await provider.complete(
@@ -450,6 +473,7 @@ async def execute[AgentResultT: AgentResult](
                 provider_model_id=routed.provider_model_id,
                 profile=profile,
                 strategy=strategy,
+                max_output_tokens=budget.tokens,
                 contract_instructions=contract_instructions,
             )
         )
@@ -579,6 +603,139 @@ async def execute[AgentResultT: AgentResult](
             model_run_id=model_run.id,
             error_code="invalid_provider_usage",
         )
+    truncation_classification = classify_truncation(generation.finish_reason)
+    logger.info(
+        "Agent generation completed",
+        extra={
+            "event": "agent.generation.completed",
+            "agent_run_id": str(run.id),
+            "model_run_id": str(model_run.id),
+            "provider_id": routed.provider_id,
+            "provider_model_id": routed.provider_model_id,
+            "finish_reason": generation.finish_reason,
+            "truncation_classification": truncation_classification,
+            "recovery_attempt": False,
+        },
+    )
+    if truncation_classification == "TOKEN_LIMIT":
+        extra_attempt_used = True
+        recovery_model_run = await usage_service.start_run(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            data=ModelRunStart(
+                model_definition_id=routed.catalog_model_id,
+                agent_run_id=run.id,
+                project_id=project_id,
+                estimated_cost=estimate.amount if estimate is not None else None,
+                currency=estimate.currency if estimate is not None else None,
+            ),
+        )
+        recovery_budget = select_output_budget(
+            expected_output_tokens=expected_output_tokens,
+            known_model_maximum=(
+                model_definition.max_output_tokens if model_definition is not None else None
+            ),
+            safety_ceiling=get_settings().model_output_token_safety_ceiling,
+            recovery=True,
+        )
+        logger.info(
+            "Agent truncation recovery started",
+            extra={
+                "event": "agent.generation.recovery.started",
+                "agent_run_id": str(run.id),
+                "model_run_id": str(recovery_model_run.id),
+                "provider_id": routed.provider_id,
+                "provider_model_id": routed.provider_model_id,
+                "selected_output_budget": recovery_budget.tokens,
+                "known_model_maximum": recovery_budget.known_model_maximum,
+                "budget_policy_source": recovery_budget.source,
+                "finish_reason": generation.finish_reason,
+                "truncation_classification": truncation_classification,
+                "recovery_attempt": True,
+            },
+        )
+        try:
+            recovery_generation = await provider.complete(
+                _generation_request(
+                    definition,
+                    data,
+                    provider_model_id=routed.provider_model_id,
+                    profile=profile,
+                    strategy=strategy,
+                    max_output_tokens=recovery_budget.tokens,
+                    contract_instructions=contract_instructions,
+                )
+            )
+            if (recovery_generation.provider_id, recovery_generation.model_id) != (
+                routed.provider_id,
+                routed.provider_model_id,
+            ):
+                raise ProviderError(ProviderFailure.INVALID_REQUEST, provider_id=routed.provider_id)
+            await usage_service.mark_succeeded(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                model_run_id=recovery_model_run.id,
+                result=recovery_generation,
+            )
+            generation = recovery_generation
+        except ProviderCancellationError:
+            await usage_service.cancel_run(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                model_run_id=recovery_model_run.id,
+            )
+            await service.cancel_run(
+                session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run.id
+            )
+            raise
+        except ProviderError as error:
+            await usage_service.mark_failed(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                model_run_id=recovery_model_run.id,
+                failure=error.failure,
+            )
+        except Exception:
+            await usage_service.mark_failed(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                model_run_id=recovery_model_run.id,
+                failure=ProviderFailure.UNKNOWN,
+            )
+        else:
+            logger.info(
+                "Agent truncation recovery completed",
+                extra={
+                    "event": "agent.generation.recovery.completed",
+                    "agent_run_id": str(run.id),
+                    "model_run_id": str(recovery_model_run.id),
+                    "provider_id": routed.provider_id,
+                    "provider_model_id": routed.provider_model_id,
+                    "finish_reason": generation.finish_reason,
+                    "truncation_classification": classify_truncation(generation.finish_reason),
+                    "recovery_attempt": True,
+                },
+            )
+    if classify_truncation(generation.finish_reason) == "TOKEN_LIMIT":
+        run = await _fail_agent(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            run_id=run.id,
+            code="provider_output_truncated",
+        )
+        return _response(
+            run,
+            definition=definition,
+            selected=selected,
+            model_run_id=model_run.id,
+            error_code="provider_output_truncated",
+        )
     try:
         json.loads(generation.content)
     except (json.JSONDecodeError, TypeError):
@@ -624,7 +781,8 @@ async def execute[AgentResultT: AgentResult](
                 **diagnostics,
             },
         )
-        if data.permitted_tools == []:
+        if data.permitted_tools == [] and not extra_attempt_used:
+            extra_attempt_used = True
             repair_model_run = await usage_service.start_run(
                 session,
                 tenant_id=tenant_id,
@@ -660,6 +818,7 @@ async def execute[AgentResultT: AgentResult](
                         provider_model_id=routed.provider_model_id,
                         profile=profile,
                         strategy=strategy,
+                        max_output_tokens=budget.tokens,
                         contract_instructions=contract_instructions,
                         repair_diagnostics=diagnostics,
                     )

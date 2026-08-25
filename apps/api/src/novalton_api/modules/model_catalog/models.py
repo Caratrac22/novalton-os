@@ -36,6 +36,10 @@ class ModelDefinition(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_model_definitions_context_window_value",
         ),
         CheckConstraint(
+            "max_output_tokens IS NULL OR max_output_tokens BETWEEN 1 AND 65536",
+            name="ck_model_definitions_max_output_tokens_value",
+        ),
+        CheckConstraint(
             "input_price_per_million IS NULL OR input_price_per_million >= 0",
             name="ck_model_definitions_input_price_non_negative",
         ),
@@ -75,6 +79,7 @@ class ModelDefinition(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="UNKNOWN")
     context_window: Mapped[int | None] = mapped_column(nullable=True)
+    max_output_tokens: Mapped[int | None] = mapped_column(nullable=True)
     reasoning: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     coding: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     tool_calling: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

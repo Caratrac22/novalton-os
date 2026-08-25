@@ -433,6 +433,7 @@ def test_generation_request_propagates_strict_agent_result_schema() -> None:
         provider_model_id="model-1",
         profile=profile,
         strategy=strategy,
+        max_output_tokens=123,
     )
 
     assert generation.structured_output is not None

@@ -102,6 +102,7 @@ async def refresh_provider(
                     "display_name": model.display_name,
                     "status": "AVAILABLE",
                     "context_window": model.context_window,
+                    "max_output_tokens": model.max_output_tokens,
                     "reasoning": model.reasoning,
                     "coding": model.coding,
                     "tool_calling": model.tool_calling,

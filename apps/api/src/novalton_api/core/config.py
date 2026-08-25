@@ -48,6 +48,7 @@ class Settings(BaseModel):
     provider_write_timeout_seconds: float = Field(default=10.0, ge=0.1, le=60.0)
     provider_pool_timeout_seconds: float = Field(default=5.0, ge=0.1, le=60.0)
     provider_max_response_bytes: int = Field(default=1_048_576, ge=1_024, le=10_485_760)
+    model_output_token_safety_ceiling: int = Field(default=65_536, ge=1, le=65_536)
     bootstrap_tenant_id: UUID = UUID("89cfc055-366e-5bcb-b65f-4f367185bf6d")
     bootstrap_tenant_name: str = "Local Tenant"
     bootstrap_tenant_slug: str = "tenant_local"
@@ -72,6 +73,7 @@ class Settings(BaseModel):
         "provider_write_timeout_seconds": "NOVALTON_PROVIDER_WRITE_TIMEOUT_SECONDS",
         "provider_pool_timeout_seconds": "NOVALTON_PROVIDER_POOL_TIMEOUT_SECONDS",
         "provider_max_response_bytes": "NOVALTON_PROVIDER_MAX_RESPONSE_BYTES",
+        "model_output_token_safety_ceiling": "NOVALTON_MODEL_OUTPUT_TOKEN_SAFETY_CEILING",
         "bootstrap_tenant_id": "NOVALTON_BOOTSTRAP_TENANT_ID",
         "bootstrap_tenant_name": "NOVALTON_BOOTSTRAP_TENANT_NAME",
         "bootstrap_tenant_slug": "NOVALTON_BOOTSTRAP_TENANT_SLUG",

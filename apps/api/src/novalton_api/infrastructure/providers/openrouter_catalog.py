@@ -154,6 +154,16 @@ class OpenRouterCatalogSource:
         context = entry.get("context_length")
         if context is not None and (not isinstance(context, int) or isinstance(context, bool)):
             raise ValueError("invalid context length")
+        top_provider = entry.get("top_provider")
+        if top_provider is None:
+            top_provider = {}
+        if not isinstance(top_provider, dict):
+            raise ValueError("invalid top provider")
+        max_output_tokens = top_provider.get("max_completion_tokens")
+        if max_output_tokens is not None and (
+            not isinstance(max_output_tokens, int) or isinstance(max_output_tokens, bool)
+        ):
+            raise ValueError("invalid max completion tokens")
 
         supported = entry.get("supported_parameters")
         if supported is None:
@@ -189,6 +199,7 @@ class OpenRouterCatalogSource:
             provider_model_id=model_id,
             display_name=name,
             context_window=context,
+            max_output_tokens=max_output_tokens,
             reasoning=True if "reasoning" in supported_set else None,
             coding=None,
             tool_calling=True if {"tools", "tool_choice"} & supported_set else None,

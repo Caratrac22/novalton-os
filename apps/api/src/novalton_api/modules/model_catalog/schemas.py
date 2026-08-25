@@ -41,6 +41,7 @@ class ModelDefinitionResponse(BaseModel):
     display_name: str
     status: ModelStatus
     context_window: int | None
+    max_output_tokens: int | None
     reasoning: bool | None
     coding: bool | None
     tool_calling: bool | None

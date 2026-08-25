@@ -35,6 +35,7 @@ class CatalogModel(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
     ]
     context_window: int | None = Field(default=None, ge=1, le=10_000_000)
+    max_output_tokens: int | None = Field(default=None, ge=1, le=65_536)
     reasoning: bool | None = None
     coding: bool | None = None
     tool_calling: bool | None = None
