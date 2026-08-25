@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
@@ -294,8 +294,13 @@ async def _cleanup(scope: Scope) -> None:
             await session.execute(
                 delete(WorkflowPlan).where(WorkflowPlan.tenant_id == scope.tenant_id)
             )
-            await session.execute(delete(AgentRun).where(AgentRun.tenant_id == scope.tenant_id))
+            await session.execute(
+                update(AgentRun)
+                .where(AgentRun.tenant_id == scope.tenant_id)
+                .values(model_run_id=None)
+            )
             await session.execute(delete(ModelRun).where(ModelRun.tenant_id == scope.tenant_id))
+            await session.execute(delete(AgentRun).where(AgentRun.tenant_id == scope.tenant_id))
             await session.execute(
                 delete(AgentDefinition).where(AgentDefinition.tenant_id == scope.tenant_id)
             )
@@ -699,7 +704,36 @@ def test_i029_malformed_manager_result_fails_without_downstream_handoff(scope: S
     assert result["outcome"] == "WORKFLOW_FAILED"
     assert result["reason_code"] == "invalid_agent_result"
     assert [item.handoff_type for item in state["handoffs"]] == ["DEVELOPMENT_REQUEST"]
-    assert len(state["agent_runs"]) == len(state["model_runs"]) == len(provider.calls) == 1
+    assert len(state["agent_runs"]) == 1
+    assert len(state["model_runs"]) == len(provider.calls) == 2
+
+
+def test_i029_contextually_incompatible_manager_result_fails_before_handoff(
+    scope: Scope,
+) -> None:
+    invalid = json.loads(json.dumps(_manager()))
+    invalid["development_plan"]["proposed_tasks"].append(
+        {
+            "task_key": "second_assignment",
+            "title": "Implement the second assignment",
+            "objective": "Implement the second bounded task.",
+            "required_capabilities": ["software_implementation"],
+            "depends_on": [],
+            "expected_output": "development.implementation_result",
+            "acceptance_criteria": ["The second behavior is represented."],
+            "risk_level": "LOW",
+        }
+    )
+    provider = QueueProvider([invalid, invalid])
+    created, advance = _create_vertical(scope, provider)
+    result = _advance_fresh(provider, advance)
+    state = asyncio.run(_vertical_state(scope, UUID(str(created["workflow_run"]["id"]))))
+
+    assert result["outcome"] == "WORKFLOW_FAILED"
+    assert result["reason_code"] == "invalid_agent_result"
+    assert [item.handoff_type for item in state["handoffs"]] == ["DEVELOPMENT_REQUEST"]
+    assert len(state["agent_runs"]) == 1
+    assert len(state["model_runs"]) == len(provider.calls) == 2
 
 
 def test_i029_tampered_handoff_prevents_downstream_model(scope: Scope) -> None:

@@ -30,8 +30,10 @@ from novalton_api.modules.agents.contract_execution import (
     ContractGenerationCapabilities,
     ContractGenerationStrategy,
     ContractStrategyTier,
+    ResultShapeConstraint,
     compile_contract,
     select_generation_strategy,
+    validate_result_shape,
 )
 from novalton_api.modules.agents.contracts import AgentInput, AgentResult, AgentResultStatus
 from novalton_api.modules.agents.models import AgentDefinition, AgentRun
@@ -96,6 +98,25 @@ def _bounded_validation_diagnostics(error: ValidationError) -> dict[str, object]
         "validation_error_count": len(errors),
         "validation_error_types": error_types[:_MAX_DIAGNOSTIC_ITEMS],
         "validation_error_paths": field_paths[:_MAX_DIAGNOSTIC_ITEMS],
+    }
+
+
+def _contextual_validation_diagnostics(
+    failures: tuple[object, ...],
+) -> dict[str, object]:
+    codes: list[str] = []
+    paths: list[str] = []
+    for failure in failures[:_MAX_DIAGNOSTIC_ITEMS]:
+        code = str(getattr(failure, "code", "contextual_constraint_failed"))[:_MAX_DIAGNOSTIC_TEXT]
+        path = str(getattr(failure, "path", "<root>"))[:_MAX_DIAGNOSTIC_TEXT]
+        if code not in codes:
+            codes.append(code)
+        if path not in paths:
+            paths.append(path)
+    return {
+        "contextual_constraint_failure_count": len(failures),
+        "contextual_constraint_codes": codes,
+        "contextual_constraint_paths": paths,
     }
 
 
@@ -263,9 +284,13 @@ async def execute[AgentResultT: AgentResult](
     data: AgentInput,
     result_contract: type[AgentResultT] = AgentResult,
     contract_instructions: str | None = None,
+    result_shape_constraints: tuple[ResultShapeConstraint, ...] = (),
 ) -> AgentExecutionResponse:
     """Execute one provider call without retries, fallback, tools, or content persistence."""
-    profile = compile_contract(result_contract)
+    profile = compile_contract(
+        result_contract,
+        result_shape_constraints=result_shape_constraints,
+    )
     definition = await service.get_definition(
         session,
         tenant_id=tenant_id,
@@ -411,6 +436,7 @@ async def execute[AgentResultT: AgentResult](
                 "strategy_tier": strategy.tier.value,
                 "native_structured_output": strategy.native_structured_output,
                 "response_healing": strategy.response_healing,
+                "contextual_constraint_count": len(profile.result_shape_constraints),
                 "agent_run_id": str(run.id),
                 "model_run_id": str(model_run.id),
                 "provider_id": routed.provider_id,
@@ -570,10 +596,20 @@ async def execute[AgentResultT: AgentResult](
             model_run_id=model_run.id,
             error_code="invalid_provider_json",
         )
+    validation_kind = "BASE_CONTRACT"
+    diagnostics: dict[str, object] | None = None
     try:
         result = result_contract.model_validate_json(generation.content, strict=True)
     except ValidationError as error:
         diagnostics = _bounded_validation_diagnostics(error)
+        result = None
+    else:
+        contextual_failures = validate_result_shape(result, profile.result_shape_constraints)
+        if contextual_failures:
+            validation_kind = "CONTEXTUAL_CONTRACT"
+            diagnostics = _contextual_validation_diagnostics(contextual_failures)
+            result = None
+    if diagnostics is not None:
         logger.warning(
             "Strict agent result validation failed",
             extra={
@@ -584,6 +620,7 @@ async def execute[AgentResultT: AgentResult](
                 "model_run_id": str(model_run.id),
                 "provider_id": routed.provider_id,
                 "provider_model_id": routed.provider_model_id,
+                "validation_kind": validation_kind,
                 **diagnostics,
             },
         )
@@ -611,6 +648,7 @@ async def execute[AgentResultT: AgentResult](
                     "provider_id": routed.provider_id,
                     "provider_model_id": routed.provider_model_id,
                     "repair_attempt": 1,
+                    "validation_kind": validation_kind,
                     **diagnostics,
                 },
             )
@@ -702,6 +740,12 @@ async def execute[AgentResultT: AgentResult](
                         )
                     except (json.JSONDecodeError, TypeError, ValidationError):
                         result = None
+                    else:
+                        result = (
+                            result
+                            if not validate_result_shape(result, profile.result_shape_constraints)
+                            else None
+                        )
                     logger.info(
                         "Agent contract repair completed",
                         extra={
@@ -713,6 +757,7 @@ async def execute[AgentResultT: AgentResult](
                             "provider_id": routed.provider_id,
                             "provider_model_id": routed.provider_model_id,
                             "repair_attempt": 1,
+                            "validation_kind": validation_kind,
                             "repair_succeeded": result is not None,
                         },
                     )

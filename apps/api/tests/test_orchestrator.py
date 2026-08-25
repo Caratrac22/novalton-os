@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
@@ -191,8 +191,13 @@ async def _cleanup(scope: Scope) -> None:
             await session.execute(
                 delete(WorkflowPlan).where(WorkflowPlan.tenant_id == scope.tenant_id)
             )
-            await session.execute(delete(AgentRun).where(AgentRun.tenant_id == scope.tenant_id))
+            await session.execute(
+                update(AgentRun)
+                .where(AgentRun.tenant_id == scope.tenant_id)
+                .values(model_run_id=None)
+            )
             await session.execute(delete(ModelRun).where(ModelRun.tenant_id == scope.tenant_id))
+            await session.execute(delete(AgentRun).where(AgentRun.tenant_id == scope.tenant_id))
             await session.execute(
                 delete(AgentDefinition).where(AgentDefinition.id == scope.definition_id)
             )
@@ -502,14 +507,14 @@ def test_real_i022_path_executes_once_links_and_ignores_requested_actions(scope:
 
 
 @pytest.mark.parametrize(
-    ("content", "failure_code"),
+    ("content", "failure_code", "call_count"),
     [
-        ("not-json", "invalid_provider_json"),
-        (json.dumps({"bad": "result"}), "invalid_agent_result"),
+        ("not-json", "invalid_provider_json", 1),
+        (json.dumps({"bad": "result"}), "invalid_agent_result", 2),
     ],
 )
 def test_real_i022_invalid_result_fails_without_retry(
-    scope: Scope, content: str, failure_code: str
+    scope: Scope, content: str, failure_code: str, call_count: int
 ) -> None:
     run_id = asyncio.run(_run(scope, [_agent_step(scope, "invalid")]))
     provider = MockProvider(content)
@@ -517,7 +522,7 @@ def test_real_i022_invalid_result_fails_without_retry(
         body = client.post(_url(scope, run_id)).json()
     assert body["outcome"] == "WORKFLOW_FAILED"
     assert body["reason_code"] == failure_code
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == call_count
 
 
 def test_real_i022_no_suitable_model_fails_without_provider_call(scope: Scope) -> None:

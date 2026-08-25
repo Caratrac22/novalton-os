@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
+from novalton_api.modules.agents.contract_execution import ResultShapeConstraint
 from novalton_api.modules.agents.contracts import AgentResult, ModelRequirementHints
 from novalton_api.modules.agents.schemas import AgentExecutionResponse
 from novalton_api.modules.developer_manager import service as manager_service
@@ -23,6 +24,18 @@ from novalton_api.modules.workflows.models import (
     WorkflowStep,
     WorkflowStepHandoff,
     WorkflowStepRun,
+)
+
+FIXED_MANAGER_RESULT_CONSTRAINTS: tuple[ResultShapeConstraint, ...] = (
+    ResultShapeConstraint.exact_items(
+        code="fixed_manager_task_count",
+        path="development_plan.proposed_tasks",
+        count=1,
+    ),
+    ResultShapeConstraint.empty(
+        code="fixed_manager_task_dependencies_empty",
+        path="development_plan.proposed_tasks[0].depends_on",
+    ),
 )
 
 
@@ -127,6 +140,7 @@ async def dispatch(
             tenant_id=run.tenant_id,
             workspace_id=run.workspace_id,
             data=DeveloperManagerPlanningRequest(**common),
+            result_shape_constraints=FIXED_MANAGER_RESULT_CONSTRAINTS,
         )
     elif role == "developer_worker":
         response = await developer_service.execute_assignment(

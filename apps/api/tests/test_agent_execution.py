@@ -20,24 +20,39 @@ from novalton_api.infrastructure.providers.errors import (
 )
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.main import create_app
+from novalton_api.modules.agents import execution as agent_execution
 from novalton_api.modules.agents.contract_execution import (
     ContractGenerationCapabilities,
     ContractStrategyTier,
+    ResultShapeConstraint,
     compile_contract,
     select_generation_strategy,
 )
-from novalton_api.modules.agents.contracts import AgentInput, AgentResult
+from novalton_api.modules.agents.contracts import (
+    AgentInput,
+    AgentResult,
+    AgentResultStatus,
+    ChallengeLevel,
+)
 from novalton_api.modules.agents.execution import (
     _bounded_validation_diagnostics,
     _generation_request,
 )
 from novalton_api.modules.agents.models import AgentDefinition, AgentRun
+from novalton_api.modules.agents.schemas import AgentExecutionResponse
 from novalton_api.modules.approvals.models import ApprovalRequest
-from novalton_api.modules.developer_manager.contracts import DeveloperManagerResult
+from novalton_api.modules.developer_manager.contracts import (
+    DeveloperManagerResult,
+    DevelopmentPlanningInput,
+    DevelopmentPlanProposal,
+    ProposedWorkerTask,
+    ReviewRecommendation,
+)
 from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_router import service as router_service
 from novalton_api.modules.model_usage.models import ModelRun
 from novalton_api.modules.policy.models import PolicyRule
+from novalton_api.modules.policy.schemas import RiskLevel
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tenants.models import Tenant
@@ -235,6 +250,145 @@ def _url(scope: Scope) -> str:
         f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
         f"/agents/{scope.definition_id}/run"
     )
+
+
+def _manager_input(scope: Scope) -> dict[str, object]:
+    return {
+        "objective": "Prepare one bounded implementation task.",
+        "constraints": ["Do not execute actions"],
+        "project_id": str(scope.project_id),
+        "task_id": str(scope.task_id),
+        "context_references": [],
+        "source_references": [],
+        "prior_result_references": [],
+        "expected_output_type": "development.plan_proposal",
+        "permitted_tools": [],
+        "model_requirements": {
+            "required_capabilities": ["reasoning"],
+            "minimum_context_tokens": 2_000_000,
+            "structured_output_required": True,
+            "tool_calling_required": False,
+        },
+    }
+
+
+def _manager_result_json(task_count: int) -> str:
+    tasks = [
+        ProposedWorkerTask(
+            task_key=f"task_{index}",
+            title=f"Task {index}",
+            objective=f"Complete task {index}.",
+            required_capabilities=["coding"],
+            depends_on=[],
+            expected_output="code.patch",
+            acceptance_criteria=["The bounded task is complete."],
+            risk_level=RiskLevel.LOW,
+        )
+        for index in range(task_count)
+    ]
+    return DeveloperManagerResult(
+        status=AgentResultStatus.COMPLETED,
+        summary="Bounded development plan.",
+        findings=[],
+        artifacts=[],
+        sources=[],
+        assumptions=[],
+        risks=[],
+        uncertainties=[],
+        blocking_issues=[],
+        challenge={"level": ChallengeLevel.NONE},
+        recommended_next_steps=[],
+        requested_actions=[],
+        development_plan=DevelopmentPlanProposal(
+            objective_interpretation="Complete the bounded implementation.",
+            architecture_workstreams=["implementation"],
+            proposed_tasks=tasks,
+            qa_review=ReviewRecommendation.RECOMMENDED,
+            security_review=ReviewRecommendation.NOT_NEEDED,
+            manual_review=ReviewRecommendation.NOT_NEEDED,
+        ),
+    ).model_dump_json()
+
+
+def _fixed_manager_constraints() -> tuple[ResultShapeConstraint, ...]:
+    return (
+        ResultShapeConstraint.exact_items(
+            code="fixed_manager_task_count",
+            path="development_plan.proposed_tasks",
+            count=1,
+        ),
+        ResultShapeConstraint.empty(
+            code="fixed_manager_task_dependencies_empty",
+            path="development_plan.proposed_tasks[0].depends_on",
+        ),
+    )
+
+
+async def _execute_manager(
+    scope: Scope, provider: MockProvider, contents: tuple[str, ...]
+) -> AgentExecutionResponse:
+    provider.content = list(contents)
+    database = Database.from_settings(Settings())
+    try:
+        async with database.session_factory() as session:
+            return await agent_execution.execute(
+                session,
+                registry=ProviderRegistry((provider,)),
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                definition_id=scope.definition_id,
+                data=DevelopmentPlanningInput.model_validate(_manager_input(scope)),
+                result_contract=DeveloperManagerResult,
+                result_shape_constraints=_fixed_manager_constraints(),
+            )
+    finally:
+        await database.dispose()
+
+
+def test_contextual_repair_is_separately_accounted() -> None:
+    scope = asyncio.run(_seed())
+    provider = MockProvider()
+    try:
+        response = asyncio.run(
+            _execute_manager(
+                scope,
+                provider,
+                (_manager_result_json(2), _manager_result_json(1)),
+            )
+        )
+        attempts = asyncio.run(_model_attempts(scope, response.agent_run_id))
+
+        assert response.status == "SUCCEEDED"
+        assert response.result is not None
+        assert len(provider.calls) == 2
+        assert [attempt.status for attempt in attempts] == ["SUCCEEDED", "SUCCEEDED"]
+        assert [(attempt.input_tokens, attempt.output_tokens) for attempt in attempts] == [
+            (100, 20),
+            (100, 20),
+        ]
+        assert attempts[0].id != attempts[1].id
+    finally:
+        asyncio.run(_cleanup(scope))
+
+
+def test_contextual_repair_is_bounded_and_fails_closed() -> None:
+    scope = asyncio.run(_seed())
+    provider = MockProvider()
+    try:
+        response = asyncio.run(
+            _execute_manager(
+                scope,
+                provider,
+                (_manager_result_json(2), _manager_result_json(2)),
+            )
+        )
+        attempts = asyncio.run(_model_attempts(scope, response.agent_run_id))
+
+        assert (response.status, response.error_code) == ("FAILED", "invalid_agent_result")
+        assert len(provider.calls) == 2
+        assert [attempt.status for attempt in attempts] == ["SUCCEEDED", "SUCCEEDED"]
+    finally:
+        asyncio.run(_cleanup(scope))
 
 
 def test_generation_request_propagates_strict_agent_result_schema() -> None:

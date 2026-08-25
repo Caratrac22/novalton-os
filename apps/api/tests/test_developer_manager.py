@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
@@ -197,8 +197,13 @@ async def _cleanup(scope: Scope) -> None:
             await session.execute(
                 delete(AuditRecord).where(AuditRecord.tenant_id == scope.tenant_id)
             )
-            await session.execute(delete(AgentRun).where(AgentRun.tenant_id == scope.tenant_id))
+            await session.execute(
+                update(AgentRun)
+                .where(AgentRun.tenant_id == scope.tenant_id)
+                .values(model_run_id=None)
+            )
             await session.execute(delete(ModelRun).where(ModelRun.tenant_id == scope.tenant_id))
+            await session.execute(delete(AgentRun).where(AgentRun.tenant_id == scope.tenant_id))
             await session.execute(
                 delete(AgentDefinition).where(AgentDefinition.tenant_id == scope.tenant_id)
             )
@@ -286,15 +291,21 @@ def test_manager_executes_once_and_only_returns_a_validated_proposal() -> None:
 
 
 @pytest.mark.parametrize(
-    "content",
+    ("content", "call_count"),
     [
-        "not-json",
-        _result().replace(
-            '"requested_actions": []', '"requested_actions": [{"action_type":"git.push"}]'
+        ("not-json", 1),
+        (
+            _result().replace(
+                '"requested_actions": []',
+                '"requested_actions": [{"action_type":"git.push"}]',
+            ),
+            2,
         ),
     ],
 )
-def test_manager_rejects_invalid_provider_results_without_retry(content: str) -> None:
+def test_manager_rejects_invalid_provider_results_without_retry(
+    content: str, call_count: int
+) -> None:
     scope = asyncio.run(_seed())
     provider = MockProvider(content)
     try:
@@ -303,7 +314,7 @@ def test_manager_rejects_invalid_provider_results_without_retry(content: str) ->
         assert response.status_code == 200
         assert response.json()["status"] == "FAILED"
         assert response.json()["result"] is None
-        assert len(provider.calls) == 1
+        assert len(provider.calls) == call_count
     finally:
         asyncio.run(_cleanup(scope))
 

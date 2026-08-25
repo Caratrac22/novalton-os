@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
@@ -65,6 +65,10 @@ async def _cleanup(scopes: tuple[Scope, Scope]) -> None:
     try:
         async with database.session_factory.begin() as session:
             ids = [scope.tenant_id for scope in scopes]
+            await session.execute(
+                update(AgentRun).where(AgentRun.tenant_id.in_(ids)).values(model_run_id=None)
+            )
+            await session.execute(delete(ModelRun).where(ModelRun.tenant_id.in_(ids)))
             await session.execute(delete(AgentRun).where(AgentRun.tenant_id.in_(ids)))
             await session.execute(delete(AgentDefinition).where(AgentDefinition.tenant_id.in_(ids)))
             await session.execute(delete(AuditRecord).where(AuditRecord.tenant_id.in_(ids)))
