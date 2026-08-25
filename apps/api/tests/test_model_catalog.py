@@ -6,11 +6,13 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Base, Database
+from novalton_api.core.limits import MAX_CATALOG_OUTPUT_TOKENS
 from novalton_api.infrastructure.providers.catalog import CatalogSourceRegistry
 from novalton_api.infrastructure.providers.contracts import CatalogModel
 from novalton_api.infrastructure.providers.errors import ProviderError, ProviderFailure
@@ -116,6 +118,25 @@ def test_model_catalog_metadata_has_only_i017_global_schema() -> None:
     }.issubset(names)
     assert "usage_events" not in Base.metadata.tables
     assert "usage_events" not in Base.metadata.tables
+    max_output_constraint = next(
+        constraint
+        for constraint in table.constraints
+        if constraint.name == "ck_model_definitions_max_output_tokens_value"
+    )
+    assert str(max_output_constraint.sqltext) == (
+        f"max_output_tokens IS NULL OR max_output_tokens BETWEEN 1 AND {MAX_CATALOG_OUTPUT_TOKENS}"
+    )
+
+
+def test_catalog_model_accepts_large_and_unknown_output_limits() -> None:
+    assert _model("vendor/large", max_output_tokens=943718).max_output_tokens == 943718
+    assert _model("vendor/unknown", max_output_tokens=None).max_output_tokens is None
+    with pytest.raises(ValidationError):
+        _model("vendor/zero", max_output_tokens=0)
+    with pytest.raises(ValidationError):
+        _model("vendor/negative", max_output_tokens=-1)
+    with pytest.raises(ValidationError):
+        _model("vendor/too-large", max_output_tokens=MAX_CATALOG_OUTPUT_TOKENS + 1)
 
 
 def test_successful_refresh_upserts_idempotently_marks_missing_stale_and_lists(
@@ -125,6 +146,7 @@ def test_successful_refresh_upserts_idempotently_marks_missing_stale_and_lists(
         _model(
             "vendor/free-zero",
             display_name="Zero Cost Unknown",
+            max_output_tokens=943718,
             reasoning=True,
             input_price_per_million=Decimal("0"),
             output_price_per_million=Decimal("0"),
@@ -142,6 +164,7 @@ def test_successful_refresh_upserts_idempotently_marks_missing_stale_and_lists(
     assert listed.json()["limit"] == 1
     zero = listed.json()["items"][0]
     assert zero["provider_model_id"] == "vendor/free-zero"
+    assert zero["max_output_tokens"] == 943718
     assert zero["status"] == "AVAILABLE"
     assert zero["free_allowlisted"] is False
     assert zero["coding"] is None

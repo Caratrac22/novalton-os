@@ -8,6 +8,8 @@ from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from novalton_api.core.limits import MAX_CATALOG_OUTPUT_TOKENS, MAX_EXECUTION_OUTPUT_TOKENS
+
 MAX_MESSAGES = 128
 MAX_MESSAGE_CHARACTERS = 65_536
 MAX_REQUEST_CHARACTERS = 262_144
@@ -35,7 +37,7 @@ class CatalogModel(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
     ]
     context_window: int | None = Field(default=None, ge=1, le=10_000_000)
-    max_output_tokens: int | None = Field(default=None, ge=1, le=65_536)
+    max_output_tokens: int | None = Field(default=None, ge=1, le=MAX_CATALOG_OUTPUT_TOKENS)
     reasoning: bool | None = None
     coding: bool | None = None
     tool_calling: bool | None = None
@@ -142,7 +144,7 @@ class GenerationRequest(BaseModel):
 
     model_id: ModelIdentifier
     messages: list[Message] = Field(min_length=1, max_length=MAX_MESSAGES)
-    max_output_tokens: int | None = Field(default=None, ge=1, le=65_536)
+    max_output_tokens: int | None = Field(default=None, ge=1, le=MAX_EXECUTION_OUTPUT_TOKENS)
     structured_output: StructuredOutputRequest | None = None
     json_object: JsonObjectRequest | None = None
     provider_options: ProviderRequestOptions | None = None

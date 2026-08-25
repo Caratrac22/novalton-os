@@ -23,3 +23,22 @@ def test_truncation_requires_explicit_token_limit_finish_reason() -> None:
     assert classify_truncation("max_tokens") == "TOKEN_LIMIT"
     assert classify_truncation("stop") == "OTHER"
     assert classify_truncation(None) == "NONE"
+
+
+def test_large_catalog_maximum_stays_bounded_by_execution_safety_ceiling() -> None:
+    budget = select_output_budget(
+        expected_output_tokens=3000,
+        known_model_maximum=943718,
+        safety_ceiling=65_536,
+    )
+    assert budget.tokens == 4500
+    assert budget.tokens < 943718
+
+
+def test_small_catalog_maximum_still_clamps_execution_budget() -> None:
+    budget = select_output_budget(
+        expected_output_tokens=3000,
+        known_model_maximum=4096,
+        safety_ceiling=65_536,
+    )
+    assert budget.tokens == 4096

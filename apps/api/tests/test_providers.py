@@ -95,6 +95,8 @@ def test_request_and_result_are_strict_bounded_and_serializable() -> None:
     with pytest.raises(ValidationError):
         request(model_id="~")
     with pytest.raises(ValidationError):
+        request(max_output_tokens=65_537)
+    with pytest.raises(ValidationError):
         Message(role=MessageRole.USER, content="x" * (MAX_MESSAGE_CHARACTERS + 1))
     with pytest.raises(ValidationError, match="request limit"):
         request(
@@ -199,7 +201,7 @@ async def test_openrouter_catalog_normalizes_bounded_metadata_without_raw_payloa
                         "id": "vendor/model-free",
                         "name": "Vendor Model Free",
                         "context_length": 131072,
-                        "top_provider": {"max_completion_tokens": 8192},
+                        "top_provider": {"max_completion_tokens": 943718},
                         "supported_parameters": ["tools", "response_format"],
                         "architecture": {"input_modalities": ["text", "image"]},
                         "pricing": {"prompt": "0", "completion": "0.00000125"},
@@ -225,7 +227,7 @@ async def test_openrouter_catalog_normalizes_bounded_metadata_without_raw_payloa
             provider_model_id="vendor/model-free",
             display_name="Vendor Model Free",
             context_window=131072,
-            max_output_tokens=8192,
+            max_output_tokens=943718,
             tool_calling=True,
             structured_output=True,
             vision=True,

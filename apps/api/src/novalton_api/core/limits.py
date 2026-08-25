@@ -1,0 +1,4 @@
+"""Shared safety and metadata bounds."""
+
+MAX_CATALOG_OUTPUT_TOKENS = 10_000_000
+MAX_EXECUTION_OUTPUT_TOKENS = 65_536

@@ -7,6 +7,7 @@ from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, Numeric, Strin
 from sqlalchemy.orm import Mapped, mapped_column
 
 from novalton_api.core.database import Base
+from novalton_api.core.limits import MAX_CATALOG_OUTPUT_TOKENS
 from novalton_api.core.models import TimestampMixin, UUIDPrimaryKeyMixin
 
 
@@ -36,7 +37,8 @@ class ModelDefinition(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_model_definitions_context_window_value",
         ),
         CheckConstraint(
-            "max_output_tokens IS NULL OR max_output_tokens BETWEEN 1 AND 65536",
+            "max_output_tokens IS NULL OR max_output_tokens BETWEEN 1 AND "
+            f"{MAX_CATALOG_OUTPUT_TOKENS}",
             name="ck_model_definitions_max_output_tokens_value",
         ),
         CheckConstraint(
