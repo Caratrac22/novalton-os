@@ -129,14 +129,14 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         nullable=True,
     )
-    model_definition_id: Mapped[UUID] = mapped_column(
+    model_definition_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
         ForeignKey(
             "model_definitions.id",
             name="fk_model_runs_model_definition_id_model_definitions",
             ondelete="RESTRICT",
         ),
-        nullable=False,
+        nullable=True,
     )
     provider_id: Mapped[str] = mapped_column(String(64), nullable=False)
     provider_model_id: Mapped[str] = mapped_column(String(256), nullable=False)

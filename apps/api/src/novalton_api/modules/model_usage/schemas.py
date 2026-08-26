@@ -22,7 +22,9 @@ Currency = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3,
 class ModelRunStart(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    model_definition_id: UUID
+    model_definition_id: UUID | None = None
+    provider_id: str | None = None
+    provider_model_id: str | None = None
     agent_run_id: UUID | None = None
     project_id: UUID | None = None
     estimated_cost: Decimal | None = Field(default=None, ge=0, max_digits=20, decimal_places=10)
@@ -30,6 +32,10 @@ class ModelRunStart(BaseModel):
 
     @model_validator(mode="after")
     def validate_estimate(self) -> "ModelRunStart":
+        if self.model_definition_id is None and (
+            self.provider_id is None or self.provider_model_id is None
+        ):
+            raise ValueError("a catalog model or explicit provider route is required")
         if (self.estimated_cost is None) != (self.currency is None):
             raise ValueError("estimated_cost and currency must be supplied together")
         if self.currency is not None and self.currency != self.currency.upper():
@@ -45,7 +51,7 @@ class ModelRunResponse(BaseModel):
     workspace_id: UUID
     project_id: UUID | None
     agent_run_id: UUID | None
-    model_definition_id: UUID
+    model_definition_id: UUID | None
     provider_id: str
     provider_model_id: str
     provider_resolved_model_id: str | None

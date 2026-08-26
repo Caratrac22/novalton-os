@@ -5,7 +5,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 
-def test_alembic_configuration_loads_i048_after_i047() -> None:
+def test_alembic_configuration_loads_i049_after_i048() -> None:
     api_root = Path(__file__).parents[1]
     config = Config(api_root / "alembic.ini")
     scripts = ScriptDirectory.from_config(config)
@@ -14,9 +14,9 @@ def test_alembic_configuration_loads_i048_after_i047() -> None:
     revision = scripts.get_revision(head)
     baseline = scripts.get_revision("20260820_0001")
 
-    assert head == "20260825_0016"
+    assert head == "20260825_0017"
     assert revision is not None
-    assert revision.down_revision == "20260825_0015"
+    assert revision.down_revision == "20260825_0016"
     assert baseline is not None
     assert baseline.down_revision is None
 

@@ -70,6 +70,25 @@ class CatalogModel(BaseModel):
         return self
 
 
+@dataclass(frozen=True)
+class ProviderManagedRoute:
+    """An explicitly registered provider route which is not a catalog model."""
+
+    provider_id: str
+    provider_model_id: str
+    display_name: str
+    enabled: bool = True
+    capabilities: frozenset[str] = frozenset()
+    capability_policy: str = "DECLARED_GUARANTEE"
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    pricing_policy: str | None = None
+    free_allowlisted: bool = False
+    dynamic_resolution: bool = True
+    source: str = "provider_adapter"
+    capability_source: str = "provider_adapter"
+
+
 MessageContent = Annotated[
     str,
     StringConstraints(min_length=1, max_length=MAX_MESSAGE_CHARACTERS),

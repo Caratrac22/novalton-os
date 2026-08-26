@@ -11,12 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from novalton_api.core.config import get_settings
 from novalton_api.core.context import get_correlation_id
 from novalton_api.core.exceptions import ApplicationError
+from novalton_api.infrastructure.providers.contracts import ProviderManagedRoute
 from novalton_api.modules.model_catalog import repository
 from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_router.schemas import (
     CostPolicy,
     EstimatedCost,
     ModelCapability,
+    RoutableTargetKind,
     RoutingOutcome,
     RoutingReason,
     RoutingRequest,
@@ -31,7 +33,7 @@ _MILLION = Decimal(1_000_000)
 
 @dataclass(frozen=True)
 class _Candidate:
-    model: ModelDefinition
+    model: ModelDefinition | ProviderManagedRoute
     estimated_cost: Decimal | None
 
 
@@ -46,8 +48,12 @@ def _requirements(data: RoutingRequest) -> frozenset[ModelCapability]:
     return frozenset(required)
 
 
-def _cost(model: ModelDefinition, data: RoutingRequest) -> Decimal | None:
-    if model.input_price_per_million is None or model.currency is None:
+def _cost(model: ModelDefinition | ProviderManagedRoute, data: RoutingRequest) -> Decimal | None:
+    if (
+        not isinstance(model, ModelDefinition)
+        or model.input_price_per_million is None
+        or model.currency is None
+    ):
         return None
     total = Decimal(data.context_tokens_estimate) * model.input_price_per_million
     if data.expected_output_tokens is not None:
@@ -57,7 +63,11 @@ def _cost(model: ModelDefinition, data: RoutingRequest) -> Decimal | None:
     return total / _MILLION
 
 
-def _capabilities_satisfied(model: ModelDefinition, required: frozenset[ModelCapability]) -> bool:
+def _capabilities_satisfied(
+    model: ModelDefinition | ProviderManagedRoute, required: frozenset[ModelCapability]
+) -> bool:
+    if isinstance(model, ProviderManagedRoute):
+        return all(capability.value in model.capabilities for capability in required)
     return all(getattr(model, capability.value) is True for capability in required)
 
 
@@ -76,7 +86,7 @@ def _rank_key(candidate: _Candidate, data: RoutingRequest) -> tuple[object, ...]
         provider_preference_rank,
         model.provider_id,
         model.provider_model_id,
-        str(model.id),
+        str(getattr(model, "id", model.provider_model_id)),
     )
 
 
@@ -132,6 +142,7 @@ async def simulate(
     tenant_id: UUID,
     workspace_id: UUID,
     data: RoutingRequest,
+    virtual_routes: tuple[ProviderManagedRoute, ...] = (),
 ) -> RoutingSimulationResult:
     """Select only; never invoke providers or persist routing side effects."""
     started_at = perf_counter()
@@ -144,7 +155,10 @@ async def simulate(
     ):
         raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
 
-    models = await repository.list_routing_candidates(session)
+    models: list[ModelDefinition | ProviderManagedRoute] = [
+        *(await repository.list_routing_candidates(session)),
+        *virtual_routes,
+    ]
     forced_pair = get_settings().model_router_force_model_pair
     required = _requirements(data)
     available = context_rejected = capability_rejected = free_rejected = 0
@@ -152,10 +166,14 @@ async def simulate(
     for model in models:
         if forced_pair is not None and (model.provider_id, model.provider_model_id) != forced_pair:
             continue
-        if model.status != "AVAILABLE":
+        if isinstance(model, ModelDefinition) and model.status != "AVAILABLE":
+            continue
+        if isinstance(model, ProviderManagedRoute) and not model.enabled:
             continue
         available += 1
-        if model.context_window is None or model.context_window < data.context_tokens_estimate:
+        if (isinstance(model, ModelDefinition) and model.context_window is None) or (
+            model.context_window is not None and model.context_window < data.context_tokens_estimate
+        ):
             context_rejected += 1
             continue
         if not _capabilities_satisfied(model, required):
@@ -180,7 +198,11 @@ async def simulate(
         )
     else:
         preferred = next(
-            (candidate for candidate in eligible if candidate.model.id == data.preferred_model_id),
+            (
+                candidate
+                for candidate in eligible
+                if getattr(candidate.model, "id", None) == data.preferred_model_id
+            ),
             None,
         )
         if preferred is not None:
@@ -209,12 +231,32 @@ async def simulate(
         result = RoutingSimulationResult(
             outcome=RoutingOutcome.SELECTED,
             selected=SelectedCatalogModel(
-                catalog_model_id=selected.model.id,
+                catalog_model_id=getattr(selected.model, "id", None),
                 provider_id=selected.model.provider_id,
                 provider_model_id=selected.model.provider_model_id,
                 display_name=selected.model.display_name,
-                last_verified_at=selected.model.last_verified_at,
+                last_verified_at=getattr(selected.model, "last_verified_at", None),
                 estimated_cost=estimate,
+                target_kind=(
+                    RoutableTargetKind.VIRTUAL_ROUTE
+                    if isinstance(selected.model, ProviderManagedRoute)
+                    else RoutableTargetKind.CATALOG_MODEL
+                ),
+                route_source=getattr(selected.model, "source", None),
+                capability_declaration_source=getattr(selected.model, "capability_source", None),
+                capability_policy=getattr(selected.model, "capability_policy", None),
+                declared_capabilities=(
+                    selected.model.capabilities
+                    if isinstance(selected.model, ProviderManagedRoute)
+                    else frozenset(
+                        capability.value
+                        for capability in ModelCapability
+                        if getattr(selected.model, capability.value) is True
+                    )
+                ),
+                context_window=selected.model.context_window,
+                max_output_tokens=selected.model.max_output_tokens,
+                dynamic_resolution=getattr(selected.model, "dynamic_resolution", False),
             ),
             reason_codes=reasons,
             eligible_candidate_count=len(eligible),
@@ -227,6 +269,10 @@ async def simulate(
             "provider_id": result.selected.provider_id if result.selected else None,
             "model_id": str(result.selected.catalog_model_id) if result.selected else None,
             "provider_model_id": result.selected.provider_model_id if result.selected else None,
+            "target_kind": result.selected.target_kind if result.selected else None,
+            "route_source": result.selected.route_source if result.selected else None,
+            "capability_policy": result.selected.capability_policy if result.selected else None,
+            "dynamic_resolution": result.selected.dynamic_resolution if result.selected else None,
             "candidate_count": result.eligible_candidate_count,
             "result_codes": [reason.value for reason in result.reason_codes],
             "correlation_id": get_correlation_id(),

@@ -11,10 +11,12 @@ from sqlalchemy import delete, func, select
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
 from novalton_api.infrastructure.providers.openai_compatible import OpenAICompatibleProvider
+from novalton_api.infrastructure.providers.openrouter_routes import registered_openrouter_routes
 from novalton_api.main import create_app
 from novalton_api.modules.approvals.models import ApprovalRequest
 from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.model_catalog.models import ModelDefinition
+from novalton_api.modules.model_router import service as router_service
 from novalton_api.modules.model_usage.models import ModelRun
 from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tenants.models import Tenant
@@ -325,6 +327,59 @@ def test_forced_model_restricts_routing_to_exact_provider_model_pair(
     assert body["eligible_candidate_count"] == 1
     assert body["selected"]["provider_id"] == "other-provider"
     assert body["selected"]["provider_model_id"] == "forced-model"
+
+
+def test_virtual_route_selects_and_unknown_forced_route_fails_closed(
+    api: RouterApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    route = registered_openrouter_routes("openrouter")[0]
+
+    async def simulate(forced_pair: str) -> object:
+        database = Database.from_settings(Settings())
+        try:
+            async with database.session_factory() as session:
+                assert (
+                    await session.scalar(
+                        select(ModelDefinition.id).where(
+                            ModelDefinition.provider_id == "openrouter",
+                            ModelDefinition.provider_model_id == "openrouter/free",
+                        )
+                    )
+                    is None
+                )
+                monkeypatch.setattr(
+                    "novalton_api.modules.model_router.service.get_settings",
+                    lambda: Settings(model_router_force_model=forced_pair),
+                )
+                return await router_service.simulate(
+                    session,
+                    tenant_id=api.tenant_id,
+                    workspace_id=api.workspace_id,
+                    data=router_service.RoutingRequest(
+                        **_request(
+                            required_capabilities=[],
+                            structured_output_required=True,
+                        )
+                    ),
+                    virtual_routes=(route,),
+                )
+        finally:
+            await database.dispose()
+
+    selected = asyncio.run(simulate("openrouter::openrouter/free"))
+    assert selected.eligible_candidate_count == 1
+    assert selected.selected is not None
+    assert selected.selected.catalog_model_id is None
+    assert selected.selected.target_kind.value == "VIRTUAL_ROUTE"
+    assert selected.selected.route_source == "provider_adapter"
+    assert selected.selected.context_window == 200_000
+    assert selected.selected.max_output_tokens is None
+    assert selected.selected.dynamic_resolution is True
+    assert "structured_output" in selected.selected.declared_capabilities
+
+    unknown = asyncio.run(simulate("openrouter::dynamic/unknown"))
+    assert unknown.outcome.value == "NO_SUITABLE_MODEL"
+    assert unknown.eligible_candidate_count == 0
 
 
 @pytest.mark.parametrize(

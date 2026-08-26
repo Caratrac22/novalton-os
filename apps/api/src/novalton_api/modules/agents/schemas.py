@@ -150,7 +150,7 @@ class AgentExecutionRequest(AgentInput):
 class SelectedModelResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    catalog_model_id: UUID
+    catalog_model_id: UUID | None = None
     provider_id: str
     provider_model_id: str
 

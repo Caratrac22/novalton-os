@@ -19,6 +19,7 @@ from novalton_api.infrastructure.providers.openai_compatible import (
     OpenAICompatibleProvider,
 )
 from novalton_api.infrastructure.providers.openrouter_catalog import OpenRouterCatalogSource
+from novalton_api.infrastructure.providers.openrouter_routes import registered_openrouter_routes
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.modules.agents.routes import definitions_router, runs_router
 from novalton_api.modules.approvals.routes import router as approvals_router
@@ -59,6 +60,11 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                         write_timeout_seconds=settings.provider_write_timeout_seconds,
                         pool_timeout_seconds=settings.provider_pool_timeout_seconds,
                         max_response_bytes=settings.provider_max_response_bytes,
+                        require_parameters=settings.openai_compatible_require_parameters,
+                        response_healing=settings.openai_compatible_response_healing,
+                        provider_managed_routes=registered_openrouter_routes(
+                            settings.openai_compatible_provider_id
+                        ),
                     )
                 ),
             )

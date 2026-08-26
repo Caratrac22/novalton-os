@@ -40,6 +40,8 @@ class Settings(BaseModel):
     openai_compatible_provider_id: str = Field(
         default="openrouter", min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
     )
+    openai_compatible_require_parameters: bool = False
+    openai_compatible_response_healing: bool = False
     openrouter_catalog_enabled: bool = False
     model_catalog_free_allowlist: tuple[str, ...] = ()
     model_router_force_model: str | None = None
@@ -65,6 +67,8 @@ class Settings(BaseModel):
         "openai_compatible_base_url": "NOVALTON_OPENAI_COMPATIBLE_BASE_URL",
         "openai_compatible_api_key": "NOVALTON_OPENAI_COMPATIBLE_API_KEY",
         "openai_compatible_provider_id": "NOVALTON_OPENAI_COMPATIBLE_PROVIDER_ID",
+        "openai_compatible_require_parameters": "NOVALTON_OPENAI_COMPATIBLE_REQUIRE_PARAMETERS",
+        "openai_compatible_response_healing": "NOVALTON_OPENAI_COMPATIBLE_RESPONSE_HEALING",
         "openrouter_catalog_enabled": "NOVALTON_OPENROUTER_CATALOG_ENABLED",
         "model_catalog_free_allowlist": "NOVALTON_MODEL_CATALOG_FREE_ALLOWLIST",
         "model_router_force_model": "NOVALTON_MODEL_ROUTER_FORCE_MODEL",

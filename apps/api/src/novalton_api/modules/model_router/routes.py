@@ -3,7 +3,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.database import get_async_session
@@ -23,10 +23,12 @@ async def simulate_route(
     workspace_id: UUID,
     data: RoutingRequest,
     session: Session,
+    request: Request,
 ) -> RoutingSimulationResult:
     return await service.simulate(
         session,
         tenant_id=tenant_id,
         workspace_id=workspace_id,
         data=data,
+        virtual_routes=request.app.state.provider_registry.provider_managed_routes,
     )

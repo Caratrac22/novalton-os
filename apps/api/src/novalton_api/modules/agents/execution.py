@@ -47,7 +47,6 @@ from novalton_api.modules.agents.schemas import (
     AgentRunStatus,
     SelectedModelResponse,
 )
-from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_router import service as router_service
 from novalton_api.modules.model_router.schemas import (
     CostPolicy,
@@ -332,6 +331,7 @@ async def execute[AgentResultT: AgentResult](
         tenant_id=tenant_id,
         workspace_id=workspace_id,
         data=_routing_request(definition, data, profile),
+        virtual_routes=registry.provider_managed_routes,
     )
     if route.outcome == RoutingOutcome.NO_SUITABLE_MODEL or route.selected is None:
         run = await _fail_agent(
@@ -356,6 +356,8 @@ async def execute[AgentResultT: AgentResult](
         workspace_id=workspace_id,
         data=ModelRunStart(
             model_definition_id=routed.catalog_model_id,
+            provider_id=routed.provider_id,
+            provider_model_id=routed.provider_model_id,
             agent_run_id=run.id,
             project_id=project_id,
             estimated_cost=estimate.amount if estimate is not None else None,
@@ -404,18 +406,13 @@ async def execute[AgentResultT: AgentResult](
         provider_capabilities = getattr(
             provider, "execution_capabilities", ProviderExecutionCapabilities()
         )
-        model_definition = await session.get(ModelDefinition, routed.catalog_model_id)
         expected_output_tokens = max(256, ceil(len(profile.json_schema.__repr__()) / 3))
         budget = select_output_budget(
             expected_output_tokens=expected_output_tokens,
-            known_model_maximum=(
-                model_definition.max_output_tokens if model_definition is not None else None
-            ),
+            known_model_maximum=routed.max_output_tokens,
             safety_ceiling=get_settings().model_output_token_safety_ceiling,
         )
-        native_structured = bool(
-            model_definition is not None and model_definition.structured_output is True
-        )
+        native_structured = "structured_output" in routed.declared_capabilities
         strategy = select_generation_strategy(
             ContractGenerationCapabilities(
                 native_structured_output=native_structured,
@@ -461,6 +458,10 @@ async def execute[AgentResultT: AgentResult](
                 "model_run_id": str(model_run.id),
                 "provider_id": routed.provider_id,
                 "provider_model_id": routed.provider_model_id,
+                "target_kind": routed.target_kind.value,
+                "route_source": routed.route_source,
+                "capability_policy": routed.capability_policy,
+                "dynamic_resolution": routed.dynamic_resolution,
                 "selected_output_budget": budget.tokens,
                 "known_model_maximum": budget.known_model_maximum,
                 "budget_policy_source": budget.source,
@@ -612,6 +613,9 @@ async def execute[AgentResultT: AgentResult](
             "model_run_id": str(model_run.id),
             "provider_id": routed.provider_id,
             "provider_model_id": routed.provider_model_id,
+            "target_kind": routed.target_kind.value,
+            "dynamic_resolution": routed.dynamic_resolution,
+            "provider_resolved_model_id": generation.provider_resolved_model_id,
             "finish_reason": generation.finish_reason,
             "truncation_classification": truncation_classification,
             "recovery_attempt": False,
@@ -625,6 +629,8 @@ async def execute[AgentResultT: AgentResult](
             workspace_id=workspace_id,
             data=ModelRunStart(
                 model_definition_id=routed.catalog_model_id,
+                provider_id=routed.provider_id,
+                provider_model_id=routed.provider_model_id,
                 agent_run_id=run.id,
                 project_id=project_id,
                 estimated_cost=estimate.amount if estimate is not None else None,
@@ -633,9 +639,7 @@ async def execute[AgentResultT: AgentResult](
         )
         recovery_budget = select_output_budget(
             expected_output_tokens=expected_output_tokens,
-            known_model_maximum=(
-                model_definition.max_output_tokens if model_definition is not None else None
-            ),
+            known_model_maximum=routed.max_output_tokens,
             safety_ceiling=get_settings().model_output_token_safety_ceiling,
             recovery=True,
         )
@@ -789,6 +793,8 @@ async def execute[AgentResultT: AgentResult](
                 workspace_id=workspace_id,
                 data=ModelRunStart(
                     model_definition_id=routed.catalog_model_id,
+                    provider_id=routed.provider_id,
+                    provider_model_id=routed.provider_model_id,
                     agent_run_id=run.id,
                     project_id=project_id,
                     estimated_cost=estimate.amount if estimate is not None else None,

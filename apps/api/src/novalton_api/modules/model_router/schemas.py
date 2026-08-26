@@ -30,6 +30,11 @@ class RoutingOutcome(StrEnum):
     NO_SUITABLE_MODEL = "NO_SUITABLE_MODEL"
 
 
+class RoutableTargetKind(StrEnum):
+    CATALOG_MODEL = "CATALOG_MODEL"
+    VIRTUAL_ROUTE = "VIRTUAL_ROUTE"
+
+
 class RoutingReason(StrEnum):
     AVAILABLE = "AVAILABLE"
     CAPABILITIES_SATISFIED = "CAPABILITIES_SATISFIED"
@@ -99,12 +104,20 @@ class EstimatedCost(BaseModel):
 class SelectedCatalogModel(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    catalog_model_id: UUID
+    catalog_model_id: UUID | None = None
     provider_id: str
     provider_model_id: str
     display_name: str
-    last_verified_at: datetime | None
+    last_verified_at: datetime | None = None
     estimated_cost: EstimatedCost | None
+    target_kind: RoutableTargetKind = RoutableTargetKind.CATALOG_MODEL
+    route_source: str | None = None
+    capability_declaration_source: str | None = None
+    capability_policy: str | None = None
+    declared_capabilities: frozenset[str] = frozenset()
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    dynamic_resolution: bool = False
 
 
 class RoutingSimulationResult(BaseModel):

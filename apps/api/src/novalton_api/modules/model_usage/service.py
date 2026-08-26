@@ -51,29 +51,46 @@ async def start_run(
     await _require_scope(
         session, tenant_id=tenant_id, workspace_id=workspace_id, project_id=data.project_id
     )
-    model = await get_model(session, model_id=data.model_definition_id)
-    if model is None:
+    model = (
+        await get_model(session, model_id=data.model_definition_id)
+        if data.model_definition_id
+        else None
+    )
+    if data.model_definition_id is not None and model is None:
         raise _not_found()
-    if data.currency is not None and model.currency is not None and data.currency != model.currency:
+    provider_id = model.provider_id if model is not None else data.provider_id
+    provider_model_id = model.provider_model_id if model is not None else data.provider_model_id
+    if provider_id is None or provider_model_id is None:
+        raise _not_found()
+    if (
+        data.currency is not None
+        and model is not None
+        and model.currency is not None
+        and data.currency != model.currency
+    ):
         raise ApplicationError(
             "model_run_currency_mismatch", "Cost currency does not match model pricing"
         )
     now = datetime.now(UTC)
-    currency = data.currency or model.currency
+    currency = data.currency or (model.currency if model is not None else None)
     run = await repository.create_run(
         session,
         tenant_id=tenant_id,
         workspace_id=workspace_id,
         project_id=data.project_id,
         agent_run_id=data.agent_run_id,
-        model_definition_id=model.id,
-        provider_id=model.provider_id,
-        provider_model_id=model.provider_model_id,
+        model_definition_id=model.id if model is not None else None,
+        provider_id=provider_id,
+        provider_model_id=provider_model_id,
         status=ModelRunStatus.RUNNING.value,
         correlation_id=get_correlation_id(),
         estimated_cost=data.estimated_cost,
-        input_price_per_million_snapshot=model.input_price_per_million,
-        output_price_per_million_snapshot=model.output_price_per_million,
+        input_price_per_million_snapshot=(
+            model.input_price_per_million if model is not None else None
+        ),
+        output_price_per_million_snapshot=(
+            model.output_price_per_million if model is not None else None
+        ),
         currency=currency,
         started_at=now,
     )

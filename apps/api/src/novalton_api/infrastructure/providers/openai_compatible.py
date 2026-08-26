@@ -14,6 +14,7 @@ from novalton_api.infrastructure.providers.contracts import (
     GenerationRequest,
     GenerationResult,
     ProviderExecutionCapabilities,
+    ProviderManagedRoute,
 )
 from novalton_api.infrastructure.providers.errors import (
     ProviderCancellationError,
@@ -42,6 +43,7 @@ class OpenAICompatibleConfig(BaseModel):
     max_response_bytes: int = Field(default=1_048_576, ge=1_024, le=10_485_760)
     require_parameters: bool = False
     response_healing: bool = False
+    provider_managed_routes: tuple[ProviderManagedRoute, ...] = ()
 
     def model_post_init(self, __context: Any) -> None:
         object.__setattr__(self, "base_url", validate_provider_base_url(self.base_url))
@@ -86,6 +88,10 @@ class OpenAICompatibleProvider:
             require_parameters=self._config.require_parameters,
             response_healing=self._config.response_healing,
         )
+
+    @property
+    def provider_managed_routes(self) -> tuple[ProviderManagedRoute, ...]:
+        return self._config.provider_managed_routes
 
     async def __aenter__(self) -> "OpenAICompatibleProvider":
         return self
