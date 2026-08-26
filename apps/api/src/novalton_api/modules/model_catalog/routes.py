@@ -11,6 +11,7 @@ from novalton_api.core.database import get_async_session
 from novalton_api.infrastructure.providers.catalog import CatalogSourceRegistry
 from novalton_api.modules.model_catalog import service
 from novalton_api.modules.model_catalog.schemas import (
+    GovernedQualificationDiagnosticListResponse,
     ModelDefinitionListResponse,
     ModelDefinitionResponse,
     ModelFilters,
@@ -50,6 +51,25 @@ async def list_models(
         filters=ModelFilters(provider_id=provider_id, status=status),
     )
     return ModelDefinitionListResponse(items=models, limit=limit, offset=offset)
+
+
+@router.get(
+    "/governed-qualifications",
+    response_model=GovernedQualificationDiagnosticListResponse,
+)
+async def list_governed_qualifications(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    session: Session,
+) -> GovernedQualificationDiagnosticListResponse:
+    return GovernedQualificationDiagnosticListResponse(
+        items=await service.list_governed_qualification_diagnostics(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            settings=get_settings(),
+        )
+    )
 
 
 @router.get("/{model_id}", response_model=ModelDefinitionResponse)

@@ -1,5 +1,6 @@
 """Validated, environment-backed application configuration."""
 
+import json
 import logging
 import re
 from functools import lru_cache
@@ -18,6 +19,11 @@ from pydantic import (
     model_validator,
 )
 
+from novalton_api.infrastructure.providers.contracts import (
+    ContractEnforcementGrade,
+    GovernedProviderQualification,
+    QualificationSource,
+)
 from novalton_api.infrastructure.providers.urls import validate_provider_base_url
 
 
@@ -43,6 +49,7 @@ class Settings(BaseModel):
     openai_compatible_require_parameters: bool = False
     openai_compatible_response_healing: bool = False
     openrouter_catalog_enabled: bool = False
+    governed_provider_qualifications: tuple[GovernedProviderQualification, ...] = ()
     model_catalog_free_allowlist: tuple[str, ...] = ()
     model_router_force_model: str | None = None
     provider_connect_timeout_seconds: float = Field(default=5.0, ge=0.1, le=60.0)
@@ -70,6 +77,7 @@ class Settings(BaseModel):
         "openai_compatible_require_parameters": "NOVALTON_OPENAI_COMPATIBLE_REQUIRE_PARAMETERS",
         "openai_compatible_response_healing": "NOVALTON_OPENAI_COMPATIBLE_RESPONSE_HEALING",
         "openrouter_catalog_enabled": "NOVALTON_OPENROUTER_CATALOG_ENABLED",
+        "governed_provider_qualifications": "NOVALTON_GOVERNED_PROVIDER_QUALIFICATIONS",
         "model_catalog_free_allowlist": "NOVALTON_MODEL_CATALOG_FREE_ALLOWLIST",
         "model_router_force_model": "NOVALTON_MODEL_ROUTER_FORCE_MODEL",
         "provider_connect_timeout_seconds": "NOVALTON_PROVIDER_CONNECT_TIMEOUT_SECONDS",
@@ -147,6 +155,39 @@ class Settings(BaseModel):
             raise ValueError("invalid forced model router entry")
         return value
 
+    @field_validator("governed_provider_qualifications", mode="before")
+    @classmethod
+    def validate_governed_provider_qualifications(cls, value: object) -> object:
+        entries = value
+        if isinstance(value, str):
+            try:
+                entries = json.loads(value)
+            except json.JSONDecodeError:
+                raise ValueError("invalid governed provider qualification configuration") from None
+        if not isinstance(entries, (list, tuple)) or len(entries) > 32:
+            raise ValueError("governed provider qualifications must contain at most 32 entries")
+        qualifications: list[GovernedProviderQualification] = []
+        for entry in entries:
+            if isinstance(entry, GovernedProviderQualification):
+                qualifications.append(entry)
+                continue
+            if not isinstance(entry, dict):
+                raise ValueError("invalid governed provider qualification configuration")
+            normalized = dict(entry)
+            if isinstance(normalized.get("contract_enforcement_grade"), str):
+                normalized["contract_enforcement_grade"] = ContractEnforcementGrade(
+                    normalized["contract_enforcement_grade"]
+                )
+            if isinstance(normalized.get("qualification_source"), str):
+                normalized["qualification_source"] = QualificationSource(
+                    normalized["qualification_source"]
+                )
+            qualifications.append(GovernedProviderQualification.model_validate(normalized))
+        identities = [(item.provider_id, item.provider_model_id) for item in qualifications]
+        if len(identities) != len(set(identities)):
+            raise ValueError("duplicate or conflicting governed provider qualification")
+        return tuple(qualifications)
+
     @property
     def model_catalog_free_allowlist_pairs(self) -> frozenset[tuple[str, str]]:
         """Return explicit exact provider/model pairs; price never affects membership."""
@@ -159,6 +200,16 @@ class Settings(BaseModel):
             return None
         provider_id, provider_model_id = self.model_router_force_model.split("::", 1)
         return provider_id, provider_model_id
+
+    @property
+    def governed_provider_qualifications_by_identity(
+        self,
+    ) -> dict[tuple[str, str], GovernedProviderQualification]:
+        """Return the explicit qualification overlay keyed by canonical model identity."""
+        return {
+            (qualification.provider_id, qualification.provider_model_id): qualification
+            for qualification in self.governed_provider_qualifications
+        }
 
     @model_validator(mode="after")
     def validate_catalog_source_configuration(self) -> Self:

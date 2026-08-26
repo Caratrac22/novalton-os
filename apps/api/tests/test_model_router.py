@@ -12,7 +12,9 @@ from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
 from novalton_api.infrastructure.providers.contracts import (
     ContractEnforcementGrade,
+    GovernedProviderQualification,
     ProviderManagedRoute,
+    QualificationSource,
 )
 from novalton_api.infrastructure.providers.openai_compatible import OpenAICompatibleProvider
 from novalton_api.infrastructure.providers.openrouter_routes import registered_openrouter_routes
@@ -676,6 +678,115 @@ def test_forced_insufficient_contract_grade_fails_closed_without_fallback(
     assert body["outcome"] == "NO_SUITABLE_MODEL"
     assert body["reason_codes"] == ["CONTRACT_ENFORCEMENT_UNSATISFIED"]
     assert body["eligible_candidate_count"] == 0
+
+
+def test_explicit_qualification_upgrades_only_its_catalog_target_for_governed_workload(
+    api: RouterApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    qualification = GovernedProviderQualification(
+        provider_id="openrouter",
+        provider_model_id="vendor/qualified",
+        upstream_provider="openai",
+        contract_enforcement_grade=ContractEnforcementGrade.PROVIDER_ENFORCED,
+        qualification_source=QualificationSource.PROVIDER_DOCUMENTATION,
+    )
+    monkeypatch.setattr(
+        "novalton_api.modules.model_router.service.get_settings",
+        lambda: Settings(governed_provider_qualifications=(qualification,)),
+    )
+    asyncio.run(
+        _add_models(
+            _model(
+                "vendor/qualified",
+                contract_enforcement_grade=ContractEnforcementGrade.BEST_EFFORT.value,
+            ),
+            _model(
+                "vendor/unqualified",
+                contract_enforcement_grade=ContractEnforcementGrade.BEST_EFFORT.value,
+            ),
+        )
+    )
+
+    body = api.client.post(
+        api.url,
+        json=_request(
+            required_capabilities=[],
+            structured_output_required=True,
+            minimum_contract_enforcement_grade="PROVIDER_ENFORCED",
+        ),
+    ).json()
+
+    assert body["outcome"] == "SELECTED"
+    assert body["eligible_candidate_count"] == 1
+    assert body["selected"] == {
+        **body["selected"],
+        "provider_model_id": "vendor/qualified",
+        "contract_enforcement_grade": "PROVIDER_ENFORCED",
+        "enforcement_metadata_source": "PROVIDER_DOCUMENTATION",
+        "qualification_present": True,
+        "qualification_source": "PROVIDER_DOCUMENTATION",
+        "upstream_provider_constraint": "openai",
+        "provider_allow_fallbacks": False,
+        "provider_require_parameters": True,
+    }
+
+
+def test_unqualified_same_model_identity_remains_ineligible_for_governed_workload(
+    api: RouterApi,
+) -> None:
+    asyncio.run(
+        _add_models(
+            _model(
+                "vendor/unqualified",
+                contract_enforcement_grade=ContractEnforcementGrade.BEST_EFFORT.value,
+            )
+        )
+    )
+
+    body = api.client.post(
+        api.url,
+        json=_request(
+            required_capabilities=[],
+            structured_output_required=True,
+            minimum_contract_enforcement_grade="PROVIDER_ENFORCED",
+        ),
+    ).json()
+
+    assert body["outcome"] == "NO_SUITABLE_MODEL"
+    assert body["reason_codes"] == ["CONTRACT_ENFORCEMENT_UNSATISFIED"]
+
+
+def test_provider_managed_free_route_never_inherits_catalog_qualification(
+    api: RouterApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    route = registered_openrouter_routes("openrouter")[0]
+    qualification = GovernedProviderQualification(
+        provider_id="openrouter",
+        provider_model_id="openrouter/free",
+        upstream_provider="openai",
+        contract_enforcement_grade=ContractEnforcementGrade.PROVIDER_ENFORCED,
+        qualification_source=QualificationSource.OPERATOR_CONFIGURATION,
+    )
+    monkeypatch.setattr(
+        "novalton_api.modules.model_router.service.get_settings",
+        lambda: Settings(governed_provider_qualifications=(qualification,)),
+    )
+
+    result = asyncio.run(
+        _simulate_with_routes(
+            api,
+            data=_request(
+                required_capabilities=[],
+                structured_output_required=True,
+                minimum_contract_enforcement_grade="PROVIDER_ENFORCED",
+            ),
+            virtual_routes=(route,),
+        )
+    )
+
+    assert result.outcome == router_service.RoutingOutcome.NO_SUITABLE_MODEL
+    assert result.reason_codes == [router_service.RoutingReason.CONTRACT_ENFORCEMENT_UNSATISFIED]
+    assert route.contract_enforcement_grade == ContractEnforcementGrade.BEST_EFFORT
 
 
 def test_openrouter_dynamic_route_keeps_conservative_declared_grade() -> None:

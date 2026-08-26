@@ -14,6 +14,7 @@ from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.contracts import (
     ContractEnforcementGrade,
     GenerationResult,
+    QualificationSource,
 )
 from novalton_api.infrastructure.providers.errors import ProviderFailure
 from novalton_api.main import create_app
@@ -189,6 +190,11 @@ def test_bounded_contract_diagnostics_are_persisted_and_exposed(scope: Scope) ->
             contract_enforcement_grade=ContractEnforcementGrade.PROVIDER_ENFORCED,
             minimum_contract_enforcement_grade=ContractEnforcementGrade.PROVIDER_ENFORCED,
             enforcement_metadata_source="test_provider_policy",
+            qualification_present=True,
+            qualification_source=QualificationSource.OPERATOR_CONFIGURATION,
+            upstream_provider_constraint="openai",
+            provider_allow_fallbacks=False,
+            provider_require_parameters=True,
             recovery_attempt_kind="CONTRACT_REPAIR",
             recovery_attempt_index=1,
         )
@@ -216,7 +222,12 @@ def test_bounded_contract_diagnostics_are_persisted_and_exposed(scope: Scope) ->
                     tenant_id=scope.tenant_id,
                     workspace_id=scope.workspace_id,
                     model_run_id=run.id,
-                    result=_result(model_id=run.provider_model_id, finish_reason="stop"),
+                    result=_result(
+                        model_id=run.provider_model_id,
+                        finish_reason="stop",
+                        provider_resolved_model_id="provider/resolved-model",
+                        upstream_provider_id="OpenAI",
+                    ),
                     truncation_classification="NONE",
                 )
         finally:
@@ -235,6 +246,11 @@ def test_bounded_contract_diagnostics_are_persisted_and_exposed(scope: Scope) ->
         "contract_enforcement_grade",
         "minimum_contract_enforcement_grade",
         "enforcement_metadata_source",
+        "qualification_present",
+        "qualification_source",
+        "upstream_provider_constraint",
+        "provider_allow_fallbacks",
+        "provider_require_parameters",
         "contract_strategy_tier",
         "contract_fingerprint",
         "contextual_constraint_count",
@@ -244,12 +260,19 @@ def test_bounded_contract_diagnostics_are_persisted_and_exposed(scope: Scope) ->
         "truncation_classification",
         "recovery_attempt_kind",
         "recovery_attempt_index",
+        "provider_resolved_model_id",
+        "upstream_provider_id",
     )
     assert {key: body[key] for key in fields} == {
         "target_structured_output_capability": True,
         "contract_enforcement_grade": "PROVIDER_ENFORCED",
         "minimum_contract_enforcement_grade": "PROVIDER_ENFORCED",
         "enforcement_metadata_source": "test_provider_policy",
+        "qualification_present": True,
+        "qualification_source": "OPERATOR_CONFIGURATION",
+        "upstream_provider_constraint": "openai",
+        "provider_allow_fallbacks": False,
+        "provider_require_parameters": True,
         "contract_strategy_tier": "STRICT_SCHEMA",
         "contract_fingerprint": "a" * 64,
         "contextual_constraint_count": 2,
@@ -259,6 +282,8 @@ def test_bounded_contract_diagnostics_are_persisted_and_exposed(scope: Scope) ->
         "truncation_classification": "NONE",
         "recovery_attempt_kind": "CONTRACT_REPAIR",
         "recovery_attempt_index": 1,
+        "provider_resolved_model_id": "provider/resolved-model",
+        "upstream_provider_id": "OpenAI",
     }
     assert "content" not in body
     assert "schema" not in body

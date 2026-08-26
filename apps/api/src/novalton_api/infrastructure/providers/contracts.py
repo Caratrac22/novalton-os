@@ -20,6 +20,9 @@ MODEL_ID_PATTERN = re.compile(
 )
 PROVIDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
 SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+UPSTREAM_PROVIDER_PATTERN = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_-]{0,63}(?:/[A-Za-z0-9][A-Za-z0-9_-]{0,63})?$"
+)
 
 ModelIdentifier = Annotated[
     str,
@@ -50,6 +53,60 @@ class ContractEnforcementGrade(StrEnum):
 
     def satisfies(self, minimum: "ContractEnforcementGrade") -> bool:
         return self.rank >= minimum.rank
+
+
+class QualificationSource(StrEnum):
+    """Trusted provenance for an explicit governed target qualification."""
+
+    PROVIDER_DOCUMENTATION = "PROVIDER_DOCUMENTATION"
+    OPERATOR_CONFIGURATION = "OPERATOR_CONFIGURATION"
+    CURATED_REGISTRY = "CURATED_REGISTRY"
+
+
+class GovernedProviderQualification(BaseModel):
+    """A bounded provider-neutral policy overlay for one catalog model identity.
+
+    It deliberately does not mutate catalog capability metadata. The router applies it only to
+    catalog targets, never to provider-managed dynamic routes.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    provider_id: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True,
+            min_length=1,
+            max_length=64,
+            pattern=r"^[a-z][a-z0-9_-]{0,63}$",
+        ),
+    ]
+    provider_model_id: ModelIdentifier
+    upstream_provider: (
+        Annotated[
+            str,
+            StringConstraints(strip_whitespace=True, min_length=1, max_length=128),
+        ]
+        | None
+    ) = None
+    contract_enforcement_grade: ContractEnforcementGrade
+    qualification_source: QualificationSource
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_qualification(self) -> Self:
+        if MODEL_ID_PATTERN.fullmatch(self.provider_model_id) is None:
+            raise ValueError("provider_model_id contains unsupported characters")
+        if (
+            self.upstream_provider is not None
+            and UPSTREAM_PROVIDER_PATTERN.fullmatch(self.upstream_provider) is None
+        ):
+            raise ValueError("upstream_provider contains unsupported characters")
+        if not self.contract_enforcement_grade.satisfies(
+            ContractEnforcementGrade.PROVIDER_ENFORCED
+        ):
+            raise ValueError("governed qualification requires provider-enforced grade")
+        return self
 
 
 class CatalogModel(BaseModel):
@@ -183,6 +240,25 @@ class ProviderRequestOptions(BaseModel):
 
     require_parameters: bool = False
     response_healing: bool = False
+    upstream_provider: (
+        Annotated[
+            str,
+            StringConstraints(strip_whitespace=True, min_length=1, max_length=128),
+        ]
+        | None
+    ) = None
+    allow_fallbacks: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_upstream_constraint(self) -> Self:
+        if self.upstream_provider is not None:
+            if UPSTREAM_PROVIDER_PATTERN.fullmatch(self.upstream_provider) is None:
+                raise ValueError("upstream_provider contains unsupported characters")
+            if self.allow_fallbacks is not False or not self.require_parameters:
+                raise ValueError(
+                    "upstream provider constraints require no fallback and required parameters"
+                )
+        return self
 
 
 @dataclass(frozen=True)
@@ -224,6 +300,7 @@ class GenerationResult(BaseModel):
     provider_id: ModelIdentifier
     model_id: ModelIdentifier
     provider_resolved_model_id: ModelIdentifier | None = None
+    upstream_provider_id: str | None = Field(default=None, min_length=1, max_length=128)
     content: str = Field(min_length=1, max_length=MAX_RESULT_CHARACTERS)
     finish_reason: str | None = Field(default=None, min_length=1, max_length=128)
     input_tokens: int | None = Field(default=None, ge=0)
@@ -243,4 +320,9 @@ class GenerationResult(BaseModel):
             and MODEL_ID_PATTERN.fullmatch(self.provider_resolved_model_id) is None
         ):
             raise ValueError("provider_resolved_model_id contains unsupported characters")
+        if (
+            self.upstream_provider_id is not None
+            and UPSTREAM_PROVIDER_PATTERN.fullmatch(self.upstream_provider_id) is None
+        ):
+            raise ValueError("upstream_provider_id contains unsupported characters")
         return self

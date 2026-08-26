@@ -90,6 +90,13 @@ async def start_run(
         contract_enforcement_grade=data.contract_enforcement_grade.value,
         minimum_contract_enforcement_grade=data.minimum_contract_enforcement_grade.value,
         enforcement_metadata_source=data.enforcement_metadata_source,
+        qualification_present=data.qualification_present,
+        qualification_source=(
+            data.qualification_source.value if data.qualification_source is not None else None
+        ),
+        upstream_provider_constraint=data.upstream_provider_constraint,
+        provider_allow_fallbacks=data.provider_allow_fallbacks,
+        provider_require_parameters=data.provider_require_parameters,
         contract_strategy_tier=data.contract_strategy_tier,
         contract_fingerprint=data.contract_fingerprint,
         contextual_constraint_count=data.contextual_constraint_count,
@@ -229,6 +236,7 @@ async def mark_succeeded(
             "finish_reason": result.finish_reason,
             "truncation_classification": truncation_classification,
             "provider_resolved_model_id": result.provider_resolved_model_id,
+            "upstream_provider_id": result.upstream_provider_id,
             "input_tokens": result.input_tokens,
             "output_tokens": result.output_tokens,
             "total_tokens": total,

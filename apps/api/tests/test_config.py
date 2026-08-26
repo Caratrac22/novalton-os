@@ -14,6 +14,7 @@ SETTING_VARIABLES = (
     "NOVALTON_OPENAI_COMPATIBLE_REQUIRE_PARAMETERS",
     "NOVALTON_OPENAI_COMPATIBLE_RESPONSE_HEALING",
     "NOVALTON_OPENROUTER_CATALOG_ENABLED",
+    "NOVALTON_GOVERNED_PROVIDER_QUALIFICATIONS",
     "NOVALTON_MODEL_CATALOG_FREE_ALLOWLIST",
     "NOVALTON_MODEL_ROUTER_FORCE_MODEL",
     "NOVALTON_BOOTSTRAP_TENANT_ID",
@@ -77,6 +78,47 @@ def test_model_router_force_model_parses_exact_provider_model_pair(
 
     assert settings.model_router_force_model == "openrouter::vendor/model-a"
     assert settings.model_router_force_model_pair == ("openrouter", "vendor/model-a")
+
+
+def test_governed_provider_qualifications_parse_bounded_json_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_settings_environment(monkeypatch)
+    monkeypatch.setenv(
+        "NOVALTON_GOVERNED_PROVIDER_QUALIFICATIONS",
+        '[{"provider_id":"openrouter","provider_model_id":"vendor/model-a",'
+        '"upstream_provider":"openai","contract_enforcement_grade":"PROVIDER_ENFORCED",'
+        '"qualification_source":"PROVIDER_DOCUMENTATION","enabled":true}]',
+    )
+
+    settings = Settings.from_environment()
+
+    qualification = settings.governed_provider_qualifications[0]
+    assert qualification.provider_model_id == "vendor/model-a"
+    assert qualification.upstream_provider == "openai"
+    assert qualification.contract_enforcement_grade == "PROVIDER_ENFORCED"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not-json",
+        '[{"provider_id":"OpenRouter","provider_model_id":"vendor/model",'
+        '"contract_enforcement_grade":"PROVIDER_ENFORCED",'
+        '"qualification_source":"OPERATOR_CONFIGURATION"}]',
+        '[{"provider_id":"openrouter","provider_model_id":"vendor/model",'
+        '"contract_enforcement_grade":"BEST_EFFORT",'
+        '"qualification_source":"OPERATOR_CONFIGURATION"}]',
+    ],
+)
+def test_invalid_governed_provider_qualification_configuration_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    clear_settings_environment(monkeypatch)
+    monkeypatch.setenv("NOVALTON_GOVERNED_PROVIDER_QUALIFICATIONS", value)
+
+    with pytest.raises(SettingsError, match="Invalid application configuration"):
+        Settings.from_environment()
 
 
 def test_settings_load_supported_environment_values(monkeypatch: pytest.MonkeyPatch) -> None:

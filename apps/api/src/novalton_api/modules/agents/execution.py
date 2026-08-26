@@ -189,6 +189,7 @@ def _generation_request(
     max_output_tokens: int,
     contract_instructions: str | None = None,
     repair_diagnostics: dict[str, object] | None = None,
+    provider_options: ProviderRequestOptions | None = None,
 ) -> GenerationRequest:
     result_schema = json.dumps(
         profile.json_schema,
@@ -234,8 +235,7 @@ def _generation_request(
         )
     elif strategy.json_object_output:
         json_object = JsonObjectRequest()
-    provider_options = None
-    if strategy.require_parameters or strategy.response_healing:
+    if provider_options is None and (strategy.require_parameters or strategy.response_healing):
         provider_options = ProviderRequestOptions(
             require_parameters=strategy.require_parameters,
             response_healing=strategy.response_healing,
@@ -250,6 +250,45 @@ def _generation_request(
         structured_output=structured_output,
         json_object=json_object,
         provider_options=provider_options,
+    )
+
+
+def _qualified_provider_options(
+    strategy: ContractGenerationStrategy, routed: object
+) -> ProviderRequestOptions | None:
+    """Preserve strategy behavior while enforcing an explicit qualified upstream constraint."""
+    require_parameters = strategy.require_parameters or bool(
+        getattr(routed, "provider_require_parameters", False)
+    )
+    upstream_provider = getattr(routed, "upstream_provider_constraint", None)
+    allow_fallbacks = getattr(routed, "provider_allow_fallbacks", None)
+    if not (
+        require_parameters
+        or strategy.response_healing
+        or upstream_provider
+        or allow_fallbacks is not None
+    ):
+        return None
+    return ProviderRequestOptions(
+        require_parameters=require_parameters,
+        response_healing=strategy.response_healing,
+        upstream_provider=upstream_provider,
+        allow_fallbacks=allow_fallbacks,
+    )
+
+
+def _upstream_constraint_matches(routed: object, upstream_provider_id: str | None) -> bool:
+    """Reject a safely reported upstream that differs from a qualified pin.
+
+    OpenRouter metadata is optional, so absent metadata cannot prove a spillover. The provider
+    request itself carries ``only`` plus disabled fallbacks; a present conflicting value is an
+    adapter/provider contract violation and must fail closed.
+    """
+    constraint = getattr(routed, "upstream_provider_constraint", None)
+    return (
+        constraint is None
+        or upstream_provider_id is None
+        or upstream_provider_id.casefold() == constraint.casefold()
     )
 
 
@@ -364,6 +403,11 @@ async def execute[AgentResultT: AgentResult](
         contract_enforcement_grade=routed.contract_enforcement_grade,
         minimum_contract_enforcement_grade=routed.minimum_contract_enforcement_grade,
         enforcement_metadata_source=routed.enforcement_metadata_source,
+        qualification_present=routed.qualification_present,
+        qualification_source=routed.qualification_source,
+        upstream_provider_constraint=routed.upstream_provider_constraint,
+        provider_allow_fallbacks=routed.provider_allow_fallbacks,
+        provider_require_parameters=routed.provider_require_parameters,
     )
     estimate = routed.estimated_cost
     model_run = await usage_service.start_run(
@@ -382,6 +426,11 @@ async def execute[AgentResultT: AgentResult](
             contract_enforcement_grade=routed.contract_enforcement_grade,
             minimum_contract_enforcement_grade=routed.minimum_contract_enforcement_grade,
             enforcement_metadata_source=routed.enforcement_metadata_source,
+            qualification_present=routed.qualification_present,
+            qualification_source=routed.qualification_source,
+            upstream_provider_constraint=routed.upstream_provider_constraint,
+            provider_allow_fallbacks=routed.provider_allow_fallbacks,
+            provider_require_parameters=routed.provider_require_parameters,
         ),
     )
     linked = await repository.link_model_run(
@@ -464,6 +513,7 @@ async def execute[AgentResultT: AgentResult](
                 model_run_id=model_run.id,
                 error_code="native_structured_output_required",
             )
+        provider_options = _qualified_provider_options(strategy, routed)
         await usage_service.set_execution_diagnostics(
             session,
             tenant_id=tenant_id,
@@ -501,6 +551,15 @@ async def execute[AgentResultT: AgentResult](
                     routed.minimum_contract_enforcement_grade.value
                 ),
                 "enforcement_metadata_source": routed.enforcement_metadata_source,
+                "qualification_present": routed.qualification_present,
+                "qualification_source": (
+                    routed.qualification_source.value
+                    if routed.qualification_source is not None
+                    else None
+                ),
+                "upstream_provider_constraint": routed.upstream_provider_constraint,
+                "provider_allow_fallbacks": routed.provider_allow_fallbacks,
+                "provider_require_parameters": routed.provider_require_parameters,
                 "selected_output_budget": budget.tokens,
                 "known_model_maximum": budget.known_model_maximum,
                 "budget_policy_source": budget.source,
@@ -515,6 +574,7 @@ async def execute[AgentResultT: AgentResult](
                 strategy=strategy,
                 max_output_tokens=budget.tokens,
                 contract_instructions=contract_instructions,
+                provider_options=provider_options,
             )
         )
     except (ProviderCancellationError, asyncio.CancelledError):
@@ -612,6 +672,28 @@ async def execute[AgentResultT: AgentResult](
             model_run_id=model_run.id,
             error_code="provider_identity_mismatch",
         )
+    if not _upstream_constraint_matches(routed, generation.upstream_provider_id):
+        await usage_service.mark_failed(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            model_run_id=model_run.id,
+            failure=ProviderFailure.INVALID_REQUEST,
+        )
+        run = await _fail_agent(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            run_id=run.id,
+            code="provider_upstream_identity_mismatch",
+        )
+        return _response(
+            run,
+            definition=definition,
+            selected=selected,
+            model_run_id=model_run.id,
+            error_code="provider_upstream_identity_mismatch",
+        )
 
     try:
         await usage_service.mark_succeeded(
@@ -660,6 +742,7 @@ async def execute[AgentResultT: AgentResult](
             "minimum_contract_enforcement_grade": (routed.minimum_contract_enforcement_grade.value),
             "enforcement_metadata_source": routed.enforcement_metadata_source,
             "provider_resolved_model_id": generation.provider_resolved_model_id,
+            "upstream_provider_id": generation.upstream_provider_id,
             "finish_reason": generation.finish_reason,
             "truncation_classification": truncation_classification,
             "recovery_attempt": False,
@@ -689,6 +772,11 @@ async def execute[AgentResultT: AgentResult](
                 contract_enforcement_grade=routed.contract_enforcement_grade,
                 minimum_contract_enforcement_grade=routed.minimum_contract_enforcement_grade,
                 enforcement_metadata_source=routed.enforcement_metadata_source,
+                qualification_present=routed.qualification_present,
+                qualification_source=routed.qualification_source,
+                upstream_provider_constraint=routed.upstream_provider_constraint,
+                provider_allow_fallbacks=routed.provider_allow_fallbacks,
+                provider_require_parameters=routed.provider_require_parameters,
                 contract_strategy_tier=strategy.tier.value,
                 contract_fingerprint=profile.fingerprint,
                 contextual_constraint_count=len(profile.result_shape_constraints),
@@ -724,12 +812,13 @@ async def execute[AgentResultT: AgentResult](
                     strategy=strategy,
                     max_output_tokens=recovery_budget.tokens,
                     contract_instructions=contract_instructions,
+                    provider_options=provider_options,
                 )
             )
             if (recovery_generation.provider_id, recovery_generation.model_id) != (
                 routed.provider_id,
                 routed.provider_model_id,
-            ):
+            ) or not _upstream_constraint_matches(routed, recovery_generation.upstream_provider_id):
                 raise ProviderError(ProviderFailure.INVALID_REQUEST, provider_id=routed.provider_id)
             await usage_service.mark_succeeded(
                 session,
@@ -859,6 +948,11 @@ async def execute[AgentResultT: AgentResult](
                     contract_enforcement_grade=routed.contract_enforcement_grade,
                     minimum_contract_enforcement_grade=routed.minimum_contract_enforcement_grade,
                     enforcement_metadata_source=routed.enforcement_metadata_source,
+                    qualification_present=routed.qualification_present,
+                    qualification_source=routed.qualification_source,
+                    upstream_provider_constraint=routed.upstream_provider_constraint,
+                    provider_allow_fallbacks=routed.provider_allow_fallbacks,
+                    provider_require_parameters=routed.provider_require_parameters,
                     contract_strategy_tier=strategy.tier.value,
                     contract_fingerprint=profile.fingerprint,
                     contextual_constraint_count=len(profile.result_shape_constraints),
@@ -894,12 +988,13 @@ async def execute[AgentResultT: AgentResult](
                         max_output_tokens=budget.tokens,
                         contract_instructions=contract_instructions,
                         repair_diagnostics=diagnostics,
+                        provider_options=provider_options,
                     )
                 )
                 if (generation.provider_id, generation.model_id) != (
                     routed.provider_id,
                     routed.provider_model_id,
-                ):
+                ) or not _upstream_constraint_matches(routed, generation.upstream_provider_id):
                     raise ProviderError(
                         ProviderFailure.INVALID_REQUEST, provider_id=routed.provider_id
                     )

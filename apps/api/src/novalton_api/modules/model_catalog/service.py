@@ -9,13 +9,19 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from novalton_api.core.config import Settings
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.catalog import CatalogSourceRegistry
 from novalton_api.infrastructure.providers.contracts import CatalogModel, ContractEnforcementGrade
 from novalton_api.infrastructure.providers.errors import ProviderError
 from novalton_api.modules.model_catalog import repository
 from novalton_api.modules.model_catalog.models import ModelDefinition
-from novalton_api.modules.model_catalog.schemas import ModelFilters, RefreshResponse
+from novalton_api.modules.model_catalog.schemas import (
+    GovernedQualificationDiagnostic,
+    ModelFilters,
+    ModelStatus,
+    RefreshResponse,
+)
 from novalton_api.modules.workspaces.queries import get_workspace_by_tenant_and_id
 
 logger = logging.getLogger(__name__)
@@ -66,6 +72,46 @@ async def get_model(
     if model is None:
         raise _not_found()
     return model
+
+
+async def list_governed_qualification_diagnostics(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    settings: Settings,
+) -> list[GovernedQualificationDiagnostic]:
+    """Expose configured qualifications without source payloads, schemas, or credentials."""
+    await _require_workspace(session, tenant_id=tenant_id, workspace_id=workspace_id)
+    catalog_by_identity = {
+        (model.provider_id, model.provider_model_id): model
+        for model in await repository.list_routing_candidates(session)
+    }
+    return [
+        GovernedQualificationDiagnostic(
+            provider_id=qualification.provider_id,
+            provider_model_id=qualification.provider_model_id,
+            qualification_present=True,
+            enabled=qualification.enabled,
+            qualification_source=qualification.qualification_source,
+            contract_enforcement_grade=qualification.contract_enforcement_grade,
+            upstream_provider_constraint=qualification.upstream_provider,
+            provider_allow_fallbacks=False,
+            provider_require_parameters=True,
+            catalog_target_present=(
+                model := catalog_by_identity.get(
+                    (qualification.provider_id, qualification.provider_model_id)
+                )
+            )
+            is not None,
+            catalog_status=ModelStatus(model.status) if model is not None else None,
+            structured_output_capability=model.structured_output if model is not None else None,
+            context_window=model.context_window if model is not None else None,
+            max_output_tokens=model.max_output_tokens if model is not None else None,
+            free_allowlisted=model.free_allowlisted if model is not None else None,
+        )
+        for qualification in settings.governed_provider_qualifications
+    ]
 
 
 async def refresh_provider(

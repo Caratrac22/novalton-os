@@ -8,7 +8,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from novalton_api.infrastructure.providers.contracts import ContractEnforcementGrade
+from novalton_api.infrastructure.providers.contracts import (
+    ContractEnforcementGrade,
+    QualificationSource,
+)
 
 
 class ModelRunStatus(StrEnum):
@@ -37,6 +40,11 @@ class ModelRunStart(BaseModel):
         ContractEnforcementGrade.UNSUPPORTED
     )
     enforcement_metadata_source: str | None = Field(default=None, min_length=1, max_length=64)
+    qualification_present: bool = False
+    qualification_source: QualificationSource | None = None
+    upstream_provider_constraint: str | None = Field(default=None, min_length=1, max_length=128)
+    provider_allow_fallbacks: bool | None = None
+    provider_require_parameters: bool = False
     contract_strategy_tier: str | None = Field(
         default=None, pattern=r"^(STRICT_SCHEMA|JSON_OBJECT|JSON_INSTRUCTION)$"
     )
@@ -89,6 +97,11 @@ class ModelRunResponse(BaseModel):
     contract_enforcement_grade: ContractEnforcementGrade
     minimum_contract_enforcement_grade: ContractEnforcementGrade
     enforcement_metadata_source: str | None
+    qualification_present: bool
+    qualification_source: QualificationSource | None
+    upstream_provider_constraint: str | None
+    provider_allow_fallbacks: bool | None
+    provider_require_parameters: bool
     contract_strategy_tier: str | None
     contract_fingerprint: str | None
     contextual_constraint_count: int | None
@@ -99,6 +112,7 @@ class ModelRunResponse(BaseModel):
     recovery_attempt_kind: str
     recovery_attempt_index: int
     provider_resolved_model_id: str | None
+    upstream_provider_id: str | None
     status: ModelRunStatus
     correlation_id: str | None
     provider_request_id: str | None

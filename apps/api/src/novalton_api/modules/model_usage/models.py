@@ -66,6 +66,19 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_model_runs_enforcement_metadata_source_length",
         ),
         CheckConstraint(
+            "qualification_source IS NULL OR char_length(qualification_source) BETWEEN 1 AND 64",
+            name="ck_model_runs_qualification_source_length",
+        ),
+        CheckConstraint(
+            "upstream_provider_constraint IS NULL OR "
+            "char_length(upstream_provider_constraint) BETWEEN 1 AND 128",
+            name="ck_model_runs_upstream_provider_constraint_length",
+        ),
+        CheckConstraint(
+            "upstream_provider_id IS NULL OR char_length(upstream_provider_id) BETWEEN 1 AND 128",
+            name="ck_model_runs_upstream_provider_id_length",
+        ),
+        CheckConstraint(
             "contract_fingerprint IS NULL OR contract_fingerprint ~ '^[a-f0-9]{8,64}$'",
             name="ck_model_runs_contract_fingerprint_format",
         ),
@@ -212,6 +225,15 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         String(32), nullable=False, default="UNSUPPORTED", server_default="UNSUPPORTED"
     )
     enforcement_metadata_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    qualification_present: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    qualification_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    upstream_provider_constraint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    provider_allow_fallbacks: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    provider_require_parameters: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     contract_strategy_tier: Mapped[str | None] = mapped_column(String(32), nullable=True)
     contract_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     contextual_constraint_count: Mapped[int | None] = mapped_column(nullable=True)
@@ -228,6 +250,7 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False, default=0, server_default="0"
     )
     provider_resolved_model_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    upstream_provider_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     provider_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

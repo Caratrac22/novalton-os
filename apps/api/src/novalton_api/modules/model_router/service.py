@@ -13,6 +13,7 @@ from novalton_api.core.context import get_correlation_id
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.contracts import (
     ContractEnforcementGrade,
+    GovernedProviderQualification,
     ProviderManagedRoute,
 )
 from novalton_api.modules.model_catalog import repository
@@ -39,6 +40,7 @@ _RoutableTarget = ModelDefinition | ProviderManagedRoute
 class _Candidate:
     model: _RoutableTarget
     estimated_cost: Decimal | None
+    qualification: GovernedProviderQualification | None = None
 
 
 @dataclass(frozen=True)
@@ -121,7 +123,11 @@ def _capabilities_satisfied(model: _RoutableTarget, required: frozenset[ModelCap
     return all(getattr(model, capability.value) is True for capability in required)
 
 
-def _enforcement_grade(model: _RoutableTarget) -> ContractEnforcementGrade:
+def _enforcement_grade(
+    model: _RoutableTarget, qualification: GovernedProviderQualification | None = None
+) -> ContractEnforcementGrade:
+    if qualification is not None and isinstance(model, ModelDefinition):
+        return qualification.contract_enforcement_grade
     if isinstance(model, ProviderManagedRoute):
         return model.contract_enforcement_grade
     return ContractEnforcementGrade(model.contract_enforcement_grade)
@@ -133,6 +139,17 @@ def _structured_output_capability(model: _RoutableTarget) -> bool:
         if isinstance(model, ProviderManagedRoute)
         else model.structured_output is True
     )
+
+
+def _active_qualification(
+    model: _RoutableTarget,
+    qualifications: dict[tuple[str, str], GovernedProviderQualification],
+) -> GovernedProviderQualification | None:
+    """Apply explicit overlays only to catalog identities, never dynamic provider routes."""
+    if isinstance(model, ProviderManagedRoute):
+        return None
+    qualification = qualifications.get((model.provider_id, model.provider_model_id))
+    return qualification if qualification is not None and qualification.enabled else None
 
 
 def _rank_key(candidate: _Candidate, data: RoutingRequest) -> tuple[object, ...]:
@@ -230,6 +247,7 @@ async def simulate(
         await repository.list_routing_candidates(session), virtual_routes
     )
     forced_pair = get_settings().model_router_force_model_pair
+    qualifications = get_settings().governed_provider_qualifications_by_identity
     required = _requirements(data)
     available = context_rejected = capability_rejected = enforcement_rejected = free_rejected = 0
     eligible: list[_Candidate] = []
@@ -249,13 +267,18 @@ async def simulate(
         if not _capabilities_satisfied(model, required):
             capability_rejected += 1
             continue
-        if not _enforcement_grade(model).satisfies(data.minimum_contract_enforcement_grade):
+        qualification = _active_qualification(model, qualifications)
+        if not _enforcement_grade(model, qualification).satisfies(
+            data.minimum_contract_enforcement_grade
+        ):
             enforcement_rejected += 1
             continue
         if data.cost_policy == CostPolicy.FREE_ONLY and not model.free_allowlisted:
             free_rejected += 1
             continue
-        eligible.append(_Candidate(model=model, estimated_cost=_cost(model, data)))
+        eligible.append(
+            _Candidate(model=model, estimated_cost=_cost(model, data), qualification=qualification)
+        )
 
     if not eligible:
         result = RoutingSimulationResult(
@@ -325,11 +348,28 @@ async def simulate(
                 capability_declaration_source=getattr(selected.model, "capability_source", None),
                 capability_policy=getattr(selected.model, "capability_policy", None),
                 structured_output_capability=_structured_output_capability(selected.model),
-                contract_enforcement_grade=_enforcement_grade(selected.model),
-                minimum_contract_enforcement_grade=data.minimum_contract_enforcement_grade,
-                enforcement_metadata_source=getattr(
-                    selected.model, "enforcement_metadata_source", None
+                contract_enforcement_grade=_enforcement_grade(
+                    selected.model, selected.qualification
                 ),
+                minimum_contract_enforcement_grade=data.minimum_contract_enforcement_grade,
+                enforcement_metadata_source=(
+                    selected.qualification.qualification_source.value
+                    if selected.qualification is not None
+                    else getattr(selected.model, "enforcement_metadata_source", None)
+                ),
+                qualification_present=selected.qualification is not None,
+                qualification_source=(
+                    selected.qualification.qualification_source
+                    if selected.qualification is not None
+                    else None
+                ),
+                upstream_provider_constraint=(
+                    selected.qualification.upstream_provider
+                    if selected.qualification is not None
+                    else None
+                ),
+                provider_allow_fallbacks=(False if selected.qualification is not None else None),
+                provider_require_parameters=selected.qualification is not None,
                 declared_capabilities=(
                     selected.model.capabilities
                     if isinstance(selected.model, ProviderManagedRoute)
@@ -362,6 +402,23 @@ async def simulate(
                 result.selected.contract_enforcement_grade if result.selected else None
             ),
             "minimum_contract_enforcement_grade": (result.minimum_contract_enforcement_grade),
+            "qualification_present": (
+                result.selected.qualification_present if result.selected else False
+            ),
+            "qualification_source": (
+                result.selected.qualification_source.value
+                if result.selected and result.selected.qualification_source is not None
+                else None
+            ),
+            "upstream_provider_constraint": (
+                result.selected.upstream_provider_constraint if result.selected else None
+            ),
+            "provider_allow_fallbacks": (
+                result.selected.provider_allow_fallbacks if result.selected else None
+            ),
+            "provider_require_parameters": (
+                result.selected.provider_require_parameters if result.selected else False
+            ),
             "dynamic_resolution": result.selected.dynamic_resolution if result.selected else None,
             "raw_representation_count": canonical_targets.raw_representation_count,
             "canonical_target_count": len(canonical_targets.targets),

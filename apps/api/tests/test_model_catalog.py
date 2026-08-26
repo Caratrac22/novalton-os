@@ -14,7 +14,12 @@ from novalton_api.core.config import Settings
 from novalton_api.core.database import Base, Database
 from novalton_api.core.limits import MAX_CATALOG_OUTPUT_TOKENS
 from novalton_api.infrastructure.providers.catalog import CatalogSourceRegistry
-from novalton_api.infrastructure.providers.contracts import CatalogModel, ContractEnforcementGrade
+from novalton_api.infrastructure.providers.contracts import (
+    CatalogModel,
+    ContractEnforcementGrade,
+    GovernedProviderQualification,
+    QualificationSource,
+)
 from novalton_api.infrastructure.providers.errors import ProviderError, ProviderFailure
 from novalton_api.main import create_app
 from novalton_api.modules.model_catalog import routes as catalog_routes
@@ -238,6 +243,50 @@ def test_exact_configured_model_is_allowlisted_even_when_price_is_nonzero(
     assert _refresh(api).status_code == 200
     model = api.client.get(_collection(api)).json()["items"][0]
     assert model["free_allowlisted"] is True
+
+
+def test_governed_qualification_diagnostics_expose_only_bounded_policy(
+    api: CatalogApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api.source.models = [_model("vendor/qualified", structured_output=True, max_output_tokens=2048)]
+    assert _refresh(api).status_code == 200
+    settings = Settings(
+        governed_provider_qualifications=(
+            GovernedProviderQualification(
+                provider_id="openrouter",
+                provider_model_id="vendor/qualified",
+                upstream_provider="openai",
+                contract_enforcement_grade=ContractEnforcementGrade.PROVIDER_ENFORCED,
+                qualification_source=QualificationSource.PROVIDER_DOCUMENTATION,
+            ),
+        )
+    )
+    monkeypatch.setattr(catalog_routes, "get_settings", lambda: settings)
+
+    response = api.client.get(f"{_collection(api)}/governed-qualifications")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "provider_id": "openrouter",
+                "provider_model_id": "vendor/qualified",
+                "qualification_present": True,
+                "enabled": True,
+                "qualification_source": "PROVIDER_DOCUMENTATION",
+                "contract_enforcement_grade": "PROVIDER_ENFORCED",
+                "upstream_provider_constraint": "openai",
+                "provider_allow_fallbacks": False,
+                "provider_require_parameters": True,
+                "catalog_target_present": True,
+                "catalog_status": "AVAILABLE",
+                "structured_output_capability": True,
+                "context_window": 128000,
+                "max_output_tokens": 2048,
+                "free_allowlisted": False,
+            }
+        ]
+    }
 
 
 def test_provider_failures_and_unknown_source_do_not_corrupt_catalog(api: CatalogApi) -> None:

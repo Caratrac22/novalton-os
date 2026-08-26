@@ -8,7 +8,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-from novalton_api.infrastructure.providers.contracts import ContractEnforcementGrade
+from novalton_api.infrastructure.providers.contracts import (
+    ContractEnforcementGrade,
+    QualificationSource,
+)
 from novalton_api.modules.model_catalog.schemas import ProviderIdentifier
 
 
@@ -128,6 +131,11 @@ class SelectedCatalogModel(BaseModel):
     contract_enforcement_grade: ContractEnforcementGrade
     minimum_contract_enforcement_grade: ContractEnforcementGrade
     enforcement_metadata_source: str | None = None
+    qualification_present: bool = False
+    qualification_source: QualificationSource | None = None
+    upstream_provider_constraint: str | None = None
+    provider_allow_fallbacks: bool | None = None
+    provider_require_parameters: bool = False
     declared_capabilities: frozenset[str] = frozenset()
     context_window: int | None = None
     max_output_tokens: int | None = None

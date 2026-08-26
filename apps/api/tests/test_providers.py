@@ -16,12 +16,15 @@ from novalton_api.infrastructure.providers.contracts import (
     MAX_MESSAGE_CHARACTERS,
     MAX_REQUEST_CHARACTERS,
     CatalogModel,
+    ContractEnforcementGrade,
     GenerationRequest,
     GenerationResult,
+    GovernedProviderQualification,
     JsonObjectRequest,
     Message,
     MessageRole,
     ProviderRequestOptions,
+    QualificationSource,
     StructuredOutputRequest,
 )
 from novalton_api.infrastructure.providers.errors import (
@@ -177,6 +180,44 @@ def test_catalog_contract_is_strict_conservative_and_decimal() -> None:
             display_name="Bad",
             input_price_per_million=Decimal("-1"),
             currency="USD",
+        )
+
+
+def test_governed_provider_qualifications_are_bounded_and_conservative() -> None:
+    qualification = GovernedProviderQualification(
+        provider_id="openrouter",
+        provider_model_id="vendor/model",
+        upstream_provider="openai",
+        contract_enforcement_grade=ContractEnforcementGrade.PROVIDER_ENFORCED,
+        qualification_source=QualificationSource.PROVIDER_DOCUMENTATION,
+    )
+    settings = Settings(governed_provider_qualifications=(qualification,))
+
+    assert settings.governed_provider_qualifications_by_identity == {
+        ("openrouter", "vendor/model"): qualification
+    }
+    assert qualification.contract_enforcement_grade == ContractEnforcementGrade.PROVIDER_ENFORCED
+    with pytest.raises(ValidationError):
+        Settings(
+            governed_provider_qualifications=(
+                qualification,
+                qualification,
+            )
+        )
+    with pytest.raises(ValidationError):
+        GovernedProviderQualification(
+            provider_id="openrouter",
+            provider_model_id="vendor/model",
+            upstream_provider="bad provider",
+            contract_enforcement_grade=ContractEnforcementGrade.PROVIDER_ENFORCED,
+            qualification_source=QualificationSource.OPERATOR_CONFIGURATION,
+        )
+    with pytest.raises(ValidationError):
+        GovernedProviderQualification(
+            provider_id="openrouter",
+            provider_model_id="vendor/model",
+            contract_enforcement_grade=ContractEnforcementGrade.BEST_EFFORT,
+            qualification_source=QualificationSource.OPERATOR_CONFIGURATION,
         )
     with pytest.raises(ValidationError):
         CatalogModel(
@@ -492,6 +533,7 @@ async def test_successful_normalization_serialization_and_nullable_usage() -> No
         "provider_id": "openrouter",
         "model_id": "~openai/gpt-latest",
         "provider_resolved_model_id": "vendor/model-actual",
+        "upstream_provider_id": None,
         "content": "Normalized answer",
         "finish_reason": "stop",
         "input_tokens": None,
@@ -600,6 +642,105 @@ async def test_provider_request_require_parameters_maps_to_openrouter_payload_me
     assert payload["response_format"] == {"type": "json_object"}
     assert payload["provider"] == {"require_parameters": True}
     assert "plugins" not in payload
+
+
+@pytest.mark.asyncio
+async def test_qualified_openrouter_request_pins_upstream_without_fallback() -> None:
+    captured: list[httpx.Request] = []
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        captured.append(http_request)
+        return httpx.Response(
+            200,
+            json=response_payload(
+                openrouter_metadata={
+                    "endpoints": {
+                        "available": [
+                            {
+                                "provider": "OpenAI",
+                                "model": "vendor/model-actual",
+                                "selected": True,
+                            }
+                        ]
+                    }
+                }
+            ),
+        )
+
+    async with OpenAICompatibleProvider(
+        config(), transport=httpx.MockTransport(handler)
+    ) as provider:
+        result = await provider.complete(
+            request(
+                provider_options=ProviderRequestOptions(
+                    require_parameters=True,
+                    upstream_provider="openai",
+                    allow_fallbacks=False,
+                )
+            )
+        )
+
+    assert captured[0].headers["x-openrouter-metadata"] == "enabled"
+    assert json.loads(captured[0].content)["provider"] == {
+        "require_parameters": True,
+        "only": ["openai"],
+        "order": ["openai"],
+        "allow_fallbacks": False,
+    }
+    assert result.provider_id == "openrouter"
+    assert result.model_id == "vendor/model-1"
+    assert result.provider_resolved_model_id == "vendor/model-actual"
+    assert result.upstream_provider_id == "OpenAI"
+
+
+@pytest.mark.asyncio
+async def test_openrouter_unsafe_upstream_metadata_is_omitted_not_persisted() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=response_payload(
+                openrouter_metadata={
+                    "endpoints": {
+                        "available": [{"provider": "Unsafe Provider Name", "selected": True}]
+                    }
+                }
+            ),
+        )
+
+    async with OpenAICompatibleProvider(
+        config(), transport=httpx.MockTransport(handler)
+    ) as provider:
+        result = await provider.complete(request())
+
+    assert result.upstream_provider_id is None
+
+
+@pytest.mark.asyncio
+async def test_pinned_openrouter_provider_failure_is_single_attempt_without_fallback() -> None:
+    calls = 0
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert json.loads(http_request.content)["provider"]["allow_fallbacks"] is False
+        return httpx.Response(503, json={"error": {"message": "pinned upstream unavailable"}})
+
+    async with OpenAICompatibleProvider(
+        config(), transport=httpx.MockTransport(handler)
+    ) as provider:
+        with pytest.raises(ProviderError) as error:
+            await provider.complete(
+                request(
+                    provider_options=ProviderRequestOptions(
+                        require_parameters=True,
+                        upstream_provider="openai",
+                        allow_fallbacks=False,
+                    )
+                )
+            )
+
+    assert error.value.failure == ProviderFailure.TRANSIENT
+    assert calls == 1
 
 
 @pytest.mark.asyncio

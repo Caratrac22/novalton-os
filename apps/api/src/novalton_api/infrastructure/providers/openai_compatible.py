@@ -11,6 +11,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from novalton_api.infrastructure.providers.contracts import (
+    UPSTREAM_PROVIDER_PATTERN,
     GenerationRequest,
     GenerationResult,
     ProviderExecutionCapabilities,
@@ -66,6 +67,9 @@ class OpenAICompatibleProvider:
         }
         if config.api_key is not None:
             headers["Authorization"] = f"Bearer {config.api_key.get_secret_value()}"
+        if config.provider_id == "openrouter":
+            # This bounded response metadata exposes routing identity, never prompts or schemas.
+            headers["X-OpenRouter-Metadata"] = "enabled"
         self._client = httpx.AsyncClient(
             transport=transport,
             headers=headers,
@@ -163,8 +167,20 @@ class OpenAICompatibleProvider:
         elif request.json_object is not None:
             payload["response_format"] = {"type": "json_object"}
         provider_options = request.provider_options
-        if provider_options is not None and provider_options.require_parameters:
-            payload["provider"] = {"require_parameters": True}
+        if provider_options is not None and self.provider_id == "openrouter":
+            provider: dict[str, object] = {}
+            if provider_options.require_parameters:
+                provider["require_parameters"] = True
+            if provider_options.upstream_provider is not None:
+                # A single qualified upstream endpoint is both allowlisted and ordered. Disabling
+                # fallbacks prevents OpenRouter from preserving a qualification while spilling to
+                # another upstream provider.
+                provider["only"] = [provider_options.upstream_provider]
+                provider["order"] = [provider_options.upstream_provider]
+            if provider_options.allow_fallbacks is not None:
+                provider["allow_fallbacks"] = provider_options.allow_fallbacks
+            if provider:
+                payload["provider"] = provider
         if provider_options is not None and provider_options.response_healing:
             payload["plugins"] = [{"id": "response-healing"}]
         http_request = self._client.build_request(
@@ -225,6 +241,7 @@ class OpenAICompatibleProvider:
             raise ProviderError(ProviderFailure.REFUSAL, provider_id=self.provider_id)
         content = message.get("content") if isinstance(message, dict) else None
         provider_resolved_model_id = payload.get("model")
+        upstream_provider_id = self._upstream_provider_id(payload)
         if (
             not isinstance(content, str)
             or not content
@@ -249,6 +266,7 @@ class OpenAICompatibleProvider:
                 provider_id=self.provider_id,
                 model_id=requested_model_id,
                 provider_resolved_model_id=provider_resolved_model_id,
+                upstream_provider_id=upstream_provider_id,
                 content=content,
                 finish_reason=finish_reason if isinstance(finish_reason, str) else None,
                 input_tokens=input_tokens,
@@ -261,6 +279,28 @@ class OpenAICompatibleProvider:
             raise ProviderError(
                 ProviderFailure.MALFORMED_RESPONSE, provider_id=self.provider_id
             ) from None
+
+    def _upstream_provider_id(self, payload: dict[str, Any]) -> str | None:
+        """Return only the selected OpenRouter provider slug/name when safely present."""
+        if self.provider_id != "openrouter":
+            return None
+        metadata = payload.get("openrouter_metadata")
+        if not isinstance(metadata, dict):
+            return None
+        endpoints = metadata.get("endpoints")
+        available = endpoints.get("available") if isinstance(endpoints, dict) else None
+        if not isinstance(available, list):
+            return None
+        for endpoint in available:
+            if not isinstance(endpoint, dict) or endpoint.get("selected") is not True:
+                continue
+            provider = endpoint.get("provider")
+            if (
+                isinstance(provider, str)
+                and UPSTREAM_PROVIDER_PATTERN.fullmatch(provider) is not None
+            ):
+                return provider
+        return None
 
     def _classify_http_error(self, status_code: int, payload: dict[str, Any]) -> ProviderFailure:
         error = payload.get("error")

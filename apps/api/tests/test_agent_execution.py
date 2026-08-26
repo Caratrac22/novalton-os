@@ -16,6 +16,8 @@ from novalton_api.infrastructure.providers.contracts import (
     ContractEnforcementGrade,
     GenerationRequest,
     GenerationResult,
+    GovernedProviderQualification,
+    QualificationSource,
 )
 from novalton_api.infrastructure.providers.errors import (
     ProviderCancellationError,
@@ -558,6 +560,11 @@ def test_provider_backed_execution_captures_usage_and_linkage(
             "contract_enforcement_grade": "UNSUPPORTED",
             "minimum_contract_enforcement_grade": "UNSUPPORTED",
             "enforcement_metadata_source": "test_agent_execution",
+            "qualification_present": False,
+            "qualification_source": None,
+            "upstream_provider_constraint": None,
+            "provider_allow_fallbacks": None,
+            "provider_require_parameters": False,
         }
         assert len(provider.calls) == 1
         assert route_calls == 1
@@ -620,6 +627,11 @@ def test_unregistered_routed_provider_is_accounted_without_fallback() -> None:
             "contract_enforcement_grade": "UNSUPPORTED",
             "minimum_contract_enforcement_grade": "UNSUPPORTED",
             "enforcement_metadata_source": "test_agent_execution",
+            "qualification_present": False,
+            "qualification_source": None,
+            "upstream_provider_constraint": None,
+            "provider_allow_fallbacks": None,
+            "provider_require_parameters": False,
         }
 
         async def inspect() -> tuple[AgentRun, list[ModelRun]]:
@@ -752,6 +764,76 @@ def test_insufficient_contract_enforcement_fails_before_provider_generation() ->
         )
         assert provider.calls == []
         assert asyncio.run(_model_attempts(scope, UUID(body["agent_run_id"]))) == []
+    finally:
+        asyncio.run(_cleanup(scope))
+
+
+def test_qualified_target_pins_upstream_and_persists_distinct_identities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_model_id = "vendor/qualified"
+    scope = asyncio.run(
+        _seed(
+            provider_model_id=provider_model_id,
+            contract_enforcement_grade=ContractEnforcementGrade.BEST_EFFORT.value,
+        )
+    )
+    qualification = GovernedProviderQualification(
+        provider_id="mock",
+        provider_model_id=provider_model_id,
+        upstream_provider="openai",
+        contract_enforcement_grade=ContractEnforcementGrade.PROVIDER_ENFORCED,
+        qualification_source=QualificationSource.OPERATOR_CONFIGURATION,
+    )
+    monkeypatch.setattr(
+        router_service,
+        "get_settings",
+        lambda: Settings(governed_provider_qualifications=(qualification,)),
+    )
+
+    class QualifiedProvider(MockProvider):
+        async def complete(self, request: GenerationRequest) -> GenerationResult:
+            result = await super().complete(request)
+            return result.model_copy(
+                update={
+                    "provider_resolved_model_id": "vendor/resolved",
+                    "upstream_provider_id": "OpenAI",
+                }
+            )
+
+    provider = QualifiedProvider()
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            body = client.post(
+                _url(scope),
+                json=_input(
+                    scope,
+                    minimum_contract_enforcement_grade=(
+                        ContractEnforcementGrade.PROVIDER_ENFORCED.value
+                    ),
+                ),
+            ).json()
+        attempts = asyncio.run(_model_attempts(scope, UUID(body["agent_run_id"])))
+
+        assert body["status"] == "SUCCEEDED"
+        assert body["selected_model"]["qualification_present"] is True
+        assert body["selected_model"]["upstream_provider_constraint"] == "openai"
+        assert len(provider.calls) == len(attempts) == 1
+        assert provider.calls[0].provider_options is not None
+        assert provider.calls[0].provider_options.model_dump() == {
+            "require_parameters": True,
+            "response_healing": False,
+            "upstream_provider": "openai",
+            "allow_fallbacks": False,
+        }
+        assert (
+            attempts[0].provider_id,
+            attempts[0].provider_model_id,
+            attempts[0].provider_resolved_model_id,
+            attempts[0].upstream_provider_id,
+        ) == ("mock", provider_model_id, "vendor/resolved", "OpenAI")
+        assert attempts[0].contract_enforcement_grade == "PROVIDER_ENFORCED"
+        assert attempts[0].qualification_source == "OPERATOR_CONFIGURATION"
     finally:
         asyncio.run(_cleanup(scope))
 
