@@ -10,7 +10,10 @@ from sqlalchemy import delete, func, select
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
-from novalton_api.infrastructure.providers.contracts import ProviderManagedRoute
+from novalton_api.infrastructure.providers.contracts import (
+    ContractEnforcementGrade,
+    ProviderManagedRoute,
+)
 from novalton_api.infrastructure.providers.openai_compatible import OpenAICompatibleProvider
 from novalton_api.infrastructure.providers.openrouter_routes import registered_openrouter_routes
 from novalton_api.main import create_app
@@ -109,6 +112,7 @@ def _virtual_route(
     capabilities: frozenset[str] = frozenset({"tool_calling"}),
     context_window: int | None = 20_000,
     max_output_tokens: int | None = 512,
+    contract_enforcement_grade: ContractEnforcementGrade = ContractEnforcementGrade.UNSUPPORTED,
 ) -> ProviderManagedRoute:
     return ProviderManagedRoute(
         provider_id="openrouter",
@@ -119,6 +123,8 @@ def _virtual_route(
         max_output_tokens=max_output_tokens,
         source="test_provider_adapter",
         capability_source="test_provider_route",
+        contract_enforcement_grade=contract_enforcement_grade,
+        enforcement_metadata_source="test_provider_route_policy",
     )
 
 
@@ -297,6 +303,7 @@ def test_free_only_empty_returns_sanitized_no_suitable_taxonomy(api: RouterApi) 
         "selected": None,
         "reason_codes": ["FREE_ONLY_POOL_EMPTY"],
         "eligible_candidate_count": 0,
+        "minimum_contract_enforcement_grade": "UNSUPPORTED",
     }
 
 
@@ -540,6 +547,7 @@ def test_forced_model_still_fails_closed_through_existing_eligibility_rules(
         "selected": None,
         "reason_codes": reason_codes,
         "eligible_candidate_count": 0,
+        "minimum_contract_enforcement_grade": "UNSUPPORTED",
     }
 
 
@@ -558,6 +566,149 @@ def test_context_no_suitable_never_relaxes_requirement(api: RouterApi) -> None:
     body = api.client.post(api.url, json=_request(context_tokens_estimate=10_000)).json()
     assert body["outcome"] == "NO_SUITABLE_MODEL"
     assert body["reason_codes"] == ["CONTEXT_UNSATISFIED"]
+
+
+def test_structured_output_support_and_contract_enforcement_are_distinct(api: RouterApi) -> None:
+    asyncio.run(
+        _add_models(
+            _model(
+                "best-effort-structured",
+                contract_enforcement_grade=ContractEnforcementGrade.BEST_EFFORT.value,
+                enforcement_metadata_source="test_feature_metadata",
+            )
+        )
+    )
+
+    body = api.client.post(
+        api.url,
+        json=_request(
+            required_capabilities=[],
+            structured_output_required=True,
+            minimum_contract_enforcement_grade="BEST_EFFORT",
+        ),
+    ).json()
+
+    assert body["selected"]["structured_output_capability"] is True
+    assert body["selected"]["contract_enforcement_grade"] == "BEST_EFFORT"
+    assert body["selected"]["minimum_contract_enforcement_grade"] == "BEST_EFFORT"
+    assert body["selected"]["enforcement_metadata_source"] == "test_feature_metadata"
+
+
+def test_best_effort_target_is_rejected_for_strict_contract_workload(api: RouterApi) -> None:
+    asyncio.run(
+        _add_models(
+            _model(
+                "best-effort-only",
+                contract_enforcement_grade=ContractEnforcementGrade.BEST_EFFORT.value,
+            )
+        )
+    )
+
+    body = api.client.post(
+        api.url,
+        json=_request(
+            required_capabilities=[],
+            minimum_contract_enforcement_grade="STRICT_SCHEMA_GUARANTEED",
+        ),
+    ).json()
+
+    assert body["outcome"] == "NO_SUITABLE_MODEL"
+    assert body["reason_codes"] == ["CONTRACT_ENFORCEMENT_UNSATISFIED"]
+    assert body["eligible_candidate_count"] == 0
+    assert body["minimum_contract_enforcement_grade"] == "STRICT_SCHEMA_GUARANTEED"
+
+
+def test_strict_capable_target_is_eligible_for_strict_contract_workload(api: RouterApi) -> None:
+    asyncio.run(
+        _add_models(
+            _model(
+                "strict-target",
+                contract_enforcement_grade=(
+                    ContractEnforcementGrade.STRICT_SCHEMA_GUARANTEED.value
+                ),
+                enforcement_metadata_source="test_provider_guarantee",
+            )
+        )
+    )
+
+    body = api.client.post(
+        api.url,
+        json=_request(
+            required_capabilities=[],
+            minimum_contract_enforcement_grade="STRICT_SCHEMA_GUARANTEED",
+        ),
+    ).json()
+
+    assert body["outcome"] == "SELECTED"
+    assert body["selected"]["provider_model_id"] == "strict-target"
+
+
+def test_forced_insufficient_contract_grade_fails_closed_without_fallback(
+    api: RouterApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "novalton_api.modules.model_router.service.get_settings",
+        lambda: Settings(model_router_force_model="openrouter::best-effort"),
+    )
+    asyncio.run(
+        _add_models(
+            _model(
+                "best-effort",
+                contract_enforcement_grade=ContractEnforcementGrade.BEST_EFFORT.value,
+            ),
+            _model(
+                "strict-fallback",
+                contract_enforcement_grade=(
+                    ContractEnforcementGrade.STRICT_SCHEMA_GUARANTEED.value
+                ),
+            ),
+        )
+    )
+
+    body = api.client.post(
+        api.url,
+        json=_request(
+            required_capabilities=[],
+            minimum_contract_enforcement_grade="PROVIDER_ENFORCED",
+        ),
+    ).json()
+
+    assert body["outcome"] == "NO_SUITABLE_MODEL"
+    assert body["reason_codes"] == ["CONTRACT_ENFORCEMENT_UNSATISFIED"]
+    assert body["eligible_candidate_count"] == 0
+
+
+def test_openrouter_dynamic_route_keeps_conservative_declared_grade() -> None:
+    route = registered_openrouter_routes("openrouter")[0]
+
+    assert route.contract_enforcement_grade == ContractEnforcementGrade.BEST_EFFORT
+    assert route.enforcement_metadata_source == "openrouter_dynamic_route_policy"
+    assert route.dynamic_resolution is True
+
+
+def test_dynamic_route_grade_is_stable_and_best_effort_workloads_remain_eligible(
+    api: RouterApi,
+) -> None:
+    route = registered_openrouter_routes("openrouter")[0]
+
+    result = asyncio.run(
+        _simulate_with_routes(
+            api,
+            data=_request(
+                required_capabilities=[],
+                structured_output_required=True,
+                minimum_contract_enforcement_grade=ContractEnforcementGrade.BEST_EFFORT.value,
+            ),
+            virtual_routes=(route,),
+        )
+    )
+
+    assert result.selected is not None
+    assert result.selected.target_kind.value == "VIRTUAL_ROUTE"
+    assert result.selected.contract_enforcement_grade == ContractEnforcementGrade.BEST_EFFORT
+    assert result.selected.enforcement_metadata_source == "openrouter_dynamic_route_policy"
+    # Provider-resolved model identities are runtime metadata only; route policy is immutable.
+    assert route.contract_enforcement_grade == ContractEnforcementGrade.BEST_EFFORT
 
 
 async def _side_effect_counts() -> tuple[int, int, int, int]:

@@ -27,6 +27,31 @@ ModelIdentifier = Annotated[
 ]
 
 
+class ContractEnforcementGrade(StrEnum):
+    """Provider-neutral strength of structured contract enforcement.
+
+    Capability support answers whether a target accepts structured-output requests. This grade
+    separately records the strongest enforcement claim backed by trustworthy metadata.
+    """
+
+    UNSUPPORTED = "UNSUPPORTED"
+    BEST_EFFORT = "BEST_EFFORT"
+    PROVIDER_ENFORCED = "PROVIDER_ENFORCED"
+    STRICT_SCHEMA_GUARANTEED = "STRICT_SCHEMA_GUARANTEED"
+
+    @property
+    def rank(self) -> int:
+        return {
+            ContractEnforcementGrade.UNSUPPORTED: 0,
+            ContractEnforcementGrade.BEST_EFFORT: 1,
+            ContractEnforcementGrade.PROVIDER_ENFORCED: 2,
+            ContractEnforcementGrade.STRICT_SCHEMA_GUARANTEED: 3,
+        }[self]
+
+    def satisfies(self, minimum: "ContractEnforcementGrade") -> bool:
+        return self.rank >= minimum.rank
+
+
 class CatalogModel(BaseModel):
     """One provider-normalized catalog entry with no raw metadata attached."""
 
@@ -42,6 +67,10 @@ class CatalogModel(BaseModel):
     coding: bool | None = None
     tool_calling: bool | None = None
     structured_output: bool | None = None
+    contract_enforcement_grade: ContractEnforcementGrade | None = None
+    enforcement_metadata_source: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)] | None
+    ) = None
     vision: bool | None = None
     input_price_per_million: Decimal | None = Field(
         default=None, ge=0, max_digits=20, decimal_places=10
@@ -67,6 +96,12 @@ class CatalogModel(BaseModel):
             self.input_price_per_million is not None or self.output_price_per_million is not None
         ):
             raise ValueError("known pricing requires a reliable currency")
+        if (
+            self.contract_enforcement_grade is not None
+            and self.contract_enforcement_grade != ContractEnforcementGrade.UNSUPPORTED
+            and self.structured_output is not True
+        ):
+            raise ValueError("contract enforcement requires structured output support")
         return self
 
 
@@ -80,6 +115,8 @@ class ProviderManagedRoute:
     enabled: bool = True
     capabilities: frozenset[str] = frozenset()
     capability_policy: str = "DECLARED_GUARANTEE"
+    contract_enforcement_grade: ContractEnforcementGrade = ContractEnforcementGrade.UNSUPPORTED
+    enforcement_metadata_source: str = "provider_adapter"
     context_window: int | None = None
     max_output_tokens: int | None = None
     pricing_policy: str | None = None

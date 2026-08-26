@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from novalton_api.core.config import get_settings
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.contracts import (
+    ContractEnforcementGrade,
     GenerationRequest,
     JsonObjectRequest,
     Message,
@@ -52,10 +53,11 @@ from novalton_api.modules.model_router.schemas import (
     CostPolicy,
     ModelCapability,
     RoutingOutcome,
+    RoutingReason,
     RoutingRequest,
 )
 from novalton_api.modules.model_usage import service as usage_service
-from novalton_api.modules.model_usage.schemas import ModelRunStart
+from novalton_api.modules.model_usage.schemas import ModelRunExecutionDiagnostics, ModelRunStart
 
 logger = logging.getLogger(__name__)
 _CONTEXT_OVERHEAD_TOKENS = 1024
@@ -166,6 +168,11 @@ def _routing_request(
         context_tokens_estimate=context_estimate,
         tool_calling_required=hints.tool_calling_required if hints is not None else False,
         structured_output_required=_native_structured_output_required(data),
+        minimum_contract_enforcement_grade=(
+            hints.minimum_contract_enforcement_grade
+            if hints is not None
+            else ContractEnforcementGrade.UNSUPPORTED
+        ),
         vision_required=ModelCapability.VISION in required,
         expected_output_tokens=expected_output_tokens,
         cost_policy=CostPolicy.LOWEST_COST,
@@ -334,20 +341,29 @@ async def execute[AgentResultT: AgentResult](
         virtual_routes=registry.provider_managed_routes,
     )
     if route.outcome == RoutingOutcome.NO_SUITABLE_MODEL or route.selected is None:
+        code = (
+            "contract_enforcement_unsatisfied"
+            if RoutingReason.CONTRACT_ENFORCEMENT_UNSATISFIED in route.reason_codes
+            else "no_suitable_model"
+        )
         run = await _fail_agent(
             session,
             tenant_id=tenant_id,
             workspace_id=workspace_id,
             run_id=run.id,
-            code="no_suitable_model",
+            code=code,
         )
-        return _response(run, definition=definition, error_code="no_suitable_model")
+        return _response(run, definition=definition, error_code=code)
 
     routed = route.selected
     selected = SelectedModelResponse(
         catalog_model_id=routed.catalog_model_id,
         provider_id=routed.provider_id,
         provider_model_id=routed.provider_model_id,
+        structured_output_capability=routed.structured_output_capability,
+        contract_enforcement_grade=routed.contract_enforcement_grade,
+        minimum_contract_enforcement_grade=routed.minimum_contract_enforcement_grade,
+        enforcement_metadata_source=routed.enforcement_metadata_source,
     )
     estimate = routed.estimated_cost
     model_run = await usage_service.start_run(
@@ -362,6 +378,10 @@ async def execute[AgentResultT: AgentResult](
             project_id=project_id,
             estimated_cost=estimate.amount if estimate is not None else None,
             currency=estimate.currency if estimate is not None else None,
+            target_structured_output_capability=routed.structured_output_capability,
+            contract_enforcement_grade=routed.contract_enforcement_grade,
+            minimum_contract_enforcement_grade=routed.minimum_contract_enforcement_grade,
+            enforcement_metadata_source=routed.enforcement_metadata_source,
         ),
     )
     linked = await repository.link_model_run(
@@ -444,6 +464,19 @@ async def execute[AgentResultT: AgentResult](
                 model_run_id=model_run.id,
                 error_code="native_structured_output_required",
             )
+        await usage_service.set_execution_diagnostics(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            model_run_id=model_run.id,
+            data=ModelRunExecutionDiagnostics(
+                contract_strategy_tier=strategy.tier.value,
+                contract_fingerprint=profile.fingerprint,
+                contextual_constraint_count=len(profile.result_shape_constraints),
+                execution_max_output_tokens=budget.tokens,
+                output_budget_source=budget.source,
+            ),
+        )
         logger.info(
             "Agent contract strategy selected",
             extra={
@@ -462,6 +495,12 @@ async def execute[AgentResultT: AgentResult](
                 "route_source": routed.route_source,
                 "capability_policy": routed.capability_policy,
                 "dynamic_resolution": routed.dynamic_resolution,
+                "target_structured_output_capability": routed.structured_output_capability,
+                "contract_enforcement_grade": routed.contract_enforcement_grade.value,
+                "minimum_contract_enforcement_grade": (
+                    routed.minimum_contract_enforcement_grade.value
+                ),
+                "enforcement_metadata_source": routed.enforcement_metadata_source,
                 "selected_output_budget": budget.tokens,
                 "known_model_maximum": budget.known_model_maximum,
                 "budget_policy_source": budget.source,
@@ -581,6 +620,7 @@ async def execute[AgentResultT: AgentResult](
             workspace_id=workspace_id,
             model_run_id=model_run.id,
             result=generation,
+            truncation_classification=classify_truncation(generation.finish_reason),
         )
     except ApplicationError:
         await usage_service.mark_failed(
@@ -615,6 +655,10 @@ async def execute[AgentResultT: AgentResult](
             "provider_model_id": routed.provider_model_id,
             "target_kind": routed.target_kind.value,
             "dynamic_resolution": routed.dynamic_resolution,
+            "target_structured_output_capability": routed.structured_output_capability,
+            "contract_enforcement_grade": routed.contract_enforcement_grade.value,
+            "minimum_contract_enforcement_grade": (routed.minimum_contract_enforcement_grade.value),
+            "enforcement_metadata_source": routed.enforcement_metadata_source,
             "provider_resolved_model_id": generation.provider_resolved_model_id,
             "finish_reason": generation.finish_reason,
             "truncation_classification": truncation_classification,
@@ -623,6 +667,12 @@ async def execute[AgentResultT: AgentResult](
     )
     if truncation_classification == "TOKEN_LIMIT":
         extra_attempt_used = True
+        recovery_budget = select_output_budget(
+            expected_output_tokens=expected_output_tokens,
+            known_model_maximum=routed.max_output_tokens,
+            safety_ceiling=get_settings().model_output_token_safety_ceiling,
+            recovery=True,
+        )
         recovery_model_run = await usage_service.start_run(
             session,
             tenant_id=tenant_id,
@@ -635,13 +685,18 @@ async def execute[AgentResultT: AgentResult](
                 project_id=project_id,
                 estimated_cost=estimate.amount if estimate is not None else None,
                 currency=estimate.currency if estimate is not None else None,
+                target_structured_output_capability=routed.structured_output_capability,
+                contract_enforcement_grade=routed.contract_enforcement_grade,
+                minimum_contract_enforcement_grade=routed.minimum_contract_enforcement_grade,
+                enforcement_metadata_source=routed.enforcement_metadata_source,
+                contract_strategy_tier=strategy.tier.value,
+                contract_fingerprint=profile.fingerprint,
+                contextual_constraint_count=len(profile.result_shape_constraints),
+                execution_max_output_tokens=recovery_budget.tokens,
+                output_budget_source=recovery_budget.source,
+                recovery_attempt_kind="TRUNCATION",
+                recovery_attempt_index=1,
             ),
-        )
-        recovery_budget = select_output_budget(
-            expected_output_tokens=expected_output_tokens,
-            known_model_maximum=routed.max_output_tokens,
-            safety_ceiling=get_settings().model_output_token_safety_ceiling,
-            recovery=True,
         )
         logger.info(
             "Agent truncation recovery started",
@@ -682,6 +737,7 @@ async def execute[AgentResultT: AgentResult](
                 workspace_id=workspace_id,
                 model_run_id=recovery_model_run.id,
                 result=recovery_generation,
+                truncation_classification=classify_truncation(recovery_generation.finish_reason),
             )
             generation = recovery_generation
         except ProviderCancellationError:
@@ -799,6 +855,17 @@ async def execute[AgentResultT: AgentResult](
                     project_id=project_id,
                     estimated_cost=estimate.amount if estimate is not None else None,
                     currency=estimate.currency if estimate is not None else None,
+                    target_structured_output_capability=routed.structured_output_capability,
+                    contract_enforcement_grade=routed.contract_enforcement_grade,
+                    minimum_contract_enforcement_grade=routed.minimum_contract_enforcement_grade,
+                    enforcement_metadata_source=routed.enforcement_metadata_source,
+                    contract_strategy_tier=strategy.tier.value,
+                    contract_fingerprint=profile.fingerprint,
+                    contextual_constraint_count=len(profile.result_shape_constraints),
+                    execution_max_output_tokens=budget.tokens,
+                    output_budget_source=budget.source,
+                    recovery_attempt_kind="CONTRACT_REPAIR",
+                    recovery_attempt_index=1,
                 ),
             )
             logger.info(
@@ -887,6 +954,7 @@ async def execute[AgentResultT: AgentResult](
                         workspace_id=workspace_id,
                         model_run_id=repair_model_run.id,
                         result=generation,
+                        truncation_classification=classify_truncation(generation.finish_reason),
                     )
                 except ApplicationError:
                     await usage_service.mark_failed(

@@ -18,6 +18,7 @@ from pydantic import (
     model_validator,
 )
 
+from novalton_api.infrastructure.providers.contracts import ContractEnforcementGrade
 from novalton_api.modules.policy.schemas import RiskLevel
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*$")
@@ -109,7 +110,15 @@ class ModelRequirementHints(ContractModel):
     required_capabilities: list[Identifier] = Field(default_factory=list, max_length=16)
     minimum_context_tokens: int | None = Field(default=None, ge=1, le=2_000_000)
     structured_output_required: bool = True
+    minimum_contract_enforcement_grade: ContractEnforcementGrade = (
+        ContractEnforcementGrade.UNSUPPORTED
+    )
     tool_calling_required: bool = False
+
+    @field_validator("minimum_contract_enforcement_grade", mode="before")
+    @classmethod
+    def parse_enforcement_grade(cls, value: object) -> object:
+        return ContractEnforcementGrade(value) if isinstance(value, str) else value
 
     @field_validator("required_capabilities")
     @classmethod

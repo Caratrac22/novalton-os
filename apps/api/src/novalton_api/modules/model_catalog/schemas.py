@@ -8,6 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
+from novalton_api.infrastructure.providers.contracts import ContractEnforcementGrade
+
 ProviderIdentifier = Annotated[
     str,
     StringConstraints(
@@ -46,6 +48,8 @@ class ModelDefinitionResponse(BaseModel):
     coding: bool | None
     tool_calling: bool | None
     structured_output: bool | None
+    contract_enforcement_grade: ContractEnforcementGrade
+    enforcement_metadata_source: str
     vision: bool | None
     input_price_per_million: Decimal | None
     output_price_per_million: Decimal | None

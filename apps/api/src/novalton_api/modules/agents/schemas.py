@@ -15,6 +15,7 @@ from pydantic import (
     model_validator,
 )
 
+from novalton_api.infrastructure.providers.contracts import ContractEnforcementGrade
 from novalton_api.modules.agents.contracts import AgentInput, AgentResult
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -153,6 +154,10 @@ class SelectedModelResponse(BaseModel):
     catalog_model_id: UUID | None = None
     provider_id: str
     provider_model_id: str
+    structured_output_capability: bool
+    contract_enforcement_grade: ContractEnforcementGrade
+    minimum_contract_enforcement_grade: ContractEnforcementGrade
+    enforcement_metadata_source: str | None = None
 
 
 class AgentExecutionResponse(BaseModel):

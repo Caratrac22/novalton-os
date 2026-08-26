@@ -1,6 +1,9 @@
 """OpenRouter-specific dynamic route declarations at the provider boundary."""
 
-from novalton_api.infrastructure.providers.contracts import ProviderManagedRoute
+from novalton_api.infrastructure.providers.contracts import (
+    ContractEnforcementGrade,
+    ProviderManagedRoute,
+)
 
 
 def registered_openrouter_routes(provider_id: str) -> tuple[ProviderManagedRoute, ...]:
@@ -13,6 +16,8 @@ def registered_openrouter_routes(provider_id: str) -> tuple[ProviderManagedRoute
             display_name="OpenRouter Free Models Router",
             capabilities=frozenset({"tool_calling", "structured_output"}),
             capability_policy="DECLARED_GUARANTEE",
+            contract_enforcement_grade=ContractEnforcementGrade.BEST_EFFORT,
+            enforcement_metadata_source="openrouter_dynamic_route_policy",
             context_window=200_000,
             pricing_policy="FREE",
             free_allowlisted=True,

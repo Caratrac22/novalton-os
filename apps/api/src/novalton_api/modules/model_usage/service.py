@@ -14,7 +14,11 @@ from novalton_api.infrastructure.providers.errors import ProviderFailure
 from novalton_api.modules.model_catalog.repository import get_model
 from novalton_api.modules.model_usage import repository
 from novalton_api.modules.model_usage.models import ModelRun
-from novalton_api.modules.model_usage.schemas import ModelRunStart, ModelRunStatus
+from novalton_api.modules.model_usage.schemas import (
+    ModelRunExecutionDiagnostics,
+    ModelRunStart,
+    ModelRunStatus,
+)
 from novalton_api.modules.projects.repository import get_project
 from novalton_api.modules.workspaces.queries import get_workspace_by_tenant_and_id
 
@@ -82,6 +86,17 @@ async def start_run(
         model_definition_id=model.id if model is not None else None,
         provider_id=provider_id,
         provider_model_id=provider_model_id,
+        target_structured_output_capability=data.target_structured_output_capability,
+        contract_enforcement_grade=data.contract_enforcement_grade.value,
+        minimum_contract_enforcement_grade=data.minimum_contract_enforcement_grade.value,
+        enforcement_metadata_source=data.enforcement_metadata_source,
+        contract_strategy_tier=data.contract_strategy_tier,
+        contract_fingerprint=data.contract_fingerprint,
+        contextual_constraint_count=data.contextual_constraint_count,
+        execution_max_output_tokens=data.execution_max_output_tokens,
+        output_budget_source=data.output_budget_source,
+        recovery_attempt_kind=data.recovery_attempt_kind,
+        recovery_attempt_index=data.recovery_attempt_index,
         status=ModelRunStatus.RUNNING.value,
         correlation_id=get_correlation_id(),
         estimated_cost=data.estimated_cost,
@@ -115,6 +130,33 @@ async def _require_running(
     return run
 
 
+async def set_execution_diagnostics(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    model_run_id: UUID,
+    data: ModelRunExecutionDiagnostics,
+) -> ModelRun:
+    """Persist bounded pre-generation contract facts without retaining prompt or schema data."""
+    await _require_running(
+        session, tenant_id=tenant_id, workspace_id=workspace_id, model_run_id=model_run_id
+    )
+    updated = await repository.transition_running(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        model_run_id=model_run_id,
+        values={**data.model_dump(), "updated_at": datetime.now(UTC)},
+    )
+    if updated is None:
+        raise ApplicationError(
+            "model_run_terminal", "Model run is already terminal", status_code=409
+        )
+    await session.commit()
+    return updated
+
+
 def _actual_cost(run: ModelRun, result: GenerationResult) -> Decimal | None:
     if result.input_tokens is None or result.output_tokens is None:
         return None
@@ -142,6 +184,7 @@ async def mark_succeeded(
     workspace_id: UUID,
     model_run_id: UUID,
     result: GenerationResult,
+    truncation_classification: str = "NONE",
 ) -> ModelRun:
     run = await _require_running(
         session, tenant_id=tenant_id, workspace_id=workspace_id, model_run_id=model_run_id
@@ -183,6 +226,8 @@ async def mark_succeeded(
         values={
             "status": ModelRunStatus.SUCCEEDED.value,
             "provider_request_id": result.provider_request_id,
+            "finish_reason": result.finish_reason,
+            "truncation_classification": truncation_classification,
             "provider_resolved_model_id": result.provider_resolved_model_id,
             "input_tokens": result.input_tokens,
             "output_tokens": result.output_tokens,

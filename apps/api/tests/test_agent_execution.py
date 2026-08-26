@@ -12,7 +12,11 @@ from sqlalchemy import delete, func, select, update
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
-from novalton_api.infrastructure.providers.contracts import GenerationRequest, GenerationResult
+from novalton_api.infrastructure.providers.contracts import (
+    ContractEnforcementGrade,
+    GenerationRequest,
+    GenerationResult,
+)
 from novalton_api.infrastructure.providers.errors import (
     ProviderCancellationError,
     ProviderError,
@@ -130,6 +134,7 @@ async def _seed(
     definition_status: str = "ENABLED",
     provider_id: str = "mock",
     provider_model_id: str | None = None,
+    contract_enforcement_grade: str = "UNSUPPORTED",
     vision: bool = False,
 ) -> Scope:
     database = Database.from_settings(Settings())
@@ -168,6 +173,8 @@ async def _seed(
                 coding=True,
                 tool_calling=False,
                 structured_output=True,
+                contract_enforcement_grade=contract_enforcement_grade,
+                enforcement_metadata_source="test_agent_execution",
                 vision=vision,
                 input_price_per_million=Decimal("1"),
                 output_price_per_million=Decimal("2"),
@@ -225,7 +232,12 @@ async def _model_attempts(scope: Scope, agent_run_id: UUID) -> list[ModelRun]:
         await database.dispose()
 
 
-def _input(scope: Scope, *, required_capabilities: list[str] | None = None) -> dict[str, object]:
+def _input(
+    scope: Scope,
+    *,
+    required_capabilities: list[str] | None = None,
+    minimum_contract_enforcement_grade: str = "UNSUPPORTED",
+) -> dict[str, object]:
     return {
         "objective": "Review this task",
         "constraints": ["Do not execute actions"],
@@ -241,6 +253,7 @@ def _input(scope: Scope, *, required_capabilities: list[str] | None = None) -> d
             "minimum_context_tokens": 2_000_000,
             "structured_output_required": True,
             "tool_calling_required": False,
+            "minimum_contract_enforcement_grade": minimum_contract_enforcement_grade,
         },
     }
 
@@ -486,6 +499,24 @@ def test_generation_strategy_selection_is_capability_driven() -> None:
     assert denied is None
 
 
+def test_response_healing_is_syntax_assistance_not_contract_enforcement() -> None:
+    strategy = select_generation_strategy(
+        ContractGenerationCapabilities(
+            native_structured_output=True,
+            provider_require_parameters=True,
+            response_healing=True,
+        ),
+        native_structured_output_required=True,
+    )
+
+    assert strategy is not None
+    assert strategy.response_healing is True
+    assert (
+        ContractEnforcementGrade.BEST_EFFORT.satisfies(ContractEnforcementGrade.PROVIDER_ENFORCED)
+        is False
+    )
+
+
 def test_provider_backed_execution_captures_usage_and_linkage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -523,6 +554,10 @@ def test_provider_backed_execution_captures_usage_and_linkage(
             "catalog_model_id": str(scope.model_id),
             "provider_id": "mock",
             "provider_model_id": provider.calls[0].model_id,
+            "structured_output_capability": True,
+            "contract_enforcement_grade": "UNSUPPORTED",
+            "minimum_contract_enforcement_grade": "UNSUPPORTED",
+            "enforcement_metadata_source": "test_agent_execution",
         }
         assert len(provider.calls) == 1
         assert route_calls == 1
@@ -581,6 +616,10 @@ def test_unregistered_routed_provider_is_accounted_without_fallback() -> None:
             "catalog_model_id": str(scope.model_id),
             "provider_id": "unregistered-provider",
             "provider_model_id": body["selected_model"]["provider_model_id"],
+            "structured_output_capability": True,
+            "contract_enforcement_grade": "UNSUPPORTED",
+            "minimum_contract_enforcement_grade": "UNSUPPORTED",
+            "enforcement_metadata_source": "test_agent_execution",
         }
 
         async def inspect() -> tuple[AgentRun, list[ModelRun]]:
@@ -690,6 +729,33 @@ def test_invalid_provider_output_fails_closed(content: str, code: str, calls: in
         asyncio.run(_cleanup(scope))
 
 
+def test_insufficient_contract_enforcement_fails_before_provider_generation() -> None:
+    scope = asyncio.run(
+        _seed(contract_enforcement_grade=ContractEnforcementGrade.BEST_EFFORT.value)
+    )
+    provider = MockProvider()
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            body = client.post(
+                _url(scope),
+                json=_input(
+                    scope,
+                    minimum_contract_enforcement_grade=(
+                        ContractEnforcementGrade.PROVIDER_ENFORCED.value
+                    ),
+                ),
+            ).json()
+        assert (body["status"], body["error_code"], body["selected_model"]) == (
+            "FAILED",
+            "contract_enforcement_unsatisfied",
+            None,
+        )
+        assert provider.calls == []
+        assert asyncio.run(_model_attempts(scope, UUID(body["agent_run_id"]))) == []
+    finally:
+        asyncio.run(_cleanup(scope))
+
+
 def test_semantic_validation_failure_gets_one_safe_repair_attempt() -> None:
     scope = asyncio.run(_seed())
     provider = MockProvider([_valid_result(extra="rejected"), _valid_result()])
@@ -716,6 +782,14 @@ def test_semantic_validation_failure_gets_one_safe_repair_attempt() -> None:
             Decimal("0.0001400000"),
         ]
         assert all(attempt.agent_run_id == UUID(body["agent_run_id"]) for attempt in attempts)
+        assert [attempt.recovery_attempt_kind for attempt in attempts] == [
+            "INITIAL",
+            "CONTRACT_REPAIR",
+        ]
+        assert [attempt.recovery_attempt_index for attempt in attempts] == [0, 1]
+        assert all(attempt.contract_strategy_tier == "STRICT_SCHEMA" for attempt in attempts)
+        assert all(attempt.contract_fingerprint is not None for attempt in attempts)
+        assert all(attempt.execution_max_output_tokens is not None for attempt in attempts)
     finally:
         asyncio.run(_cleanup(scope))
 

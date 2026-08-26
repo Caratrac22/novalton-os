@@ -8,6 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
+from novalton_api.infrastructure.providers.contracts import ContractEnforcementGrade
 from novalton_api.modules.model_catalog.schemas import ProviderIdentifier
 
 
@@ -51,6 +52,7 @@ class RoutingReason(StrEnum):
     CONTEXT_UNSATISFIED = "CONTEXT_UNSATISFIED"
     CAPABILITY_UNSATISFIED = "CAPABILITY_UNSATISFIED"
     FREE_ONLY_POOL_EMPTY = "FREE_ONLY_POOL_EMPTY"
+    CONTRACT_ENFORCEMENT_UNSATISFIED = "CONTRACT_ENFORCEMENT_UNSATISFIED"
 
 
 class RoutingRequest(BaseModel):
@@ -61,6 +63,9 @@ class RoutingRequest(BaseModel):
     tool_calling_required: bool = False
     structured_output_required: bool = False
     vision_required: bool = False
+    minimum_contract_enforcement_grade: ContractEnforcementGrade = (
+        ContractEnforcementGrade.UNSUPPORTED
+    )
     expected_output_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
     cost_policy: CostPolicy = CostPolicy.LOWEST_COST
     preferred_provider: ProviderIdentifier | None = None
@@ -82,6 +87,11 @@ class RoutingRequest(BaseModel):
         if isinstance(value, list):
             return [ModelCapability(item) if isinstance(item, str) else item for item in value]
         return value
+
+    @field_validator("minimum_contract_enforcement_grade", mode="before")
+    @classmethod
+    def parse_enforcement_grade(cls, value: object) -> object:
+        return ContractEnforcementGrade(value) if isinstance(value, str) else value
 
     @field_validator("required_capabilities")
     @classmethod
@@ -114,6 +124,10 @@ class SelectedCatalogModel(BaseModel):
     route_source: str | None = None
     capability_declaration_source: str | None = None
     capability_policy: str | None = None
+    structured_output_capability: bool = False
+    contract_enforcement_grade: ContractEnforcementGrade
+    minimum_contract_enforcement_grade: ContractEnforcementGrade
+    enforcement_metadata_source: str | None = None
     declared_capabilities: frozenset[str] = frozenset()
     context_window: int | None = None
     max_output_tokens: int | None = None
@@ -127,3 +141,4 @@ class RoutingSimulationResult(BaseModel):
     selected: SelectedCatalogModel | None
     reason_codes: list[RoutingReason]
     eligible_candidate_count: Annotated[int, Field(ge=0)]
+    minimum_contract_enforcement_grade: ContractEnforcementGrade

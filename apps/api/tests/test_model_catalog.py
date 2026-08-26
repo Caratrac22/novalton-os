@@ -14,7 +14,7 @@ from novalton_api.core.config import Settings
 from novalton_api.core.database import Base, Database
 from novalton_api.core.limits import MAX_CATALOG_OUTPUT_TOKENS
 from novalton_api.infrastructure.providers.catalog import CatalogSourceRegistry
-from novalton_api.infrastructure.providers.contracts import CatalogModel
+from novalton_api.infrastructure.providers.contracts import CatalogModel, ContractEnforcementGrade
 from novalton_api.infrastructure.providers.errors import ProviderError, ProviderFailure
 from novalton_api.main import create_app
 from novalton_api.modules.model_catalog import routes as catalog_routes
@@ -115,6 +115,8 @@ def test_model_catalog_metadata_has_only_i017_global_schema() -> None:
         "ck_model_definitions_input_price_non_negative",
         "ck_model_definitions_output_price_non_negative",
         "ck_model_definitions_status_value",
+        "ck_model_definitions_contract_enforcement_grade",
+        "ck_model_definitions_enforcement_metadata_source_length",
     }.issubset(names)
     assert "usage_events" not in Base.metadata.tables
     assert "usage_events" not in Base.metadata.tables
@@ -187,6 +189,31 @@ def test_successful_refresh_upserts_idempotently_marks_missing_stale_and_lists(
         _collection(api), params={"provider_id": "openrouter", "status": "AVAILABLE"}
     ).json()["items"]
     assert available[0]["display_name"] == "Updated Name"
+
+
+def test_catalog_refresh_defaults_unknown_enforcement_to_conservative_best_effort(
+    api: CatalogApi,
+) -> None:
+    api.source.models = [
+        _model("vendor/structured", structured_output=True),
+        _model("vendor/no-structured-output", structured_output=False),
+    ]
+
+    assert _refresh(api).status_code == 200
+    by_id = {
+        item["provider_model_id"]: item for item in api.client.get(_collection(api)).json()["items"]
+    }
+
+    assert by_id["vendor/structured"]["contract_enforcement_grade"] == (
+        ContractEnforcementGrade.BEST_EFFORT.value
+    )
+    assert by_id["vendor/structured"]["enforcement_metadata_source"] == (
+        "catalog_structured_output_capability"
+    )
+    assert by_id["vendor/no-structured-output"]["contract_enforcement_grade"] == (
+        ContractEnforcementGrade.UNSUPPORTED.value
+    )
+    assert by_id["vendor/no-structured-output"]["enforcement_metadata_source"] == "catalog_unknown"
 
 
 def test_configured_exact_free_allowlist_is_independent_of_price() -> None:

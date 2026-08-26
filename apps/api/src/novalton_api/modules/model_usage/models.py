@@ -4,7 +4,16 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, Numeric, String
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+)
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -23,6 +32,59 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(
             "char_length(provider_model_id) BETWEEN 1 AND 256",
             name="ck_model_runs_provider_model_id_length",
+        ),
+        CheckConstraint(
+            "contract_enforcement_grade IN "
+            "('UNSUPPORTED', 'BEST_EFFORT', 'PROVIDER_ENFORCED', 'STRICT_SCHEMA_GUARANTEED')",
+            name="ck_model_runs_contract_enforcement_grade",
+        ),
+        CheckConstraint(
+            "minimum_contract_enforcement_grade IN "
+            "('UNSUPPORTED', 'BEST_EFFORT', 'PROVIDER_ENFORCED', 'STRICT_SCHEMA_GUARANTEED')",
+            name="ck_model_runs_minimum_contract_enforcement_grade",
+        ),
+        CheckConstraint(
+            "contract_strategy_tier IS NULL OR contract_strategy_tier IN "
+            "('STRICT_SCHEMA', 'JSON_OBJECT', 'JSON_INSTRUCTION')",
+            name="ck_model_runs_contract_strategy_tier",
+        ),
+        CheckConstraint(
+            "truncation_classification IN ('NONE', 'TOKEN_LIMIT', 'OTHER')",
+            name="ck_model_runs_truncation_classification",
+        ),
+        CheckConstraint(
+            "recovery_attempt_kind IN ('INITIAL', 'TRUNCATION', 'CONTRACT_REPAIR')",
+            name="ck_model_runs_recovery_attempt_kind",
+        ),
+        CheckConstraint(
+            "recovery_attempt_index BETWEEN 0 AND 1",
+            name="ck_model_runs_recovery_attempt_index",
+        ),
+        CheckConstraint(
+            "enforcement_metadata_source IS NULL OR "
+            "char_length(enforcement_metadata_source) BETWEEN 1 AND 64",
+            name="ck_model_runs_enforcement_metadata_source_length",
+        ),
+        CheckConstraint(
+            "contract_fingerprint IS NULL OR contract_fingerprint ~ '^[a-f0-9]{8,64}$'",
+            name="ck_model_runs_contract_fingerprint_format",
+        ),
+        CheckConstraint(
+            "contextual_constraint_count IS NULL OR contextual_constraint_count BETWEEN 0 AND 16",
+            name="ck_model_runs_contextual_constraint_count",
+        ),
+        CheckConstraint(
+            "execution_max_output_tokens IS NULL OR "
+            "execution_max_output_tokens BETWEEN 1 AND 65536",
+            name="ck_model_runs_execution_max_output_tokens",
+        ),
+        CheckConstraint(
+            "output_budget_source IS NULL OR char_length(output_budget_source) BETWEEN 1 AND 64",
+            name="ck_model_runs_output_budget_source_length",
+        ),
+        CheckConstraint(
+            "finish_reason IS NULL OR char_length(finish_reason) BETWEEN 1 AND 128",
+            name="ck_model_runs_finish_reason_length",
         ),
         CheckConstraint(
             "provider_resolved_model_id IS NULL OR char_length(provider_resolved_model_id) "
@@ -140,6 +202,31 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     provider_id: Mapped[str] = mapped_column(String(64), nullable=False)
     provider_model_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    target_structured_output_capability: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    contract_enforcement_grade: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="UNSUPPORTED", server_default="UNSUPPORTED"
+    )
+    minimum_contract_enforcement_grade: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="UNSUPPORTED", server_default="UNSUPPORTED"
+    )
+    enforcement_metadata_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    contract_strategy_tier: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    contract_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    contextual_constraint_count: Mapped[int | None] = mapped_column(nullable=True)
+    execution_max_output_tokens: Mapped[int | None] = mapped_column(nullable=True)
+    output_budget_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    finish_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    truncation_classification: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="NONE", server_default="NONE"
+    )
+    recovery_attempt_kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="INITIAL", server_default="INITIAL"
+    )
+    recovery_attempt_index: Mapped[int] = mapped_column(
+        nullable=False, default=0, server_default="0"
+    )
     provider_resolved_model_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

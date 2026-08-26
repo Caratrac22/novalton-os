@@ -11,7 +11,11 @@ from sqlalchemy import delete, func, select, update
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
-from novalton_api.infrastructure.providers.contracts import GenerationRequest, GenerationResult
+from novalton_api.infrastructure.providers.contracts import (
+    ContractEnforcementGrade,
+    GenerationRequest,
+    GenerationResult,
+)
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.main import create_app
 from novalton_api.modules.agents.models import AgentDefinition, AgentRun
@@ -190,7 +194,9 @@ def _challenged(result: dict[str, object]) -> dict[str, object]:
     }
 
 
-async def _seed() -> Scope:
+async def _seed(
+    contract_enforcement_grade: str = ContractEnforcementGrade.PROVIDER_ENFORCED.value,
+) -> Scope:
     database = Database.from_settings(Settings.from_environment())
     try:
         async with database.session_factory.begin() as session:
@@ -249,6 +255,8 @@ async def _seed() -> Scope:
                 coding=True,
                 tool_calling=False,
                 structured_output=True,
+                contract_enforcement_grade=contract_enforcement_grade,
+                enforcement_metadata_source="test_governed_workflow",
                 vision=False,
                 input_price_per_million=Decimal("1"),
                 output_price_per_million=Decimal("1"),
@@ -409,6 +417,26 @@ def test_fixed_vertical_workflow_is_durable_and_qa_controls_success(
     handoffs, agent_runs, model_runs = asyncio.run(counts())
     assert (agent_runs, model_runs) == (3, 3)
     assert handoffs >= 3
+
+
+def test_governed_steps_require_provider_enforced_contracts_before_generation() -> None:
+    scope = asyncio.run(_seed(ContractEnforcementGrade.BEST_EFFORT.value))
+    provider = QueueProvider([_manager()])
+    try:
+        created, advance = _create_vertical(scope, provider)
+        result = _advance_fresh(provider, advance)
+        state = asyncio.run(_vertical_state(scope, UUID(str(created["workflow_run"]["id"]))))
+
+        assert (result["outcome"], result["reason_code"]) == (
+            "WORKFLOW_FAILED",
+            "contract_enforcement_unsatisfied",
+        )
+        assert [row[0].status for row in state["rows"]] == ["FAILED", "PENDING", "PENDING"]
+        assert len(state["agent_runs"]) == 1
+        assert state["model_runs"] == []
+        assert provider.calls == []
+    finally:
+        asyncio.run(_cleanup(scope))
 
 
 async def _vertical_state(scope: Scope, run_id: UUID) -> dict[str, object]:

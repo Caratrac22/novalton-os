@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.catalog import CatalogSourceRegistry
-from novalton_api.infrastructure.providers.contracts import CatalogModel
+from novalton_api.infrastructure.providers.contracts import CatalogModel, ContractEnforcementGrade
 from novalton_api.infrastructure.providers.errors import ProviderError
 from novalton_api.modules.model_catalog import repository
 from novalton_api.modules.model_catalog.models import ModelDefinition
@@ -94,6 +94,18 @@ async def refresh_provider(
 
         verified_at = datetime.now(UTC)
         for model in models:
+            grade = model.contract_enforcement_grade
+            if grade is None:
+                grade = (
+                    ContractEnforcementGrade.BEST_EFFORT
+                    if model.structured_output is True
+                    else ContractEnforcementGrade.UNSUPPORTED
+                )
+            enforcement_source = model.enforcement_metadata_source or (
+                "catalog_structured_output_capability"
+                if model.structured_output is True
+                else "catalog_unknown"
+            )
             await repository.upsert_model(
                 session,
                 provider_id=provider_id,
@@ -107,6 +119,8 @@ async def refresh_provider(
                     "coding": model.coding,
                     "tool_calling": model.tool_calling,
                     "structured_output": model.structured_output,
+                    "contract_enforcement_grade": grade.value,
+                    "enforcement_metadata_source": enforcement_source,
                     "vision": model.vision,
                     "input_price_per_million": model.input_price_per_million,
                     "output_price_per_million": model.output_price_per_million,

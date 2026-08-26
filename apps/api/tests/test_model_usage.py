@@ -11,13 +11,16 @@ from sqlalchemy import delete, func, select
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
 from novalton_api.core.exceptions import ApplicationError
-from novalton_api.infrastructure.providers.contracts import GenerationResult
+from novalton_api.infrastructure.providers.contracts import (
+    ContractEnforcementGrade,
+    GenerationResult,
+)
 from novalton_api.infrastructure.providers.errors import ProviderFailure
 from novalton_api.main import create_app
 from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_usage import service
 from novalton_api.modules.model_usage.models import ModelRun
-from novalton_api.modules.model_usage.schemas import ModelRunStart
+from novalton_api.modules.model_usage.schemas import ModelRunExecutionDiagnostics, ModelRunStart
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.workspaces.models import Workspace
@@ -176,6 +179,89 @@ def test_missing_usage_stays_null_and_does_not_fabricate_actual_cost(scope: Scop
     assert completed.total_tokens is None
     assert completed.actual_cost is None
     assert completed.estimated_cost == Decimal("0.0100000000")
+
+
+def test_bounded_contract_diagnostics_are_persisted_and_exposed(scope: Scope) -> None:
+    run = asyncio.run(
+        _start(
+            scope,
+            target_structured_output_capability=True,
+            contract_enforcement_grade=ContractEnforcementGrade.PROVIDER_ENFORCED,
+            minimum_contract_enforcement_grade=ContractEnforcementGrade.PROVIDER_ENFORCED,
+            enforcement_metadata_source="test_provider_policy",
+            recovery_attempt_kind="CONTRACT_REPAIR",
+            recovery_attempt_index=1,
+        )
+    )
+
+    async def complete() -> ModelRun:
+        database = Database.from_settings(Settings())
+        try:
+            async with database.session_factory() as session:
+                await service.set_execution_diagnostics(
+                    session,
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    model_run_id=run.id,
+                    data=ModelRunExecutionDiagnostics(
+                        contract_strategy_tier="STRICT_SCHEMA",
+                        contract_fingerprint="a" * 64,
+                        contextual_constraint_count=2,
+                        execution_max_output_tokens=512,
+                        output_budget_source="contract_complexity",
+                    ),
+                )
+                return await service.mark_succeeded(
+                    session,
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    model_run_id=run.id,
+                    result=_result(model_id=run.provider_model_id, finish_reason="stop"),
+                    truncation_classification="NONE",
+                )
+        finally:
+            await database.dispose()
+
+    completed = asyncio.run(complete())
+    assert completed.finish_reason == "stop"
+    with TestClient(create_app()) as client:
+        response = client.get(
+            f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}/model-runs/{run.id}"
+        )
+    assert response.status_code == 200
+    body = response.json()
+    fields = (
+        "target_structured_output_capability",
+        "contract_enforcement_grade",
+        "minimum_contract_enforcement_grade",
+        "enforcement_metadata_source",
+        "contract_strategy_tier",
+        "contract_fingerprint",
+        "contextual_constraint_count",
+        "execution_max_output_tokens",
+        "output_budget_source",
+        "finish_reason",
+        "truncation_classification",
+        "recovery_attempt_kind",
+        "recovery_attempt_index",
+    )
+    assert {key: body[key] for key in fields} == {
+        "target_structured_output_capability": True,
+        "contract_enforcement_grade": "PROVIDER_ENFORCED",
+        "minimum_contract_enforcement_grade": "PROVIDER_ENFORCED",
+        "enforcement_metadata_source": "test_provider_policy",
+        "contract_strategy_tier": "STRICT_SCHEMA",
+        "contract_fingerprint": "a" * 64,
+        "contextual_constraint_count": 2,
+        "execution_max_output_tokens": 512,
+        "output_budget_source": "contract_complexity",
+        "finish_reason": "stop",
+        "truncation_classification": "NONE",
+        "recovery_attempt_kind": "CONTRACT_REPAIR",
+        "recovery_attempt_index": 1,
+    }
+    assert "content" not in body
+    assert "schema" not in body
 
 
 def test_terminal_state_cannot_reopen_or_be_recompleted(scope: Scope) -> None:

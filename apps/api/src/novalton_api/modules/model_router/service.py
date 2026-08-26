@@ -11,7 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from novalton_api.core.config import get_settings
 from novalton_api.core.context import get_correlation_id
 from novalton_api.core.exceptions import ApplicationError
-from novalton_api.infrastructure.providers.contracts import ProviderManagedRoute
+from novalton_api.infrastructure.providers.contracts import (
+    ContractEnforcementGrade,
+    ProviderManagedRoute,
+)
 from novalton_api.modules.model_catalog import repository
 from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_router.schemas import (
@@ -118,6 +121,20 @@ def _capabilities_satisfied(model: _RoutableTarget, required: frozenset[ModelCap
     return all(getattr(model, capability.value) is True for capability in required)
 
 
+def _enforcement_grade(model: _RoutableTarget) -> ContractEnforcementGrade:
+    if isinstance(model, ProviderManagedRoute):
+        return model.contract_enforcement_grade
+    return ContractEnforcementGrade(model.contract_enforcement_grade)
+
+
+def _structured_output_capability(model: _RoutableTarget) -> bool:
+    return (
+        "structured_output" in model.capabilities
+        if isinstance(model, ProviderManagedRoute)
+        else model.structured_output is True
+    )
+
+
 def _rank_key(candidate: _Candidate, data: RoutingRequest) -> tuple[object, ...]:
     model = candidate.model
     free_rank = (
@@ -169,7 +186,12 @@ def _ranking_reasons(
 
 
 def _no_suitable_reasons(
-    *, available: int, context_rejected: int, capability_rejected: int, free_rejected: int
+    *,
+    available: int,
+    context_rejected: int,
+    capability_rejected: int,
+    enforcement_rejected: int,
+    free_rejected: int,
 ) -> list[RoutingReason]:
     if available == 0:
         return [RoutingReason.NO_AVAILABLE_MODELS]
@@ -178,6 +200,8 @@ def _no_suitable_reasons(
         reasons.append(RoutingReason.CONTEXT_UNSATISFIED)
     if capability_rejected:
         reasons.append(RoutingReason.CAPABILITY_UNSATISFIED)
+    if enforcement_rejected:
+        reasons.append(RoutingReason.CONTRACT_ENFORCEMENT_UNSATISFIED)
     if free_rejected:
         reasons.append(RoutingReason.FREE_ONLY_POOL_EMPTY)
     return reasons or [RoutingReason.CAPABILITY_UNSATISFIED]
@@ -207,7 +231,7 @@ async def simulate(
     )
     forced_pair = get_settings().model_router_force_model_pair
     required = _requirements(data)
-    available = context_rejected = capability_rejected = free_rejected = 0
+    available = context_rejected = capability_rejected = enforcement_rejected = free_rejected = 0
     eligible: list[_Candidate] = []
     for model in canonical_targets.targets:
         if forced_pair is not None and (model.provider_id, model.provider_model_id) != forced_pair:
@@ -225,6 +249,9 @@ async def simulate(
         if not _capabilities_satisfied(model, required):
             capability_rejected += 1
             continue
+        if not _enforcement_grade(model).satisfies(data.minimum_contract_enforcement_grade):
+            enforcement_rejected += 1
+            continue
         if data.cost_policy == CostPolicy.FREE_ONLY and not model.free_allowlisted:
             free_rejected += 1
             continue
@@ -238,9 +265,11 @@ async def simulate(
                 available=available,
                 context_rejected=context_rejected,
                 capability_rejected=capability_rejected,
+                enforcement_rejected=enforcement_rejected,
                 free_rejected=free_rejected,
             ),
             eligible_candidate_count=0,
+            minimum_contract_enforcement_grade=data.minimum_contract_enforcement_grade,
         )
     else:
         preferred = (
@@ -295,6 +324,12 @@ async def simulate(
                 route_source=getattr(selected.model, "source", None),
                 capability_declaration_source=getattr(selected.model, "capability_source", None),
                 capability_policy=getattr(selected.model, "capability_policy", None),
+                structured_output_capability=_structured_output_capability(selected.model),
+                contract_enforcement_grade=_enforcement_grade(selected.model),
+                minimum_contract_enforcement_grade=data.minimum_contract_enforcement_grade,
+                enforcement_metadata_source=getattr(
+                    selected.model, "enforcement_metadata_source", None
+                ),
                 declared_capabilities=(
                     selected.model.capabilities
                     if isinstance(selected.model, ProviderManagedRoute)
@@ -310,6 +345,7 @@ async def simulate(
             ),
             reason_codes=reasons,
             eligible_candidate_count=len(eligible),
+            minimum_contract_enforcement_grade=data.minimum_contract_enforcement_grade,
         )
 
     logger.info(
@@ -322,6 +358,10 @@ async def simulate(
             "target_kind": result.selected.target_kind if result.selected else None,
             "route_source": result.selected.route_source if result.selected else None,
             "capability_policy": result.selected.capability_policy if result.selected else None,
+            "contract_enforcement_grade": (
+                result.selected.contract_enforcement_grade if result.selected else None
+            ),
+            "minimum_contract_enforcement_grade": (result.minimum_contract_enforcement_grade),
             "dynamic_resolution": result.selected.dynamic_resolution if result.selected else None,
             "raw_representation_count": canonical_targets.raw_representation_count,
             "canonical_target_count": len(canonical_targets.targets),

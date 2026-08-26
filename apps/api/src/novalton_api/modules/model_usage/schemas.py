@@ -8,6 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from novalton_api.infrastructure.providers.contracts import ContractEnforcementGrade
+
 
 class ModelRunStatus(StrEnum):
     RUNNING = "RUNNING"
@@ -29,6 +31,23 @@ class ModelRunStart(BaseModel):
     project_id: UUID | None = None
     estimated_cost: Decimal | None = Field(default=None, ge=0, max_digits=20, decimal_places=10)
     currency: Currency | None = None
+    target_structured_output_capability: bool = False
+    contract_enforcement_grade: ContractEnforcementGrade = ContractEnforcementGrade.UNSUPPORTED
+    minimum_contract_enforcement_grade: ContractEnforcementGrade = (
+        ContractEnforcementGrade.UNSUPPORTED
+    )
+    enforcement_metadata_source: str | None = Field(default=None, min_length=1, max_length=64)
+    contract_strategy_tier: str | None = Field(
+        default=None, pattern=r"^(STRICT_SCHEMA|JSON_OBJECT|JSON_INSTRUCTION)$"
+    )
+    contract_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{8,64}$")
+    contextual_constraint_count: int | None = Field(default=None, ge=0, le=16)
+    execution_max_output_tokens: int | None = Field(default=None, ge=1, le=65_536)
+    output_budget_source: str | None = Field(default=None, pattern=r"^[a-z_]{1,64}$")
+    recovery_attempt_kind: str = Field(
+        default="INITIAL", pattern=r"^(INITIAL|TRUNCATION|CONTRACT_REPAIR)$"
+    )
+    recovery_attempt_index: int = Field(default=0, ge=0, le=1)
 
     @model_validator(mode="after")
     def validate_estimate(self) -> "ModelRunStart":
@@ -43,6 +62,18 @@ class ModelRunStart(BaseModel):
         return self
 
 
+class ModelRunExecutionDiagnostics(BaseModel):
+    """Safe contract and budget facts known before one provider generation."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    contract_strategy_tier: str = Field(pattern=r"^(STRICT_SCHEMA|JSON_OBJECT|JSON_INSTRUCTION)$")
+    contract_fingerprint: str = Field(pattern=r"^[a-f0-9]{8,64}$")
+    contextual_constraint_count: int = Field(ge=0, le=16)
+    execution_max_output_tokens: int = Field(ge=1, le=65_536)
+    output_budget_source: str = Field(pattern=r"^[a-z_]{1,64}$")
+
+
 class ModelRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -54,6 +85,19 @@ class ModelRunResponse(BaseModel):
     model_definition_id: UUID | None
     provider_id: str
     provider_model_id: str
+    target_structured_output_capability: bool
+    contract_enforcement_grade: ContractEnforcementGrade
+    minimum_contract_enforcement_grade: ContractEnforcementGrade
+    enforcement_metadata_source: str | None
+    contract_strategy_tier: str | None
+    contract_fingerprint: str | None
+    contextual_constraint_count: int | None
+    execution_max_output_tokens: int | None
+    output_budget_source: str | None
+    finish_reason: str | None
+    truncation_classification: str
+    recovery_attempt_kind: str
+    recovery_attempt_index: int
     provider_resolved_model_id: str | None
     status: ModelRunStatus
     correlation_id: str | None

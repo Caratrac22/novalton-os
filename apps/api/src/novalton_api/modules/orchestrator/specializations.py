@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.exceptions import ApplicationError
+from novalton_api.infrastructure.providers.contracts import ContractEnforcementGrade
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.modules.agents.contract_execution import ResultShapeConstraint
 from novalton_api.modules.agents.contracts import AgentResult, ModelRequirementHints
@@ -130,7 +131,8 @@ async def dispatch(
         prior_result_references=[str(handoff.id)],
         permitted_tools=[],
         model_requirements=ModelRequirementHints(
-            required_capabilities=[step.assigned_capability] if step.assigned_capability else []
+            required_capabilities=[step.assigned_capability] if step.assigned_capability else [],
+            minimum_contract_enforcement_grade=ContractEnforcementGrade.PROVIDER_ENFORCED,
         ),
     )
     if role == "developer_manager":

@@ -42,6 +42,15 @@ class ModelDefinition(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_model_definitions_max_output_tokens_value",
         ),
         CheckConstraint(
+            "contract_enforcement_grade IN "
+            "('UNSUPPORTED', 'BEST_EFFORT', 'PROVIDER_ENFORCED', 'STRICT_SCHEMA_GUARANTEED')",
+            name="ck_model_definitions_contract_enforcement_grade",
+        ),
+        CheckConstraint(
+            "char_length(enforcement_metadata_source) BETWEEN 1 AND 64",
+            name="ck_model_definitions_enforcement_metadata_source_length",
+        ),
+        CheckConstraint(
             "input_price_per_million IS NULL OR input_price_per_million >= 0",
             name="ck_model_definitions_input_price_non_negative",
         ),
@@ -86,6 +95,15 @@ class ModelDefinition(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     coding: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     tool_calling: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     structured_output: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    contract_enforcement_grade: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="UNSUPPORTED", server_default="UNSUPPORTED"
+    )
+    enforcement_metadata_source: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="catalog_unknown",
+        server_default="catalog_unknown",
+    )
     vision: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     input_price_per_million: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
     output_price_per_million: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
