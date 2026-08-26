@@ -10,6 +10,7 @@ from sqlalchemy import delete, func, select
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
+from novalton_api.infrastructure.providers.contracts import ProviderManagedRoute
 from novalton_api.infrastructure.providers.openai_compatible import OpenAICompatibleProvider
 from novalton_api.infrastructure.providers.openrouter_routes import registered_openrouter_routes
 from novalton_api.main import create_app
@@ -100,6 +101,45 @@ def _request(**changes: object) -> dict[str, object]:
     }
     values.update(changes)
     return values
+
+
+def _virtual_route(
+    provider_model_id: str,
+    *,
+    capabilities: frozenset[str] = frozenset({"tool_calling"}),
+    context_window: int | None = 20_000,
+    max_output_tokens: int | None = 512,
+) -> ProviderManagedRoute:
+    return ProviderManagedRoute(
+        provider_id="openrouter",
+        provider_model_id=provider_model_id,
+        display_name=f"Virtual {provider_model_id}",
+        capabilities=capabilities,
+        context_window=context_window,
+        max_output_tokens=max_output_tokens,
+        source="test_provider_adapter",
+        capability_source="test_provider_route",
+    )
+
+
+async def _simulate_with_routes(
+    api: RouterApi,
+    *,
+    data: dict[str, object],
+    virtual_routes: tuple[ProviderManagedRoute, ...],
+) -> object:
+    database = Database.from_settings(Settings())
+    try:
+        async with database.session_factory() as session:
+            return await router_service.simulate(
+                session,
+                tenant_id=api.tenant_id,
+                workspace_id=api.workspace_id,
+                data=router_service.RoutingRequest(**data),
+                virtual_routes=virtual_routes,
+            )
+    finally:
+        await database.dispose()
 
 
 @pytest.fixture
@@ -380,6 +420,91 @@ def test_virtual_route_selects_and_unknown_forced_route_fails_closed(
     unknown = asyncio.run(simulate("openrouter::dynamic/unknown"))
     assert unknown.outcome.value == "NO_SUITABLE_MODEL"
     assert unknown.eligible_candidate_count == 0
+
+
+def test_duplicate_catalog_and_virtual_identity_uses_only_virtual_route_semantics(
+    api: RouterApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A catalog row must not dilute or enrich a trusted virtual route declaration."""
+    asyncio.run(
+        _add_models(
+            _model(
+                "shared-route",
+                context_window=1_000_000,
+                max_output_tokens=1_000_000,
+                vision=True,
+                structured_output=True,
+            )
+        )
+    )
+    route = _virtual_route("shared-route")
+    monkeypatch.setattr(
+        "novalton_api.modules.model_router.service.get_settings",
+        lambda: Settings(model_router_force_model="openrouter::shared-route"),
+    )
+
+    selected = asyncio.run(
+        _simulate_with_routes(
+            api,
+            data=_request(
+                required_capabilities=[],
+                tool_calling_required=True,
+                context_tokens_estimate=20_000,
+            ),
+            virtual_routes=(route,),
+        )
+    )
+
+    assert selected.eligible_candidate_count == 1
+    assert selected.selected is not None
+    assert selected.selected.catalog_model_id is None
+    assert selected.selected.target_kind.value == "VIRTUAL_ROUTE"
+    assert selected.selected.route_source == "test_provider_adapter"
+    assert selected.selected.capability_declaration_source == "test_provider_route"
+    assert selected.selected.declared_capabilities == frozenset({"tool_calling"})
+    assert selected.selected.context_window == 20_000
+    assert selected.selected.max_output_tokens == 512
+
+    vision_rejected = asyncio.run(
+        _simulate_with_routes(
+            api,
+            data=_request(required_capabilities=[], vision_required=True),
+            virtual_routes=(route,),
+        )
+    )
+    assert vision_rejected.outcome.value == "NO_SUITABLE_MODEL"
+    assert vision_rejected.eligible_candidate_count == 0
+    assert vision_rejected.reason_codes == [router_service.RoutingReason.CAPABILITY_UNSATISFIED]
+
+
+def test_unforced_routing_deduplicates_identity_but_retains_distinct_targets(
+    api: RouterApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "novalton_api.modules.model_router.service.get_settings", lambda: Settings()
+    )
+    asyncio.run(
+        _add_models(
+            _model("shared-route", input_price_per_million=Decimal("1")),
+            _model("distinct-catalog", input_price_per_million=Decimal("2")),
+        )
+    )
+
+    result = asyncio.run(
+        _simulate_with_routes(
+            api,
+            data=_request(required_capabilities=[], tool_calling_required=True),
+            virtual_routes=(
+                _virtual_route("shared-route"),
+                _virtual_route("distinct-route"),
+            ),
+        )
+    )
+
+    assert result.eligible_candidate_count == 3
+    assert result.selected is not None
+    assert result.selected.provider_model_id == "distinct-catalog"
+    assert result.selected.target_kind.value == "CATALOG_MODEL"
 
 
 @pytest.mark.parametrize(

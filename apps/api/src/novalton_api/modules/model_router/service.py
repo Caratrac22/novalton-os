@@ -1,4 +1,4 @@
-"""Pure eligibility/ranking over the authoritative persisted catalog."""
+"""Pure eligibility/ranking over canonical provider routing targets."""
 
 import logging
 from dataclasses import dataclass
@@ -29,12 +29,61 @@ from novalton_api.modules.workspaces.queries import get_workspace_by_tenant_and_
 
 logger = logging.getLogger(__name__)
 _MILLION = Decimal(1_000_000)
+_RoutableTarget = ModelDefinition | ProviderManagedRoute
 
 
 @dataclass(frozen=True)
 class _Candidate:
-    model: ModelDefinition | ProviderManagedRoute
+    model: _RoutableTarget
     estimated_cost: Decimal | None
+
+
+@dataclass(frozen=True)
+class _CanonicalTargets:
+    """One authoritative routing target per provider/model identity."""
+
+    targets: tuple[_RoutableTarget, ...]
+    raw_representation_count: int
+    duplicate_identity_count: int
+    provider_managed_precedence_count: int
+
+
+def _canonicalize_targets(
+    catalog_models: list[ModelDefinition], virtual_routes: tuple[ProviderManagedRoute, ...]
+) -> _CanonicalTargets:
+    """Deduplicate provider-neutral identities before any routing decision.
+
+    Provider-managed routes are trusted declarations of dynamic routing semantics, so they
+    deliberately replace a catalog representation with the same identity. Catalog metadata is
+    never merged into the route: a concrete backend must not expand route guarantees.
+    """
+    representations: tuple[_RoutableTarget, ...] = (*catalog_models, *virtual_routes)
+    targets_by_identity: dict[tuple[str, str], _RoutableTarget] = {}
+    representation_counts: dict[tuple[str, str], int] = {}
+    provider_managed_precedence_count = 0
+    for target in representations:
+        identity = (target.provider_id, target.provider_model_id)
+        representation_counts[identity] = representation_counts.get(identity, 0) + 1
+        existing = targets_by_identity.get(identity)
+        if existing is None:
+            targets_by_identity[identity] = target
+        elif isinstance(target, ProviderManagedRoute) and not isinstance(
+            existing, ProviderManagedRoute
+        ):
+            targets_by_identity[identity] = target
+            provider_managed_precedence_count += 1
+        elif isinstance(existing, ProviderManagedRoute) and not isinstance(
+            target, ProviderManagedRoute
+        ):
+            provider_managed_precedence_count += 1
+    return _CanonicalTargets(
+        targets=tuple(
+            identity_target[1] for identity_target in sorted(targets_by_identity.items())
+        ),
+        raw_representation_count=len(representations),
+        duplicate_identity_count=sum(count > 1 for count in representation_counts.values()),
+        provider_managed_precedence_count=provider_managed_precedence_count,
+    )
 
 
 def _requirements(data: RoutingRequest) -> frozenset[ModelCapability]:
@@ -48,7 +97,7 @@ def _requirements(data: RoutingRequest) -> frozenset[ModelCapability]:
     return frozenset(required)
 
 
-def _cost(model: ModelDefinition | ProviderManagedRoute, data: RoutingRequest) -> Decimal | None:
+def _cost(model: _RoutableTarget, data: RoutingRequest) -> Decimal | None:
     if (
         not isinstance(model, ModelDefinition)
         or model.input_price_per_million is None
@@ -63,9 +112,7 @@ def _cost(model: ModelDefinition | ProviderManagedRoute, data: RoutingRequest) -
     return total / _MILLION
 
 
-def _capabilities_satisfied(
-    model: ModelDefinition | ProviderManagedRoute, required: frozenset[ModelCapability]
-) -> bool:
+def _capabilities_satisfied(model: _RoutableTarget, required: frozenset[ModelCapability]) -> bool:
     if isinstance(model, ProviderManagedRoute):
         return all(capability.value in model.capabilities for capability in required)
     return all(getattr(model, capability.value) is True for capability in required)
@@ -155,15 +202,14 @@ async def simulate(
     ):
         raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
 
-    models: list[ModelDefinition | ProviderManagedRoute] = [
-        *(await repository.list_routing_candidates(session)),
-        *virtual_routes,
-    ]
+    canonical_targets = _canonicalize_targets(
+        await repository.list_routing_candidates(session), virtual_routes
+    )
     forced_pair = get_settings().model_router_force_model_pair
     required = _requirements(data)
     available = context_rejected = capability_rejected = free_rejected = 0
     eligible: list[_Candidate] = []
-    for model in models:
+    for model in canonical_targets.targets:
         if forced_pair is not None and (model.provider_id, model.provider_model_id) != forced_pair:
             continue
         if isinstance(model, ModelDefinition) and model.status != "AVAILABLE":
@@ -197,13 +243,17 @@ async def simulate(
             eligible_candidate_count=0,
         )
     else:
-        preferred = next(
-            (
-                candidate
-                for candidate in eligible
-                if getattr(candidate.model, "id", None) == data.preferred_model_id
-            ),
-            None,
+        preferred = (
+            next(
+                (
+                    candidate
+                    for candidate in eligible
+                    if getattr(candidate.model, "id", None) == data.preferred_model_id
+                ),
+                None,
+            )
+            if data.preferred_model_id is not None
+            else None
         )
         if preferred is not None:
             selected = preferred
@@ -273,6 +323,14 @@ async def simulate(
             "route_source": result.selected.route_source if result.selected else None,
             "capability_policy": result.selected.capability_policy if result.selected else None,
             "dynamic_resolution": result.selected.dynamic_resolution if result.selected else None,
+            "raw_representation_count": canonical_targets.raw_representation_count,
+            "canonical_target_count": len(canonical_targets.targets),
+            "duplicate_identity_count": canonical_targets.duplicate_identity_count,
+            "canonical_precedence": (
+                "provider_managed_route"
+                if canonical_targets.provider_managed_precedence_count
+                else "none"
+            ),
             "candidate_count": result.eligible_candidate_count,
             "result_codes": [reason.value for reason in result.reason_codes],
             "correlation_id": get_correlation_id(),
