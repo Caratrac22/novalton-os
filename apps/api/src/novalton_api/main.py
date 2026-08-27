@@ -25,6 +25,7 @@ from novalton_api.modules.agents.routes import definitions_router, runs_router
 from novalton_api.modules.approvals.routes import router as approvals_router
 from novalton_api.modules.developer_manager.routes import router as developer_manager_router
 from novalton_api.modules.developer_worker.routes import router as developer_worker_router
+from novalton_api.modules.memories.routes import router as memories_router
 from novalton_api.modules.model_catalog.routes import router as model_catalog_router
 from novalton_api.modules.model_router.routes import router as model_router_router
 from novalton_api.modules.model_usage.routes import router as model_usage_router
@@ -127,6 +128,7 @@ def create_app(
     application.include_router(model_catalog_router, prefix="/api/v1")
     application.include_router(model_router_router, prefix="/api/v1")
     application.include_router(model_usage_router, prefix="/api/v1")
+    application.include_router(memories_router, prefix="/api/v1")
     application.include_router(plans_router, prefix="/api/v1")
     application.include_router(workflow_runs_router, prefix="/api/v1")
     application.include_router(orchestrator_router, prefix="/api/v1")

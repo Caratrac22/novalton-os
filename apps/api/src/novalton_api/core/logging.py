@@ -44,6 +44,10 @@ _OPTIONAL_CONTEXT_FIELDS = (
     "validation_error_count",
     "validation_error_types",
     "validation_error_paths",
+    "memory_id",
+    "kind",
+    "knowledge_state",
+    "provenance_count",
 )
 
 
