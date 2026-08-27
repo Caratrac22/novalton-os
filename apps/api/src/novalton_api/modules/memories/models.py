@@ -4,7 +4,17 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -51,6 +61,11 @@ class MemoryRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index("ix_memory_records_workspace_kind", "workspace_id", "kind"),
         Index("ix_memory_records_workspace_knowledge_state", "workspace_id", "knowledge_state"),
         Index("ix_memory_records_workspace_project", "workspace_id", "project_id"),
+        Index(
+            "ix_memory_records_statement_fts",
+            text("to_tsvector('simple', statement)"),
+            postgresql_using="gin",
+        ),
     )
 
     workspace_id: Mapped[UUID] = mapped_column(

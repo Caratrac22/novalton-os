@@ -15,6 +15,9 @@ from novalton_api.modules.memories.schemas import (
     MemoryLifecycle,
     MemoryListResponse,
     MemoryResponse,
+    MemoryRetrievalRequest,
+    MemoryRetrievalResponse,
+    MemoryRetrievalResult,
 )
 
 router = APIRouter(
@@ -31,6 +34,20 @@ async def create_memory(
         await service.create_memory(
             session, tenant_id=tenant_id, workspace_id=workspace_id, data=data
         )
+    )
+
+
+@router.post("/retrieve", response_model=MemoryRetrievalResponse)
+async def retrieve_memories(
+    tenant_id: UUID, workspace_id: UUID, data: MemoryRetrievalRequest, session: Session
+) -> MemoryRetrievalResponse:
+    memories, as_of = await service.retrieve_memories(
+        session, tenant_id=tenant_id, workspace_id=workspace_id, data=data
+    )
+    return MemoryRetrievalResponse(
+        items=[MemoryRetrievalResult.model_validate(memory) for memory in memories],
+        limit=data.limit,
+        as_of=as_of,
     )
 
 

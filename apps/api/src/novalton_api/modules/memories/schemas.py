@@ -17,6 +17,7 @@ from pydantic import (
 MemoryStatement = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
 ]
+MemoryQuery = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
 SourceReference = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)
 ]
@@ -147,3 +148,37 @@ class MemoryListResponse(BaseModel):
     items: list[MemoryResponse]
     limit: Annotated[int, Field(ge=1, le=100)]
     offset: Annotated[int, Field(ge=0)]
+
+
+class MemoryRetrievalRequest(BaseModel):
+    """Bounded, provider-neutral context retrieval constraints."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    query: MemoryQuery | None = None
+    project_id: UUID | None = None
+    task_id: UUID | None = None
+    workflow_run_id: UUID | None = None
+    kinds: Annotated[tuple[MemoryKind, ...] | None, Field(max_length=6)] = None
+    knowledge_states: Annotated[tuple[KnowledgeState, ...] | None, Field(max_length=6)] = None
+    lifecycle: Annotated[tuple[MemoryLifecycle, ...] | None, Field(max_length=2)] = None
+    as_of: datetime | None = None
+    min_confidence: Annotated[float | None, Field(ge=0, le=1)] = None
+    min_importance: Annotated[int | None, Field(ge=1, le=5)] = None
+    limit: Annotated[int, Field(ge=1, le=50)] = 10
+
+    @model_validator(mode="after")
+    def validate_retrieval_shape(self) -> "MemoryRetrievalRequest":
+        if self.as_of is not None and self.as_of.tzinfo is None:
+            raise ValueError("as_of must include a timezone")
+        return self
+
+
+class MemoryRetrievalResult(MemoryResponse):
+    lexical_relevance: float | None = None
+
+
+class MemoryRetrievalResponse(BaseModel):
+    items: list[MemoryRetrievalResult]
+    limit: Annotated[int, Field(ge=1, le=50)]
+    as_of: datetime

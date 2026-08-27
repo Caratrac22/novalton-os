@@ -2,7 +2,7 @@ import asyncio
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -58,6 +58,10 @@ def _collection(scope: Scope) -> str:
 
 def _memory(scope: Scope, memory_id: str | UUID) -> str:
     return f"{_collection(scope)}/{memory_id}"
+
+
+def _retrieve(scope: Scope) -> str:
+    return f"{_collection(scope)}/retrieve"
 
 
 async def _seed() -> tuple[Scope, Scope]:
@@ -309,3 +313,177 @@ def test_memory_temporal_values_accept_timezone_and_reject_naive() -> None:
     MemoryCreate.model_validate(payload)
     with pytest.raises(ValidationError, match="timezone"):
         MemoryCreate.model_validate(_valid_payload(valid_from=datetime(2026, 8, 27, 10)))
+
+
+def test_memory_retrieval_is_separate_from_inventory_listing(api: ApiContext) -> None:
+    created = api.client.post(
+        _collection(api.first),
+        json=_valid_payload(statement="retrieval context", lifecycle="ARCHIVED"),
+    ).json()
+
+    listed = api.client.get(_collection(api.first))
+    retrieved = api.client.post(_retrieve(api.first), json={"as_of": "2026-08-27T12:00:00Z"})
+
+    assert [item["id"] for item in listed.json()["items"]] == [created["id"]]
+    assert retrieved.status_code == 200
+    assert retrieved.json()["items"] == []
+
+
+def test_memory_retrieval_captures_one_current_utc_timestamp(api: ApiContext) -> None:
+    valid_from = datetime.now(UTC) - timedelta(seconds=1)
+    created = api.client.post(
+        _collection(api.first),
+        json=_valid_payload(valid_from=valid_from.isoformat()),
+    ).json()
+
+    response = api.client.post(_retrieve(api.first), json={})
+
+    assert response.status_code == 200
+    assert response.json()["as_of"].endswith("Z")
+    assert [item["id"] for item in response.json()["items"]] == [created["id"]]
+
+
+def test_memory_retrieval_scope_and_link_filters_do_not_leak(api: ApiContext) -> None:
+    own = api.client.post(
+        _collection(api.first),
+        json=_valid_payload(
+            statement="first scope retrieval",
+            project_id=str(api.first.project_id),
+            task_id=str(api.first.task_id),
+            workflow_run_id=str(api.first.workflow_run_id),
+        ),
+    ).json()
+    api.client.post(
+        _collection(api.second), json=_valid_payload(statement="second scope retrieval")
+    )
+    as_of = "2026-08-27T12:00:00Z"
+
+    response = api.client.post(
+        _retrieve(api.first),
+        json={
+            "as_of": as_of,
+            "project_id": str(api.first.project_id),
+            "task_id": str(api.first.task_id),
+            "workflow_run_id": str(api.first.workflow_run_id),
+        },
+    )
+    foreign_filter = api.client.post(
+        _retrieve(api.first), json={"as_of": as_of, "project_id": str(api.second.project_id)}
+    )
+    tenant_mismatch = api.client.post(
+        _retrieve(api.first).replace(str(api.first.tenant_id), str(api.second.tenant_id)),
+        json={"as_of": as_of},
+    )
+
+    assert [item["id"] for item in response.json()["items"]] == [own["id"]]
+    assert foreign_filter.json()["items"] == []
+    assert tenant_mismatch.status_code == 404
+
+
+def test_memory_retrieval_temporal_and_admissibility_defaults(api: ApiContext) -> None:
+    payloads = [
+        _valid_payload(statement="valid confirmed", importance=2),
+        _valid_payload(statement="future confirmed", valid_from="2026-08-28T10:00:00Z"),
+        _valid_payload(
+            statement="expired confirmed", valid_to="2026-08-27T11:00:00Z", importance=5
+        ),
+        _valid_payload(statement="obsolete", knowledge_state="OBSOLETE", importance=5),
+        _valid_payload(statement="hypothesis", knowledge_state="HYPOTHESIS", importance=4),
+        _valid_payload(statement="inference", knowledge_state="INFERENCE", importance=3),
+    ]
+    for payload in payloads:
+        assert api.client.post(_collection(api.first), json=payload).status_code == 201
+
+    default = api.client.post(_retrieve(api.first), json={"as_of": "2026-08-27T11:00:00Z"})
+    historical = api.client.post(
+        _retrieve(api.first),
+        json={
+            "as_of": "2026-08-27T11:00:00Z",
+            "knowledge_states": ["OBSOLETE"],
+        },
+    )
+    boundary = api.client.post(_retrieve(api.first), json={"as_of": "2026-08-27T11:00:00Z"})
+
+    assert [item["statement"] for item in default.json()["items"]] == [
+        "hypothesis",
+        "inference",
+        "valid confirmed",
+    ]
+    assert historical.json()["items"][0]["statement"] == "obsolete"
+    assert all(item["statement"] != "expired confirmed" for item in boundary.json()["items"])
+    assert {item["knowledge_state"] for item in default.json()["items"]} >= {
+        "HYPOTHESIS",
+        "INFERENCE",
+    }
+
+
+def test_memory_retrieval_thresholds_ordering_and_contract(api: ApiContext) -> None:
+    low = api.client.post(
+        _collection(api.first),
+        json=_valid_payload(statement="low value", confidence=0.4, importance=2),
+    ).json()
+    high = api.client.post(
+        _collection(api.first),
+        json=_valid_payload(statement="high value", confidence=0.9, importance=5),
+    ).json()
+    response = api.client.post(
+        _retrieve(api.first),
+        json={"as_of": "2026-08-27T12:00:00Z", "min_confidence": 0.8, "min_importance": 4},
+    )
+
+    assert [item["id"] for item in response.json()["items"]] == [high["id"]]
+    item = response.json()["items"][0]
+    assert item["provenance"] == high["provenance"]
+    assert item["knowledge_state"] == "CONFIRMED_FACT"
+    assert item["lexical_relevance"] is None
+    assert low["id"] not in [entry["id"] for entry in response.json()["items"]]
+
+
+def test_memory_retrieval_lexical_search_is_safe_and_deterministic(api: ApiContext) -> None:
+    first = api.client.post(
+        _collection(api.first),
+        json=_valid_payload(statement="Paris budget décision", importance=3),
+    ).json()
+    second = api.client.post(
+        _collection(api.first),
+        json=_valid_payload(statement="Paris budget approval", importance=5),
+    ).json()
+    api.client.post(
+        _collection(api.first), json=_valid_payload(statement="unrelated roadmap", importance=5)
+    )
+    body = {"as_of": "2026-08-27T12:00:00Z", "query": "Paris budget"}
+    response = api.client.post(_retrieve(api.first), json=body)
+    repeated = api.client.post(_retrieve(api.first), json=body)
+    punctuation = api.client.post(
+        _retrieve(api.first), json={"as_of": body["as_of"], "query": "Paris & !budget"}
+    )
+    multilingual = api.client.post(
+        _retrieve(api.first), json={"as_of": body["as_of"], "query": "décision"}
+    )
+
+    assert [item["id"] for item in response.json()["items"]] == [second["id"], first["id"]]
+    assert [item["id"] for item in repeated.json()["items"]] == [second["id"], first["id"]]
+    assert all(item["lexical_relevance"] is not None for item in response.json()["items"])
+    assert punctuation.status_code == 200
+    assert multilingual.json()["items"][0]["id"] == first["id"]
+
+
+def test_memory_retrieval_validation_and_safe_logs(
+    api: ApiContext, caplog: pytest.LogCaptureFixture
+) -> None:
+    query = "private retrieval query"
+    statement = "private retrieval statement"
+    api.client.post(_collection(api.first), json=_valid_payload(statement=statement))
+    with caplog.at_level(logging.INFO, logger="novalton_api.modules.memories.service"):
+        response = api.client.post(
+            _retrieve(api.first), json={"as_of": "2026-08-27T12:00:00Z", "query": query}
+        )
+
+    assert response.status_code == 200
+    assert query not in caplog.text
+    assert statement not in caplog.text
+    assert api.client.post(_retrieve(api.first), json={"limit": 51}).status_code == 422
+    assert (
+        api.client.post(_retrieve(api.first), json={"as_of": "2026-08-27T12:00:00"}).status_code
+        == 422
+    )

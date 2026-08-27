@@ -1,6 +1,7 @@
 """Application rules and transaction boundary for structured memory."""
 
 import logging
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
@@ -14,6 +15,7 @@ from novalton_api.modules.memories.schemas import (
     MemoryCreate,
     MemoryKind,
     MemoryLifecycle,
+    MemoryRetrievalRequest,
 )
 from novalton_api.modules.projects import repository as projects_repository
 from novalton_api.modules.tasks import repository as tasks_repository
@@ -155,3 +157,69 @@ async def list_memories(
         knowledge_state=knowledge_state.value if knowledge_state is not None else None,
         lifecycle=lifecycle.value if lifecycle is not None else None,
     )
+
+
+async def retrieve_memories(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    data: MemoryRetrievalRequest,
+) -> tuple[list[MemoryRecord], datetime]:
+    """Apply retrieval policy above the PostgreSQL lexical implementation."""
+
+    await _require_workspace(session, tenant_id=tenant_id, workspace_id=workspace_id)
+    as_of = data.as_of or datetime.now(UTC)
+    rows = await repository.retrieve_memories(
+        session,
+        workspace_id=workspace_id,
+        as_of=as_of,
+        query=data.query,
+        project_id=data.project_id,
+        task_id=data.task_id,
+        workflow_run_id=data.workflow_run_id,
+        kinds=tuple(item.value for item in data.kinds) if data.kinds is not None else None,
+        knowledge_states=(
+            tuple(item.value for item in data.knowledge_states)
+            if data.knowledge_states is not None
+            else None
+        ),
+        lifecycle=(
+            tuple(item.value for item in data.lifecycle) if data.lifecycle is not None else None
+        ),
+        min_confidence=data.min_confidence,
+        min_importance=data.min_importance,
+        limit=data.limit,
+    )
+    memories: list[MemoryRecord] = []
+    for memory, lexical_relevance in rows:
+        memory.lexical_relevance = lexical_relevance
+        memories.append(memory)
+    active_filters = [
+        name
+        for name, value in (
+            ("project", data.project_id),
+            ("task", data.task_id),
+            ("workflow", data.workflow_run_id),
+            ("kinds", data.kinds),
+            ("knowledge_states", data.knowledge_states),
+            ("lifecycle", data.lifecycle),
+            ("min_confidence", data.min_confidence),
+            ("min_importance", data.min_importance),
+        )
+        if value is not None
+    ]
+    logger.info(
+        "Structured memory retrieved",
+        extra={
+            "event": "memory.retrieved",
+            "workspace_id": str(workspace_id),
+            "query_present": data.query is not None,
+            "requested_limit": data.limit,
+            "returned_count": len(memories),
+            "active_filter_types": active_filters,
+            "lexical_search_used": data.query is not None,
+            "as_of": as_of.isoformat(),
+        },
+    )
+    return memories, as_of
