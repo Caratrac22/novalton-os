@@ -54,6 +54,18 @@ class MemoryRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "lifecycle IN ('ACTIVE', 'ARCHIVED')", name="ck_memory_records_lifecycle_value"
         ),
         CheckConstraint(
+            "sensitivity IN ('PUBLIC', 'INTERNAL', 'SENSITIVE', 'RESTRICTED')",
+            name="ck_memory_records_sensitivity_value",
+        ),
+        CheckConstraint(
+            "model_access IN ('LOCAL_ONLY', 'LOCAL_AND_REMOTE')",
+            name="ck_memory_records_model_access_value",
+        ),
+        CheckConstraint(
+            "sensitivity != 'RESTRICTED' OR model_access = 'LOCAL_ONLY'",
+            name="ck_memory_records_restricted_local_only",
+        ),
+        CheckConstraint(
             "task_id IS NULL OR project_id IS NOT NULL",
             name="ck_memory_records_task_requires_project",
         ),
@@ -92,6 +104,12 @@ class MemoryRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     lifecycle: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")
+    sensitivity: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="INTERNAL", server_default="INTERNAL"
+    )
+    model_access: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="LOCAL_ONLY", server_default="LOCAL_ONLY"
+    )
 
     workspace: Mapped["Workspace"] = relationship()
     provenance: Mapped[list["MemoryProvenance"]] = relationship(

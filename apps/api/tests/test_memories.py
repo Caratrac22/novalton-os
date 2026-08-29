@@ -167,6 +167,24 @@ def test_memory_create_fact_and_decision_and_independent_state(api: ApiContext) 
     assert fact.json()["knowledge_state"] == "CONFIRMED_FACT"
     assert decision.json()["kind"] == "DECISION"
     assert decision.json()["knowledge_state"] == "HYPOTHESIS"
+    assert fact.json()["sensitivity"] == "INTERNAL"
+    assert fact.json()["model_access"] == "LOCAL_ONLY"
+
+
+def test_memory_disclosure_metadata_validates_and_round_trips(api: ApiContext) -> None:
+    response = api.client.post(
+        _collection(api.first),
+        json=_valid_payload(sensitivity="SENSITIVE", model_access="LOCAL_AND_REMOTE"),
+    )
+    assert response.status_code == 201
+    assert response.json()["sensitivity"] == "SENSITIVE"
+    assert response.json()["model_access"] == "LOCAL_AND_REMOTE"
+
+    invalid = api.client.post(
+        _collection(api.first),
+        json=_valid_payload(sensitivity="RESTRICTED", model_access="LOCAL_AND_REMOTE"),
+    )
+    assert invalid.status_code == 422
 
 
 def test_memory_get_and_scoped_list(api: ApiContext) -> None:

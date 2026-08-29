@@ -51,6 +51,7 @@ from novalton_api.modules.agents.schemas import (
 from novalton_api.modules.memories.context_packages import (
     ContextPackage,
     ContextPackageItem,
+    filter_context_package_for_target,
     retrieve_context_package,
 )
 from novalton_api.modules.memories.schemas import (
@@ -277,6 +278,7 @@ def _provider_memory_context(package: ContextPackage) -> dict[str, object]:
             "included_count": package.included_count,
             "omitted_count": package.omitted_count,
             "provenance_omitted_count": package.provenance_omitted_count,
+            "policy_omitted_count": package.policy_omitted_count,
             "as_of": package.as_of.isoformat(),
         },
         "groups": groups,
@@ -510,6 +512,8 @@ async def execute[AgentResultT: AgentResult](
                 workspace_id=workspace_id,
                 request=retrieval_request,
             )
+            # Route using the complete bounded package.  Its size is an upper bound for the
+            # selected-target projection below, so filtering cannot understate required context.
             provider_memory_context = _provider_memory_context(package)
         except Exception:
             logger.warning(
@@ -553,6 +557,11 @@ async def execute[AgentResultT: AgentResult](
         return _response(run, definition=definition, error_code=code)
 
     routed = route.selected
+    if memory_context_request is not None:
+        package = filter_context_package_for_target(
+            package, execution_target_class=routed.execution_target_class
+        )
+        provider_memory_context = _provider_memory_context(package)
     selected = SelectedModelResponse(
         catalog_model_id=routed.catalog_model_id,
         provider_id=routed.provider_id,

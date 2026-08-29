@@ -15,10 +15,13 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from novalton_api.infrastructure.providers.contracts import ExecutionTargetClass
+from novalton_api.modules.memories.disclosure import evaluate_memory_disclosure
 from novalton_api.modules.memories.schemas import (
     KnowledgeState,
     MemoryKind,
     MemoryLifecycle,
+    MemoryModelAccess,
     MemoryRetrievalRequest,
     MemoryRetrievalResult,
 )
@@ -68,6 +71,7 @@ class ContextPackageItem(BaseModel):
     provenance: tuple[ContextPackageProvenance, ...]
     provenance_omitted_count: int = Field(ge=0)
     lexical_relevance: float | None = None
+    model_access: MemoryModelAccess = MemoryModelAccess.LOCAL_ONLY
 
 
 class ContextPackage(BaseModel):
@@ -91,6 +95,7 @@ class ContextPackage(BaseModel):
     included_count: int = Field(ge=0)
     omitted_count: int = Field(ge=0)
     provenance_omitted_count: int = Field(ge=0)
+    policy_omitted_count: int = Field(default=0, ge=0)
     serialized_bytes: int = Field(ge=0)
     bounds: ContextPackageBounds
 
@@ -176,6 +181,7 @@ def _item(
         provenance=retained,
         provenance_omitted_count=len(result.provenance) - len(retained),
         lexical_relevance=result.lexical_relevance,
+        model_access=result.model_access,
     )
 
 
@@ -259,6 +265,38 @@ def assemble_context_package(
     if serialized_bytes > bounds.max_serialized_bytes:
         raise RuntimeError("context package bounds cannot encode package metadata")
     return package.model_copy(update={"serialized_bytes": serialized_bytes})
+
+
+def filter_context_package_for_target(
+    package: ContextPackage, *, execution_target_class: ExecutionTargetClass
+) -> ContextPackage:
+    """Return a bounded frozen package containing only records eligible for the target."""
+    groups: dict[str, tuple[ContextPackageItem, ...]] = {}
+    policy_omitted_count = 0
+    for name in _GROUP_NAMES:
+        eligible: list[ContextPackageItem] = []
+        for item in getattr(package, name):
+            decision = evaluate_memory_disclosure(
+                model_access=item.model_access, execution_target_class=execution_target_class
+            )
+            if decision.eligible:
+                eligible.append(item)
+            else:
+                policy_omitted_count += 1
+        groups[name] = tuple(eligible)
+    filtered = package.model_copy(
+        update={
+            **groups,
+            "included_count": package.included_count - policy_omitted_count,
+            "omitted_count": package.omitted_count + policy_omitted_count,
+            "policy_omitted_count": package.policy_omitted_count + policy_omitted_count,
+            "serialized_bytes": 0,
+        }
+    )
+    serialized_bytes = _serialized_bytes(filtered)
+    if serialized_bytes > filtered.bounds.max_serialized_bytes:
+        raise RuntimeError("filtered context package exceeds the frozen package bound")
+    return filtered.model_copy(update={"serialized_bytes": serialized_bytes})
 
 
 async def retrieve_context_package(

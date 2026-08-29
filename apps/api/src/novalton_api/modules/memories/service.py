@@ -91,6 +91,8 @@ async def create_memory(
         valid_from=data.valid_from,
         valid_to=data.valid_to,
         lifecycle=data.lifecycle.value,
+        sensitivity=data.sensitivity.value,
+        model_access=data.model_access.value,
         provenance=[
             MemoryProvenance(
                 source_type=item.source_type.value,

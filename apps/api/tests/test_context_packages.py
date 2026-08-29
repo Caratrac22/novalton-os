@@ -5,10 +5,12 @@ from uuid import UUID
 
 import pytest
 
+from novalton_api.infrastructure.providers.contracts import ExecutionTargetClass
 from novalton_api.modules.memories.context_packages import (
     DEFAULT_CONTEXT_PACKAGE_BOUNDS,
     ContextPackageBounds,
     assemble_context_package,
+    filter_context_package_for_target,
 )
 from novalton_api.modules.memories.schemas import (
     KnowledgeState,
@@ -38,6 +40,7 @@ def _result(
     workflow_run_id: UUID | None = None,
     provenance_count: int = 1,
     lexical_relevance: float | None = None,
+    model_access: str = "LOCAL_ONLY",
 ) -> MemoryRetrievalResult:
     return MemoryRetrievalResult(
         id=UUID(f"00000000-0000-0000-0000-{index:012d}"),
@@ -53,6 +56,7 @@ def _result(
         valid_from=AS_OF,
         valid_to=None,
         lifecycle="ACTIVE",
+        model_access=model_access,
         created_at=AS_OF,
         updated_at=AS_OF,
         provenance=[
@@ -220,3 +224,20 @@ def test_empty_retrieval_is_a_valid_provider_free_package() -> None:
     assert package.included_count == package.omitted_count == 0
     assert package.facts == package.disputed == ()
     assert package.serialized_bytes <= package.bounds.max_serialized_bytes
+
+
+def test_target_filter_removes_denied_content_without_changing_eligible_order_or_bounds() -> None:
+    local_only = _result(1, statement="local secret", model_access="LOCAL_ONLY")
+    remote_eligible = _result(2, statement="remote safe", model_access="LOCAL_AND_REMOTE")
+    package = _assemble([local_only, remote_eligible])
+
+    filtered = filter_context_package_for_target(
+        package, execution_target_class=ExecutionTargetClass.REMOTE
+    )
+
+    assert [item.memory_id for item in filtered.facts] == [remote_eligible.id]
+    assert filtered.policy_omitted_count == 1
+    assert filtered.included_count == 1
+    assert filtered.omitted_count == 1
+    assert filtered.serialized_bytes <= filtered.bounds.max_serialized_bytes
+    assert "local secret" not in filtered.model_dump_json()

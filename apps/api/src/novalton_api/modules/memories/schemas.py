@@ -48,6 +48,22 @@ class MemoryLifecycle(StrEnum):
     ARCHIVED = "ARCHIVED"
 
 
+class MemorySensitivity(StrEnum):
+    """Human-facing sensitivity label; disclosure is governed by ``model_access``."""
+
+    PUBLIC = "PUBLIC"
+    INTERNAL = "INTERNAL"
+    SENSITIVE = "SENSITIVE"
+    RESTRICTED = "RESTRICTED"
+
+
+class MemoryModelAccess(StrEnum):
+    """Provider-neutral hard boundary for model disclosure."""
+
+    LOCAL_ONLY = "LOCAL_ONLY"
+    LOCAL_AND_REMOTE = "LOCAL_AND_REMOTE"
+
+
 class ProvenanceSourceType(StrEnum):
     USER_STATEMENT = "USER_STATEMENT"
     TOOL_OBSERVATION = "TOOL_OBSERVATION"
@@ -84,6 +100,8 @@ class MemoryCreate(BaseModel):
     valid_from: datetime
     valid_to: datetime | None = None
     lifecycle: MemoryLifecycle = MemoryLifecycle.ACTIVE
+    sensitivity: MemorySensitivity = MemorySensitivity.INTERNAL
+    model_access: MemoryModelAccess = MemoryModelAccess.LOCAL_ONLY
     provenance: Annotated[list[MemoryProvenanceCreate], Field(min_length=1, max_length=16)]
 
     @field_validator("kind", mode="before")
@@ -101,6 +119,16 @@ class MemoryCreate(BaseModel):
     def parse_lifecycle(cls, value: object) -> object:
         return MemoryLifecycle(value) if isinstance(value, str) else value
 
+    @field_validator("sensitivity", mode="before")
+    @classmethod
+    def parse_sensitivity(cls, value: object) -> object:
+        return MemorySensitivity(value) if isinstance(value, str) else value
+
+    @field_validator("model_access", mode="before")
+    @classmethod
+    def parse_model_access(cls, value: object) -> object:
+        return MemoryModelAccess(value) if isinstance(value, str) else value
+
     @model_validator(mode="after")
     def validate_shape(self) -> "MemoryCreate":
         if self.valid_from.tzinfo is None or (
@@ -111,6 +139,11 @@ class MemoryCreate(BaseModel):
             raise ValueError("valid_to must be later than valid_from")
         if self.task_id is not None and self.project_id is None:
             raise ValueError("task_id requires project_id")
+        if (
+            self.sensitivity == MemorySensitivity.RESTRICTED
+            and self.model_access != MemoryModelAccess.LOCAL_ONLY
+        ):
+            raise ValueError("RESTRICTED memory requires LOCAL_ONLY model_access")
         return self
 
 
@@ -139,6 +172,8 @@ class MemoryResponse(BaseModel):
     valid_from: datetime
     valid_to: datetime | None
     lifecycle: MemoryLifecycle
+    sensitivity: MemorySensitivity = MemorySensitivity.INTERNAL
+    model_access: MemoryModelAccess = MemoryModelAccess.LOCAL_ONLY
     created_at: datetime
     updated_at: datetime
     provenance: list[MemoryProvenanceResponse]

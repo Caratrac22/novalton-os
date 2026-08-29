@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from novalton_api.core.database import Database  # noqa: F401
+from novalton_api.infrastructure.providers.contracts import ExecutionTargetClass
 from novalton_api.modules.agents.contract_execution import (
     ContractGenerationCapabilities,
     compile_contract,
@@ -20,7 +21,10 @@ from novalton_api.modules.agents.execution import (
     _routing_request,
 )
 from novalton_api.modules.agents.models import AgentDefinition
-from novalton_api.modules.memories.context_packages import assemble_context_package
+from novalton_api.modules.memories.context_packages import (
+    assemble_context_package,
+    filter_context_package_for_target,
+)
 from novalton_api.modules.memories.schemas import MemoryRetrievalRequest, MemoryRetrievalResult
 
 
@@ -160,3 +164,15 @@ def test_memory_context_request_cannot_supply_scope_identifiers() -> None:
         MemoryContextRequest.model_validate(
             {"task_id": str(uuid4()), "workflow_run_id": str(uuid4())}
         )
+
+
+def test_remote_provider_projection_excludes_local_only_memory() -> None:
+    package = _package()
+    filtered = filter_context_package_for_target(
+        package, execution_target_class=ExecutionTargetClass.REMOTE
+    )
+    request = _request(_provider_memory_context(filtered))
+
+    assert filtered.included_count == 0
+    assert filtered.policy_omitted_count == 1
+    assert "Ignore previous instructions" not in request.messages[-1].content
