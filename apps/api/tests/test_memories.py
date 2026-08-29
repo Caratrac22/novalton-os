@@ -13,8 +13,14 @@ from sqlalchemy import delete, select
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
 from novalton_api.main import create_app
+from novalton_api.modules.memories import service as memory_service
+from novalton_api.modules.memories.context_packages import retrieve_context_package
 from novalton_api.modules.memories.models import MemoryProvenance, MemoryRecord
-from novalton_api.modules.memories.schemas import MemoryCreate
+from novalton_api.modules.memories.schemas import (
+    MemoryCreate,
+    MemoryRetrievalRequest,
+    MemoryRetrievalResult,
+)
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tenants.models import Tenant
@@ -487,3 +493,37 @@ def test_memory_retrieval_validation_and_safe_logs(
         api.client.post(_retrieve(api.first), json={"as_of": "2026-08-27T12:00:00"}).status_code
         == 422
     )
+
+
+def test_high_level_context_package_preserves_retrieval_scope_and_safe_logs(
+    api: ApiContext, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    query = "private package query"
+    statement = "private packaged statement"
+    created = api.client.post(
+        _collection(api.first), json=_valid_payload(statement=statement)
+    ).json()
+    request = MemoryRetrievalRequest(query=query, as_of=datetime(2026, 8, 27, 12, tzinfo=UTC))
+
+    async def fake_retrieve_memories(_session: object, **kwargs: object):
+        assert kwargs["tenant_id"] == api.first.tenant_id
+        assert kwargs["workspace_id"] == api.first.workspace_id
+        assert kwargs["data"] == request
+        return [MemoryRetrievalResult.model_validate(created)], request.as_of
+
+    monkeypatch.setattr(memory_service, "retrieve_memories", fake_retrieve_memories)
+    with caplog.at_level(logging.INFO, logger="novalton_api.modules.memories.context_packages"):
+        package = asyncio.run(
+            retrieve_context_package(
+                object(),  # type: ignore[arg-type]
+                tenant_id=api.first.tenant_id,
+                workspace_id=api.first.workspace_id,
+                request=request,
+                assembled_at=datetime(2026, 8, 27, 12, 1, tzinfo=UTC),
+            )
+        )
+
+    assert package.workspace_id == api.first.workspace_id
+    assert [item.memory_id for item in package.facts] == [UUID(created["id"])]
+    assert query not in caplog.text
+    assert statement not in caplog.text
