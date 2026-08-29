@@ -33,6 +33,10 @@ class ModelDefinition(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_model_definitions_status_value",
         ),
         CheckConstraint(
+            "execution_target_class IN ('LOCAL', 'REMOTE')",
+            name="ck_model_definitions_execution_target_class_value",
+        ),
+        CheckConstraint(
             "context_window IS NULL OR context_window BETWEEN 1 AND 10000000",
             name="ck_model_definitions_context_window_value",
         ),
@@ -89,6 +93,9 @@ class ModelDefinition(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     provider_model_id: Mapped[str] = mapped_column(String(256), nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="UNKNOWN")
+    execution_target_class: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="REMOTE", server_default="REMOTE"
+    )
     context_window: Mapped[int | None] = mapped_column(nullable=True)
     max_output_tokens: Mapped[int | None] = mapped_column(nullable=True)
     reasoning: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

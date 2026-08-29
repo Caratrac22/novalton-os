@@ -55,6 +55,13 @@ class ContractEnforcementGrade(StrEnum):
         return self.rank >= minimum.rank
 
 
+class ExecutionTargetClass(StrEnum):
+    """Trusted, provider-neutral location of the actual execution target."""
+
+    LOCAL = "LOCAL"
+    REMOTE = "REMOTE"
+
+
 class QualificationSource(StrEnum):
     """Trusted provenance for an explicit governed target qualification."""
 
@@ -115,6 +122,7 @@ class CatalogModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     provider_model_id: ModelIdentifier
+    execution_target_class: ExecutionTargetClass
     display_name: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
     ]
@@ -169,6 +177,7 @@ class ProviderManagedRoute:
     provider_id: str
     provider_model_id: str
     display_name: str
+    execution_target_class: ExecutionTargetClass
     enabled: bool = True
     capabilities: frozenset[str] = frozenset()
     capability_policy: str = "DECLARED_GUARANTEE"

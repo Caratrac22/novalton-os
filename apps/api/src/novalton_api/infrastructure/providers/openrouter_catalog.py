@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from novalton_api.infrastructure.providers.contracts import CatalogModel
+from novalton_api.infrastructure.providers.contracts import CatalogModel, ExecutionTargetClass
 from novalton_api.infrastructure.providers.errors import (
     ProviderCancellationError,
     ProviderError,
@@ -197,6 +197,8 @@ class OpenRouterCatalogSource:
         currency = "USD" if input_price is not None or output_price is not None else None
         return CatalogModel(
             provider_model_id=model_id,
+            # This adapter is the trusted OpenRouter cloud-route declaration.
+            execution_target_class=ExecutionTargetClass.REMOTE,
             display_name=name,
             context_window=context,
             max_output_tokens=max_output_tokens,

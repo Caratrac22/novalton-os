@@ -13,6 +13,7 @@ from novalton_api.core.context import get_correlation_id
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.contracts import (
     ContractEnforcementGrade,
+    ExecutionTargetClass,
     GovernedProviderQualification,
     ProviderManagedRoute,
 )
@@ -337,6 +338,7 @@ async def simulate(
                 provider_id=selected.model.provider_id,
                 provider_model_id=selected.model.provider_model_id,
                 display_name=selected.model.display_name,
+                execution_target_class=ExecutionTargetClass(selected.model.execution_target_class),
                 last_verified_at=getattr(selected.model, "last_verified_at", None),
                 estimated_cost=estimate,
                 target_kind=(

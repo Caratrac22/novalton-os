@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 
 from novalton_api.infrastructure.providers.contracts import (
     ContractEnforcementGrade,
+    ExecutionTargetClass,
     QualificationSource,
 )
 from novalton_api.modules.model_catalog.schemas import ProviderIdentifier
@@ -121,6 +122,7 @@ class SelectedCatalogModel(BaseModel):
     provider_id: str
     provider_model_id: str
     display_name: str
+    execution_target_class: ExecutionTargetClass
     last_verified_at: datetime | None = None
     estimated_cost: EstimatedCost | None
     target_kind: RoutableTargetKind = RoutableTargetKind.CATALOG_MODEL

@@ -557,6 +557,7 @@ async def execute[AgentResultT: AgentResult](
         catalog_model_id=routed.catalog_model_id,
         provider_id=routed.provider_id,
         provider_model_id=routed.provider_model_id,
+        execution_target_class=routed.execution_target_class,
         structured_output_capability=routed.structured_output_capability,
         contract_enforcement_grade=routed.contract_enforcement_grade,
         minimum_contract_enforcement_grade=routed.minimum_contract_enforcement_grade,

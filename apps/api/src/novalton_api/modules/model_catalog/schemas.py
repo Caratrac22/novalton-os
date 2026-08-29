@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 
 from novalton_api.infrastructure.providers.contracts import (
     ContractEnforcementGrade,
+    ExecutionTargetClass,
     QualificationSource,
 )
 
@@ -45,6 +46,7 @@ class ModelDefinitionResponse(BaseModel):
     provider_model_id: str
     display_name: str
     status: ModelStatus
+    execution_target_class: ExecutionTargetClass
     context_window: int | None
     max_output_tokens: int | None
     reasoning: bool | None

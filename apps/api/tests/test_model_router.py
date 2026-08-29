@@ -12,6 +12,7 @@ from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
 from novalton_api.infrastructure.providers.contracts import (
     ContractEnforcementGrade,
+    ExecutionTargetClass,
     GovernedProviderQualification,
     ProviderManagedRoute,
     QualificationSource,
@@ -84,6 +85,7 @@ def _model(provider_model_id: str, **changes: object) -> ModelDefinition:
         "provider_model_id": provider_model_id,
         "display_name": provider_model_id,
         "status": "AVAILABLE",
+        "execution_target_class": ExecutionTargetClass.REMOTE.value,
         "context_window": 128_000,
         "reasoning": True,
         "coding": True,
@@ -120,6 +122,7 @@ def _virtual_route(
         provider_id="openrouter",
         provider_model_id=provider_model_id,
         display_name=f"Virtual {provider_model_id}",
+        execution_target_class=ExecutionTargetClass.REMOTE,
         capabilities=capabilities,
         context_window=context_window,
         max_output_tokens=max_output_tokens,
@@ -179,6 +182,7 @@ def test_only_available_catalog_models_with_known_context_and_true_capabilities_
     assert body["outcome"] == "SELECTED"
     assert body["eligible_candidate_count"] == 1
     assert body["selected"]["provider_model_id"] == "eligible"
+    assert body["selected"]["execution_target_class"] == "REMOTE"
 
 
 @pytest.mark.parametrize(
@@ -376,6 +380,7 @@ def test_forced_model_restricts_routing_to_exact_provider_model_pair(
     assert body["eligible_candidate_count"] == 1
     assert body["selected"]["provider_id"] == "other-provider"
     assert body["selected"]["provider_model_id"] == "forced-model"
+    assert body["selected"]["execution_target_class"] == "REMOTE"
 
 
 def test_virtual_route_selects_and_unknown_forced_route_fails_closed(
@@ -419,6 +424,7 @@ def test_virtual_route_selects_and_unknown_forced_route_fails_closed(
     assert selected.eligible_candidate_count == 1
     assert selected.selected is not None
     assert selected.selected.catalog_model_id is None
+    assert selected.selected.execution_target_class == ExecutionTargetClass.REMOTE
     assert selected.selected.target_kind.value == "VIRTUAL_ROUTE"
     assert selected.selected.route_source == "provider_adapter"
     assert selected.selected.context_window == 200_000

@@ -2,6 +2,7 @@
 
 from novalton_api.infrastructure.providers.contracts import (
     ContractEnforcementGrade,
+    ExecutionTargetClass,
     ProviderManagedRoute,
 )
 
@@ -14,6 +15,7 @@ def registered_openrouter_routes(provider_id: str) -> tuple[ProviderManagedRoute
             provider_id=provider_id,
             provider_model_id="openrouter/free",
             display_name="OpenRouter Free Models Router",
+            execution_target_class=ExecutionTargetClass.REMOTE,
             capabilities=frozenset({"tool_calling", "structured_output"}),
             capability_policy="DECLARED_GUARANTEE",
             contract_enforcement_grade=ContractEnforcementGrade.BEST_EFFORT,

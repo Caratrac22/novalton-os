@@ -17,6 +17,7 @@ from novalton_api.infrastructure.providers.catalog import CatalogSourceRegistry
 from novalton_api.infrastructure.providers.contracts import (
     CatalogModel,
     ContractEnforcementGrade,
+    ExecutionTargetClass,
     GovernedProviderQualification,
     QualificationSource,
 )
@@ -99,6 +100,7 @@ def _refresh(api: CatalogApi):
 def _model(model_id: str, **changes: object) -> CatalogModel:
     values: dict[str, object] = {
         "provider_model_id": model_id,
+        "execution_target_class": ExecutionTargetClass.REMOTE,
         "display_name": model_id.title(),
         "context_window": 128_000,
     }
@@ -113,6 +115,7 @@ def test_model_catalog_metadata_has_only_i017_global_schema() -> None:
     assert "workspace_id" not in table.c
     assert table.c.input_price_per_million.type.asdecimal is True
     assert not table.c.free_allowlisted.nullable
+    assert not table.c.execution_target_class.nullable
     names = {constraint.name for constraint in table.constraints}
     assert {
         "uq_model_definitions_provider_id_provider_model_id",
@@ -120,6 +123,7 @@ def test_model_catalog_metadata_has_only_i017_global_schema() -> None:
         "ck_model_definitions_input_price_non_negative",
         "ck_model_definitions_output_price_non_negative",
         "ck_model_definitions_status_value",
+        "ck_model_definitions_execution_target_class_value",
         "ck_model_definitions_contract_enforcement_grade",
         "ck_model_definitions_enforcement_metadata_source_length",
     }.issubset(names)
@@ -173,6 +177,7 @@ def test_successful_refresh_upserts_idempotently_marks_missing_stale_and_lists(
     assert zero["provider_model_id"] == "vendor/free-zero"
     assert zero["max_output_tokens"] == 943718
     assert zero["status"] == "AVAILABLE"
+    assert zero["execution_target_class"] == "REMOTE"
     assert zero["free_allowlisted"] is False
     assert zero["coding"] is None
     assert zero["input_price_per_million"] == "0E-10"

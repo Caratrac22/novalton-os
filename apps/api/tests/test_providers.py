@@ -17,12 +17,14 @@ from novalton_api.infrastructure.providers.contracts import (
     MAX_REQUEST_CHARACTERS,
     CatalogModel,
     ContractEnforcementGrade,
+    ExecutionTargetClass,
     GenerationRequest,
     GenerationResult,
     GovernedProviderQualification,
     JsonObjectRequest,
     Message,
     MessageRole,
+    ProviderManagedRoute,
     ProviderRequestOptions,
     QualificationSource,
     StructuredOutputRequest,
@@ -159,6 +161,7 @@ def test_structured_output_request_is_strict_bounded_and_serializable() -> None:
 def test_catalog_contract_is_strict_conservative_and_decimal() -> None:
     model = CatalogModel(
         provider_model_id="vendor/model-free",
+        execution_target_class=ExecutionTargetClass.REMOTE,
         display_name="Model Free",
         input_price_per_million=Decimal("0"),
         output_price_per_million=Decimal("0.0000000001"),
@@ -170,6 +173,29 @@ def test_catalog_contract_is_strict_conservative_and_decimal() -> None:
     assert model.structured_output is None
     assert model.vision is None
     assert model.input_price_per_million == Decimal("0")
+    assert model.execution_target_class == ExecutionTargetClass.REMOTE
+    with pytest.raises(ValidationError):
+        CatalogModel(provider_model_id="vendor/missing-class", display_name="Missing class")
+    with pytest.raises(ValidationError):
+        CatalogModel(
+            provider_model_id="vendor/invalid-class",
+            display_name="Invalid class",
+            execution_target_class="UNKNOWN",
+        )
+    assert (
+        CatalogModel(
+            provider_model_id="trusted/local-target",
+            display_name="Trusted local target",
+            execution_target_class=ExecutionTargetClass.LOCAL,
+        ).execution_target_class
+        == ExecutionTargetClass.LOCAL
+    )
+    with pytest.raises(TypeError):
+        ProviderManagedRoute(
+            provider_id="local-looking-provider",
+            provider_model_id="localhost-model",
+            display_name="Local-looking route",
+        )
     with pytest.raises(ValidationError):
         CatalogModel(provider_model_id="bad model", display_name="Bad")
     with pytest.raises(ValidationError):
@@ -177,6 +203,7 @@ def test_catalog_contract_is_strict_conservative_and_decimal() -> None:
     with pytest.raises(ValidationError):
         CatalogModel(
             provider_model_id="model",
+            execution_target_class=ExecutionTargetClass.REMOTE,
             display_name="Bad",
             input_price_per_million=Decimal("-1"),
             currency="USD",
@@ -266,6 +293,7 @@ async def test_openrouter_catalog_normalizes_bounded_metadata_without_raw_payloa
     assert models == [
         CatalogModel(
             provider_model_id="vendor/model-free",
+            execution_target_class=ExecutionTargetClass.REMOTE,
             display_name="Vendor Model Free",
             context_window=131072,
             max_output_tokens=943718,
@@ -276,9 +304,14 @@ async def test_openrouter_catalog_normalizes_bounded_metadata_without_raw_payloa
             output_price_per_million=Decimal("1.25000000"),
             currency="USD",
         ),
-        CatalogModel(provider_model_id="~z-ai/glm-latest", display_name="~z-ai/glm-latest"),
+        CatalogModel(
+            provider_model_id="~z-ai/glm-latest",
+            execution_target_class=ExecutionTargetClass.REMOTE,
+            display_name="~z-ai/glm-latest",
+        ),
         CatalogModel(
             provider_model_id="vendor/model-after-alias",
+            execution_target_class=ExecutionTargetClass.REMOTE,
             display_name="vendor/model-after-alias",
         ),
     ]
@@ -371,6 +404,7 @@ async def test_openrouter_catalog_normalizes_live_auto_beta_dynamic_pricing() ->
     assert models == [
         CatalogModel(
             provider_model_id="openrouter/auto-beta",
+            execution_target_class=ExecutionTargetClass.REMOTE,
             display_name="Auto Router (Beta)",
             input_price_per_million=None,
             output_price_per_million=None,

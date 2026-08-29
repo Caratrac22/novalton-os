@@ -17,6 +17,7 @@ from pydantic import (
 
 from novalton_api.infrastructure.providers.contracts import (
     ContractEnforcementGrade,
+    ExecutionTargetClass,
     QualificationSource,
 )
 from novalton_api.modules.agents.contracts import AgentInput, AgentResult
@@ -157,6 +158,7 @@ class SelectedModelResponse(BaseModel):
     catalog_model_id: UUID | None = None
     provider_id: str
     provider_model_id: str
+    execution_target_class: ExecutionTargetClass
     structured_output_capability: bool
     contract_enforcement_grade: ContractEnforcementGrade
     minimum_contract_enforcement_grade: ContractEnforcementGrade
