@@ -708,6 +708,57 @@ def test_i029_full_vertical_integration_across_fresh_app_and_db_boundaries(
         assert forbidden not in serialized_events
 
 
+def test_i039_operator_view_is_scoped_bounded_and_reports_safe_execution_metadata(
+    scope: Scope,
+) -> None:
+    provider = QueueProvider([_manager(), _worker(), _qa("PASS_WITH_WARNINGS")])
+    created, advance = _create_vertical(scope, provider)
+    for _ in range(3):
+        _advance_fresh(provider, advance)
+    run_id = str(created["workflow_run"]["id"])
+    url = (
+        f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+        f"/workflow-runs/{run_id}/operator-view"
+    )
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        response = client.get(url)
+        cross_scope = client.get(url.replace(str(scope.tenant_id), str(uuid4())))
+
+    assert response.status_code == 200, response.text
+    assert cross_scope.status_code == 404
+    body = response.json()
+    assert body["workflow_run"]["status"] == "COMPLETED"
+    assert body["qa_verdict"] == "PASS_WITH_WARNINGS"
+    assert [item["step_key"] for item in body["workflow_plan"]["steps"]] == [
+        "manager_plan",
+        "developer_execute",
+        "qa_validate",
+    ]
+    assert [item["specialization_role"] for item in body["step_details"]] == [
+        "developer_manager",
+        "developer_worker",
+        "qa_worker",
+    ]
+    model_runs = [item["agent_run"]["model_runs"] for item in body["step_details"]]
+    assert all(len(items) == 1 for items in model_runs)
+    assert all(items[0]["status"] == "SUCCEEDED" for items in model_runs)
+    assert all(items[0]["total_tokens"] == 15 for items in model_runs)
+    assert all(items[0]["recovery_attempt_kind"] == "INITIAL" for items in model_runs)
+    serialized = json.dumps(body, sort_keys=True)
+    for forbidden in (
+        "I029_SECRET_OBJECTIVE",
+        "Bounded metadata result",
+        "apps/api/example.py",
+        "requested_actions",
+        "provider_request_id",
+        "correlation_id",
+        "handoff",
+        "memory",
+        "prompt",
+    ):
+        assert forbidden.casefold() not in serialized.casefold()
+
+
 @pytest.mark.parametrize(
     ("verdict", "reason"), [("FAIL", "qa_failed"), ("INCONCLUSIVE", "qa_inconclusive")]
 )
@@ -751,6 +802,42 @@ def test_i029_meaningful_challenge_stops_downstream_execution(
     assert repeated["reason_code"] == "agent_challenge"
     assert repeated["challenge_level"] == "HUMAN_REVIEW_RECOMMENDED"
     assert len(provider.calls) == expected_runs
+
+
+def test_i039_operator_view_exposes_pending_challenge_without_human_reason_or_authority(
+    scope: Scope,
+) -> None:
+    provider = QueueProvider([_challenged(_manager())])
+    created, advance = _create_vertical(scope, provider)
+    result = _advance_fresh(provider, advance)
+    run_id = str(created["workflow_run"]["id"])
+    url = (
+        f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+        f"/workflow-runs/{run_id}/operator-view"
+    )
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        response = client.get(url)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    active = next(item for item in body["step_details"] if item["challenge"] is not None)
+    assert active["workflow_step_run_id"] == result["workflow_step_run_id"]
+    assert active["challenge"] == {
+        "challenge_level": "HUMAN_REVIEW_RECOMMENDED",
+        "result_status": "COMPLETED",
+        "specialization_role": "developer_manager",
+        "qa_verdict": None,
+        "decision": None,
+        "decided_at": None,
+    }
+    assert body["workflow_run"]["status"] == "RUNNING"
+    assert (
+        next(
+            item
+            for item in body["workflow_run"]["step_runs"]
+            if item["id"] == active["workflow_step_run_id"]
+        )["status"]
+        == "RUNNING"
+    )
 
 
 def _resolution_url(scope: Scope, run_id: str, step_run_id: str) -> str:

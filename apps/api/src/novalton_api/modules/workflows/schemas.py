@@ -3,7 +3,7 @@
 import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -14,6 +14,12 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from novalton_api.infrastructure.providers.contracts import ExecutionTargetClass
+from novalton_api.modules.agents.contracts import AgentResultStatus, ChallengeLevel
+from novalton_api.modules.agents.schemas import AgentRunStatus
+from novalton_api.modules.model_usage.schemas import ModelRunStatus
+from novalton_api.modules.qa_worker.contracts import QAVerdict
 
 Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 Summary = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
@@ -221,3 +227,82 @@ class DevelopmentWorkflowCreate(BaseModel):
 class DevelopmentWorkflowResponse(BaseModel):
     workflow_plan: WorkflowPlanResponse
     workflow_run: WorkflowRunResponse
+
+
+class OperatorChallengeResponse(BaseModel):
+    """Safe persisted challenge facts; agent and human free text are intentionally absent."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    challenge_level: ChallengeLevel
+    result_status: AgentResultStatus
+    specialization_role: Literal["developer_manager", "developer_worker", "qa_worker"] | None
+    qa_verdict: QAVerdict | None
+    decision: Literal["ACCEPT_RESULT", "REJECT_RESULT"] | None
+    decided_at: datetime | None
+
+
+class OperatorModelRunResponse(BaseModel):
+    """Bounded accounting and route identity for one provider attempt."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: UUID
+    status: ModelRunStatus
+    provider_id: str
+    provider_model_id: str
+    execution_target_class: ExecutionTargetClass | None
+    input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+    duration_ms: float | None
+    failure_code: str | None
+    recovery_attempt_kind: Literal["INITIAL", "TRUNCATION", "CONTRACT_REPAIR"]
+    recovery_attempt_index: int
+
+
+class OperatorAgentRunResponse(BaseModel):
+    """Safe AgentRun lifecycle fields and its bounded model-attempt diagnostics."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: UUID
+    status: AgentRunStatus
+    agent_name: str
+    agent_slug: str
+    failure_code: str | None
+    model_runs: list[OperatorModelRunResponse]
+
+
+class OperatorStepDetailResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    workflow_step_run_id: UUID
+    specialization_role: Literal["developer_manager", "developer_worker", "qa_worker"] | None
+    challenge: OperatorChallengeResponse | None
+    agent_run: OperatorAgentRunResponse | None
+
+
+class OperatorWorkflowRunResponse(BaseModel):
+    """Minimal workflow lifecycle state without request-correlation or scope internals."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: UUID
+    task_id: UUID
+    workflow_plan_id: UUID
+    plan_version: int
+    status: WorkflowRunStatus
+    failure_code: str | None
+    step_runs: list[WorkflowStepRunResponse]
+
+
+class OperatorWorkflowResponse(BaseModel):
+    """Read-only operator projection over authoritative persisted workflow state."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    workflow_plan: WorkflowPlanResponse
+    workflow_run: OperatorWorkflowRunResponse
+    step_details: list[OperatorStepDetailResponse]
+    qa_verdict: QAVerdict | None

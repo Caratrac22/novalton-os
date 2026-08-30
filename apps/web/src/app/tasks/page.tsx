@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { StatusBadge } from "@/components/status-badge";
+import { TaskCreateForm } from "@/components/task-create-form";
+import { TaskWorkspace } from "@/components/task-workspace";
 import { getProjects } from "@/lib/api/projects";
 import { getProjectTasks, type TaskStatus } from "@/lib/api/tasks";
-import { getWorkflowPlan, getWorkflowRuns } from "@/lib/api/workflows";
-import { TaskWorkspace } from "@/components/task-workspace";
+import { getOperatorWorkflow, getWorkflowRuns } from "@/lib/api/workflows";
 import { formatDateTime, humanize, preview } from "@/lib/format";
 
 export const metadata: Metadata = { title: "Tasks" };
@@ -15,23 +16,29 @@ export default async function TasksPage({ searchParams }: Readonly<{ searchParam
   let projects;
   try { projects = await getProjects(); } catch { projects = null; }
   const params = await searchParams;
-  const requested = params.project;
-  const requestedId = typeof requested === "string" ? requested : undefined;
+  const requestedId = typeof params.project === "string" ? params.project : undefined;
   const selected = projects?.find((project) => project.id === requestedId) ?? projects?.[0];
-  const requestedTask = params.task;
-  const requestedTaskId = typeof requestedTask === "string" ? requestedTask : undefined;
   let tasks = null;
   if (selected) { try { tasks = await getProjectTasks(selected.id); } catch { tasks = null; } }
+  const requestedTaskId = typeof params.task === "string" ? params.task : undefined;
   const selectedTask = tasks?.find((task) => task.id === requestedTaskId) ?? tasks?.[0];
   let workflowRuns = null;
   if (selectedTask) { try { workflowRuns = (await getWorkflowRuns()).filter((run) => run.task_id === selectedTask.id); } catch { workflowRuns = null; } }
   const initialRun = workflowRuns?.at(-1) ?? null;
-  let initialPlan = null;
-  let planUnavailable = false;
-  if (initialRun) { try { initialPlan = await getWorkflowPlan(initialRun.workflow_plan_id); } catch { planUnavailable = true; } }
+  let initialWorkflow = null;
+  let workflowUnavailable = false;
+  if (initialRun) { try { initialWorkflow = await getOperatorWorkflow(initialRun.id); } catch { workflowUnavailable = true; } }
+
   return <div className="page-stack">
-    <section className="page-heading" aria-labelledby="tasks-title"><p className="eyebrow">Execution</p><div><h1 id="tasks-title">Tasks</h1><p>Read-only user task state, loaded for one explicitly selected project.</p></div></section>
-    {projects === null ? <StatePanel title="Tasks unavailable">The project service could not be reached or returned an invalid response.</StatePanel> : projects.length === 0 ? <StatePanel title="No projects yet">Create a project through the API before viewing project-scoped tasks.</StatePanel> : <><nav className="project-selector" aria-label="Select project"><span>Project</span><div>{projects.map((project) => <Link key={project.id} href={`/tasks?project=${project.id}`} aria-current={project.id === selected?.id ? "page" : undefined}>{project.name}</Link>)}</div></nav>{tasks === null ? <StatePanel title="Tasks unavailable">Tasks for {selected?.name} could not be reached or returned an invalid response.</StatePanel> : tasks.length === 0 ? <StatePanel title="No tasks in this project">{selected?.name} has no tasks to display.</StatePanel> : <><section aria-label={`Tasks for ${selected?.name}`} className="record-list">{tasks.map((task) => { const description = preview(task.description); return <article className={`record-card task-card ${task.id === selectedTask?.id ? "is-selected" : ""}`} key={task.id}><div className="record-card-heading"><div><p className="record-project">{selected?.name}</p><h2>{task.title}</h2></div><StatusBadge tone={tones[task.status]}>{humanize(task.status)}</StatusBadge></div>{description ? <p className="record-description">{description}</p> : <p className="record-description record-description-empty">No description provided.</p>}<dl className="record-meta"><div><dt>Created</dt><dd><time dateTime={task.createdAt}>{formatDateTime(task.createdAt)}</time></dd></div><div><dt>Updated</dt><dd><time dateTime={task.updatedAt}>{formatDateTime(task.updatedAt)}</time></dd></div></dl><Link className="card-action" href={`/tasks?project=${selected?.id}&task=${task.id}`} aria-current={task.id === selectedTask?.id ? "page" : undefined}>{task.id === selectedTask?.id ? "Selected task" : "Open task"} <span aria-hidden="true">→</span></Link></article>; })}</section>{selectedTask ? <><div className="context-line"><span>Project / {selected?.name}</span><strong>Task / {selectedTask.title}</strong></div>{workflowRuns === null ? <StatePanel title="Workflow state unavailable">The task is visible, but its workflow state could not be loaded.</StatePanel> : planUnavailable ? <StatePanel title="Workflow plan unavailable">An existing workflow run was found, but its plan could not be read. No new workflow will be created from this view.</StatePanel> : <TaskWorkspace projectId={selected?.id || ""} taskId={selectedTask.id} taskTitle={selectedTask.title} initialRun={initialRun} initialPlan={initialPlan} />}</> : null}</>}</>}
+    <section className="page-heading" aria-labelledby="tasks-title"><p className="eyebrow">Operator console</p><div><h1 id="tasks-title">Tasks</h1><p>Create an objective, then launch and control one fixed governed development workflow.</p></div></section>
+    {projects === null ? <StatePanel title="Tasks unavailable">The project service could not be reached or returned an invalid response.</StatePanel> : projects.length === 0 ? <StatePanel title="No projects yet">Create a project from the Projects page before adding a task.</StatePanel> : <>
+      <nav className="project-selector" aria-label="Select project"><span>Project</span><div>{projects.map((project) => <Link key={project.id} href={`/tasks?project=${project.id}`} aria-current={project.id === selected?.id ? "page" : undefined}>{project.name}</Link>)}</div></nav>
+      {selected ? <TaskCreateForm projectId={selected.id} /> : null}
+      {tasks === null ? <StatePanel title="Tasks unavailable">Tasks for {selected?.name} could not be reached or returned an invalid response.</StatePanel> : tasks.length === 0 ? <StatePanel title="No tasks in this project">Create the first task above. No API request or UUID copying is required.</StatePanel> : <>
+        <section aria-label={`Tasks for ${selected?.name}`} className="record-list">{tasks.map((task) => { const description = preview(task.description); return <article className={`record-card task-card ${task.id === selectedTask?.id ? "is-selected" : ""}`} key={task.id}><div className="record-card-heading"><div><p className="record-project">{selected?.name}</p><h2>{task.title}</h2></div><StatusBadge tone={tones[task.status]}>{humanize(task.status)}</StatusBadge></div>{description ? <p className="record-description">{description}</p> : <p className="record-description record-description-empty">No description provided.</p>}<dl className="record-meta"><div><dt>Created</dt><dd><time dateTime={task.createdAt}>{formatDateTime(task.createdAt)}</time></dd></div><div><dt>Updated</dt><dd><time dateTime={task.updatedAt}>{formatDateTime(task.updatedAt)}</time></dd></div></dl><Link className="card-action" href={`/tasks?project=${selected?.id}&task=${task.id}`} aria-current={task.id === selectedTask?.id ? "page" : undefined}>{task.id === selectedTask?.id ? "Selected task" : "Open task"} <span aria-hidden="true">→</span></Link></article>; })}</section>
+        {selectedTask ? <><div className="context-line"><span>Project / {selected?.name}</span><strong>Task / {selectedTask.title}</strong></div>{workflowRuns === null ? <StatePanel title="Workflow state unavailable">The task is visible, but its workflow state could not be loaded.</StatePanel> : workflowUnavailable ? <StatePanel title="Operator view unavailable">An existing workflow was found, but its safe operator state could not be read.</StatePanel> : <TaskWorkspace projectId={selected?.id || ""} taskId={selectedTask.id} taskTitle={selectedTask.title} initialWorkflow={initialWorkflow} />}</> : null}
+      </>}
+    </>}
   </div>;
 }
 

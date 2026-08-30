@@ -7,11 +7,12 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.database import get_async_session
-from novalton_api.modules.workflows import repository, service
+from novalton_api.modules.workflows import operator_view, repository, service
 from novalton_api.modules.workflows.models import WorkflowPlan, WorkflowRun
 from novalton_api.modules.workflows.schemas import (
     DevelopmentWorkflowCreate,
     DevelopmentWorkflowResponse,
+    OperatorWorkflowResponse,
     WorkflowPlanCreate,
     WorkflowPlanListResponse,
     WorkflowPlanResponse,
@@ -219,4 +220,16 @@ async def get_run(
         await service.get_run(
             session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=workflow_run_id
         ),
+    )
+
+
+@runs_router.get("/{workflow_run_id}/operator-view", response_model=OperatorWorkflowResponse)
+async def get_operator_workflow(
+    tenant_id: UUID, workspace_id: UUID, workflow_run_id: UUID, session: Session
+) -> OperatorWorkflowResponse:
+    return await operator_view.get_operator_view(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        workflow_run_id=workflow_run_id,
     )
