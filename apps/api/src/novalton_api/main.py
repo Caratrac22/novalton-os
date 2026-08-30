@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from novalton_api import __version__
 from novalton_api.api.v1.health import router as health_router
 from novalton_api.core.config import get_settings
-from novalton_api.core.database import Database
+from novalton_api.core.database import Database, verify_database_identity
 from novalton_api.core.exceptions import register_exception_handlers
 from novalton_api.core.logging import configure_logging
 from novalton_api.core.middleware import CorrelationIdMiddleware
@@ -44,6 +44,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     """Configure process-level concerns at application startup."""
     settings = get_settings()
     configure_logging(settings.log_level)
+    await verify_database_identity(settings)
     database = Database.from_settings(settings)
     application.state.database = database
     owns_provider_registry = not hasattr(application.state, "provider_registry")

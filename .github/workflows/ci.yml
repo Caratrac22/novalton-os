@@ -12,6 +12,24 @@ jobs:
     defaults:
       run:
         working-directory: apps/api
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: novalton_test
+          POSTGRES_USER: novalton
+          POSTGRES_PASSWORD: novalton_test_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U novalton -d novalton_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      NOVALTON_ENV: test
+      DATABASE_URL: postgresql://novalton:novalton_test_only@127.0.0.1:5432/novalton_test
+      NOVALTON_TEST_DATABASE_URL: postgresql://novalton:novalton_test_only@127.0.0.1:5432/novalton_test
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

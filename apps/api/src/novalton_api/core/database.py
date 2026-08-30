@@ -13,9 +13,17 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
-from novalton_api.core.config import Settings
+from novalton_api.core.config import (
+    Settings,
+    database_name_from_url,
+    validate_profile_database_urls,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class DatabaseIdentityError(RuntimeError):
+    """Raised when the live PostgreSQL identity does not match the selected profile."""
 
 
 class Base(DeclarativeBase):
@@ -95,6 +103,35 @@ class Database:
         """Close all pooled connections owned by this database instance."""
         await self.engine.dispose()
         logger.info("Database engine disposed", extra={"event": "database.disposed"})
+
+
+async def verify_database_identity(settings: Settings) -> str:
+    """Prove the selected profile against a fresh PostgreSQL connection, without secrets."""
+    validate_profile_database_urls(
+        environment=settings.environment,
+        database_url=settings.database_url,
+        test_database_url=settings.test_database_url,
+    )
+    expected = database_name_from_url(settings.database_url)
+    database = Database.from_settings(settings)
+    try:
+        async with database.engine.connect() as connection:
+            actual = (await connection.execute(text("SELECT current_database()"))).scalar_one()
+    except Exception:
+        raise DatabaseIdentityError("Unable to verify PostgreSQL database identity.") from None
+    finally:
+        await database.dispose()
+    if actual != expected:
+        raise DatabaseIdentityError(
+            "PostgreSQL database identity does not match the selected profile."
+        )
+    if settings.environment == "test" and actual != "novalton_test":
+        raise DatabaseIdentityError("Refusing test operation: PostgreSQL is not novalton_test.")
+    if settings.environment == "development" and actual.endswith("_test"):
+        raise DatabaseIdentityError(
+            "Refusing development operation: PostgreSQL is a test database."
+        )
+    return actual
 
 
 def get_database(request: Request) -> Database:

@@ -16,7 +16,23 @@ Create the ignored local environment file from the safe development template:
 make setup-env
 ```
 
-The command is repeatable and never overwrites an existing `.env`. The documented defaults bind infrastructure ports to localhost and are intended only for local development. No provider credentials are required.
+The command is repeatable and never overwrites an existing `.env`. `.env` is the development
+profile only; it must never point to a database ending in `_test`. The documented defaults bind
+infrastructure ports to localhost and are intended only for local development. No provider
+credentials are required.
+
+For database-backed tests, create the separate ignored test profile once:
+
+```bash
+make setup-test-env
+```
+
+The copied URLs contain deliberately non-working PostgreSQL credential placeholders. Before running
+tests, replace the credentials in both URLs with the same trusted local Compose/development role
+and password (unless you deliberately configured a separate local role); retain
+`novalton_test` as the database name and keep both URL values identical. The test database remains
+isolated by its database identity even when it shares the development role. Never copy a provider
+secret into the test profile unless that test specifically needs it.
 
 ## Start infrastructure
 
@@ -42,7 +58,7 @@ Ports and development credentials can be changed in `.env`. Docker Compose remai
 ```bash
 python3 -m venv apps/api/.venv
 apps/api/.venv/bin/pip install -e './apps/api[dev]'
-apps/api/.venv/bin/uvicorn novalton_api.main:app --reload --app-dir apps/api/src
+make dev-api
 ```
 
 The liveness endpoint is available at <http://127.0.0.1:8000/api/v1/health>. PostgreSQL
@@ -141,6 +157,15 @@ Run each application check set independently:
 make backend-check
 make frontend-check
 ```
+
+`backend-check` delegates database-backed pytest to `make test`, which uses the isolated test
+profile. Use `make dev-shell` or `make test-shell` to open a clean validated child shell; exiting
+returns to the parent shell unchanged. Do not run DB-backed tests in a development shell, live
+acceptance in a test shell, or manually repoint `DATABASE_URL` to bypass these guards.
+
+`make dev-db-check` and `make test-db-check` safely report the selected profile and live database
+identity without printing a URL or credentials. Alembic commands are development-profile commands;
+the matching test-safe commands are `make test-db-upgrade` and `make test-db-current`.
 
 `backend-check` runs Ruff linting, Ruff formatting validation, and pytest. `frontend-check` runs ESLint, TypeScript checking, and a production Next.js build. Audit installed Python dependencies and the npm lockfile with:
 

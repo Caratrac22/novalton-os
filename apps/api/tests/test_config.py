@@ -6,6 +6,7 @@ SETTING_VARIABLES = (
     "NOVALTON_ENV",
     "NOVALTON_LOG_LEVEL",
     "DATABASE_URL",
+    "NOVALTON_TEST_DATABASE_URL",
     "REDIS_URL",
     "QDRANT_URL",
     "NOVALTON_OPENAI_COMPATIBLE_BASE_URL",
@@ -29,6 +30,9 @@ SETTING_VARIABLES = (
 def clear_settings_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for variable in SETTING_VARIABLES:
         monkeypatch.delenv(variable, raising=False)
+    # The session fixture redirects direct Settings() use to novalton_test. These unit tests
+    # intentionally exercise the independent development profile instead.
+    monkeypatch.setenv("DATABASE_URL", "postgresql://db.example/novalton")
     get_settings.cache_clear()
 
 
@@ -121,9 +125,11 @@ def test_invalid_governed_provider_qualification_configuration_is_rejected(
         Settings.from_environment()
 
 
-def test_settings_load_supported_environment_values(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_settings_load_supported_development_environment_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     clear_settings_environment(monkeypatch)
-    monkeypatch.setenv("NOVALTON_ENV", "test")
+    monkeypatch.setenv("NOVALTON_ENV", "development")
     monkeypatch.setenv("NOVALTON_LOG_LEVEL", "warning")
     monkeypatch.setenv("DATABASE_URL", "postgresql://db.example/novalton")
     monkeypatch.setenv("REDIS_URL", "rediss://redis.example/1")
@@ -131,11 +137,74 @@ def test_settings_load_supported_environment_values(monkeypatch: pytest.MonkeyPa
 
     settings = Settings.from_environment()
 
-    assert settings.environment == "test"
+    assert settings.environment == "development"
     assert settings.log_level == "WARNING"
     assert settings.database_url == "postgresql://db.example/novalton"
     assert settings.redis_url == "rediss://redis.example/1"
     assert settings.qdrant_url == "https://qdrant.example"
+
+
+@pytest.mark.parametrize(
+    ("database_url", "test_database_url", "message"),
+    [
+        ("postgresql://db.example/novalton_test", None, "test database"),
+        ("postgresql://db.example/anything_test", None, "test database"),
+        (
+            "postgresql://db.example/novalton",
+            "postgresql://db.example/novalton",
+            "matches test database",
+        ),
+    ],
+)
+def test_development_profile_rejects_test_database_combinations(
+    monkeypatch: pytest.MonkeyPatch,
+    database_url: str,
+    test_database_url: str | None,
+    message: str,
+) -> None:
+    clear_settings_environment(monkeypatch)
+    monkeypatch.setenv("NOVALTON_ENV", "development")
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    if test_database_url is not None:
+        monkeypatch.setenv("NOVALTON_TEST_DATABASE_URL", test_database_url)
+
+    with pytest.raises(SettingsError, match=message) as error:
+        Settings.from_environment()
+
+    assert "db.example" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("database_url", "test_database_url"),
+    [
+        ("postgresql://db.example/novalton_test", None),
+        ("postgresql://db.example/novalton_test", "postgresql://db.example/other_test"),
+        ("postgresql://db.example/other_test", "postgresql://db.example/other_test"),
+    ],
+)
+def test_test_profile_requires_the_exact_configured_novalton_test_database(
+    monkeypatch: pytest.MonkeyPatch, database_url: str, test_database_url: str | None
+) -> None:
+    clear_settings_environment(monkeypatch)
+    monkeypatch.setenv("NOVALTON_ENV", "test")
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    if test_database_url is not None:
+        monkeypatch.setenv("NOVALTON_TEST_DATABASE_URL", test_database_url)
+
+    with pytest.raises(SettingsError) as error:
+        Settings.from_environment()
+
+    assert "db.example" not in str(error.value)
+
+
+def test_test_profile_accepts_exact_isolated_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    clear_settings_environment(monkeypatch)
+    url = "postgresql://db.example/novalton_test"
+    monkeypatch.setenv("NOVALTON_ENV", "test")
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("NOVALTON_TEST_DATABASE_URL", url)
+
+    assert Settings.from_environment().test_database_url == url
 
 
 @pytest.mark.parametrize(

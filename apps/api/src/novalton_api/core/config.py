@@ -31,6 +31,41 @@ class SettingsError(RuntimeError):
     """Raised when application configuration is invalid."""
 
 
+def database_name_from_url(value: str) -> str:
+    """Return the PostgreSQL database name without ever rendering URL credentials."""
+    parsed = urlparse(value)
+    return parsed.path.removeprefix("/")
+
+
+def validate_profile_database_urls(
+    *, environment: str, database_url: str, test_database_url: str | None
+) -> None:
+    """Fail closed on profile/database combinations before any connection is opened."""
+    database_name = database_name_from_url(database_url)
+    if environment == "development":
+        if database_name == "novalton_test" or database_name.endswith("_test"):
+            raise SettingsError(
+                "Refusing development operation: DATABASE_URL targets a test database."
+            )
+        if test_database_url is not None and database_url == test_database_url:
+            raise SettingsError(
+                "Refusing development operation: DATABASE_URL matches test database."
+            )
+        return
+    if environment == "test":
+        if test_database_url is None:
+            raise SettingsError("Refusing test operation: NOVALTON_TEST_DATABASE_URL is required.")
+        if database_url != test_database_url:
+            raise SettingsError("Refusing test operation: DATABASE_URL must match test database.")
+        if database_name != "novalton_test" or not database_name.endswith("_test"):
+            raise SettingsError("Refusing test operation: DATABASE_URL must target novalton_test.")
+        return
+    if environment == "production":
+        # Production is a supported application setting, but not a local profile launcher target.
+        return
+    raise SettingsError("Refusing operation: unsupported environment profile.")
+
+
 class Settings(BaseModel):
     """Central application settings with local-development defaults."""
 
@@ -39,6 +74,7 @@ class Settings(BaseModel):
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     database_url: str = "postgresql://novalton:novalton_dev_only@localhost:5432/novalton"
+    test_database_url: str | None = None
     redis_url: str = "redis://localhost:6379/0"
     qdrant_url: str = "http://localhost:6333"
     openai_compatible_base_url: str | None = None
@@ -69,6 +105,7 @@ class Settings(BaseModel):
         "environment": "NOVALTON_ENV",
         "log_level": "NOVALTON_LOG_LEVEL",
         "database_url": "DATABASE_URL",
+        "test_database_url": "NOVALTON_TEST_DATABASE_URL",
         "redis_url": "REDIS_URL",
         "qdrant_url": "QDRANT_URL",
         "openai_compatible_base_url": "NOVALTON_OPENAI_COMPATIBLE_BASE_URL",
@@ -233,10 +270,16 @@ class Settings(BaseModel):
             if variable in environ
         }
         try:
-            return cls.model_validate(values)
+            settings = cls.model_validate(values)
         except ValidationError:
             # Pydantic errors may contain rejected values, including URL credentials.
             raise SettingsError("Invalid application configuration") from None
+        validate_profile_database_urls(
+            environment=settings.environment,
+            database_url=settings.database_url,
+            test_database_url=settings.test_database_url,
+        )
+        return settings
 
 
 @lru_cache

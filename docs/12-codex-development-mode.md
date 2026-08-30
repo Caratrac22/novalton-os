@@ -93,6 +93,25 @@ A ticket should not combine unrelated architecture refactors merely because the 
 
 Codex should always treat the repository docs as constraints rather than suggestions.
 
+### Environment profile safety
+
+Start a normal local development session with:
+
+```text
+wsl -d Ubuntu
+cd ~/projects/novalton-os
+make dev-shell
+```
+
+This opens a clean child shell using the validated development `.env` profile. For DB-backed test
+work, use `make test-shell` (after `make setup-test-env`) or run `make test`. The copied
+`.env.test` has deliberately non-working PostgreSQL placeholders: set both URLs to the same
+`novalton_test` URL using the trusted local Compose/development role unless an operator deliberately
+configured a separate local role. Sharing that role does not share data; `novalton_test` remains an
+isolated database. Never run DB-backed tests from a development profile, live acceptance from a test
+profile, or manually repoint `DATABASE_URL`; use `make dev-db-check` or `make test-db-check` for
+secret-safe proof instead.
+
 Priority when conflicts occur:
 
 ```text
