@@ -8,8 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.database import get_async_session
 from novalton_api.core.exceptions import ApplicationError
-from novalton_api.modules.orchestrator import service
-from novalton_api.modules.orchestrator.schemas import OrchestrationResult
+from novalton_api.modules.orchestrator import challenge_service, service
+from novalton_api.modules.orchestrator.schemas import (
+    ChallengeResolutionRequest,
+    ChallengeResolutionResponse,
+    OrchestrationResult,
+)
 
 Session = Annotated[AsyncSession, Depends(get_async_session)]
 router = APIRouter(
@@ -38,4 +42,27 @@ async def advance(
         tenant_id=tenant_id,
         workspace_id=workspace_id,
         workflow_run_id=workflow_run_id,
+    )
+
+
+@router.post(
+    "/{workflow_run_id}/steps/{workflow_step_run_id}/challenge-resolution",
+    response_model=ChallengeResolutionResponse,
+)
+async def resolve_challenge(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    workflow_run_id: UUID,
+    workflow_step_run_id: UUID,
+    data: ChallengeResolutionRequest,
+    session: Session,
+) -> ChallengeResolutionResponse:
+    """Resolve as the trusted local V1 user; actor authority is never caller supplied."""
+    return await challenge_service.resolve(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        workflow_run_id=workflow_run_id,
+        workflow_step_run_id=workflow_step_run_id,
+        data=data,
     )

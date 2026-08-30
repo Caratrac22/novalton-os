@@ -37,6 +37,7 @@ from novalton_api.modules.audit.models import AuditRecord  # noqa: E402, F401
 from novalton_api.modules.memories.models import MemoryProvenance, MemoryRecord  # noqa: E402, F401
 from novalton_api.modules.model_catalog.models import ModelDefinition  # noqa: E402, F401
 from novalton_api.modules.model_usage.models import ModelRun  # noqa: E402, F401
+from novalton_api.modules.orchestrator.models import AgentChallengeResolution  # noqa: E402, F401
 from novalton_api.modules.policy.models import PolicyRule  # noqa: E402, F401
 from novalton_api.modules.projects.models import Project  # noqa: E402, F401
 from novalton_api.modules.runtime_events.models import RuntimeEvent  # noqa: E402, F401

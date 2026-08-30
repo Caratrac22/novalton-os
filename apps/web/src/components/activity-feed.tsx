@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { StatusBadge, type StatusTone } from "@/components/status-badge";
 import { formatDateTime, humanize } from "@/lib/format";
 
-const EVENT_TYPES = ["project.created", "task.created", "workflow.run.started", "workflow.step.started", "workflow.step.completed", "workflow.step.failed", "workflow.run.waiting_for_human", "workflow.run.completed", "workflow.run.failed"] as const;
+const EVENT_TYPES = ["project.created", "task.created", "workflow.run.started", "workflow.step.started", "workflow.step.completed", "workflow.step.failed", "workflow.run.waiting_for_human", "workflow.challenge.resolved", "workflow.run.completed", "workflow.run.failed"] as const;
 const MAX_EVENTS = 40;
 type ConnectionState = "connecting" | "live" | "reconnecting" | "unavailable";
 type RuntimeEvent = Readonly<{ id: string; eventType: string; source: string; occurredAt: string; projectId?: string; taskId?: string; summary: string; role?: string; verdict?: string; challenge?: string; reason?: string }>;

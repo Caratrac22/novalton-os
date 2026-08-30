@@ -25,6 +25,10 @@ from novalton_api.modules.developer_manager import service as manager_service
 from novalton_api.modules.developer_worker import service as developer_service
 from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_usage.models import ModelRun
+from novalton_api.modules.orchestrator.models import AgentChallengeResolution
+from novalton_api.modules.policy import service as policy_service
+from novalton_api.modules.policy.models import PolicyRule
+from novalton_api.modules.policy.schemas import PolicyEffect, PolicyRuleCreate
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.qa_worker import service as qa_service
 from novalton_api.modules.runtime_events.models import RuntimeEvent
@@ -277,6 +281,11 @@ async def _cleanup(scope: Scope) -> None:
             run_ids = select(WorkflowRun.id).where(WorkflowRun.tenant_id == scope.tenant_id)
             plan_ids = select(WorkflowPlan.id).where(WorkflowPlan.tenant_id == scope.tenant_id)
             await session.execute(
+                delete(AgentChallengeResolution).where(
+                    AgentChallengeResolution.tenant_id == scope.tenant_id
+                )
+            )
+            await session.execute(
                 delete(WorkflowStepHandoff).where(WorkflowStepHandoff.workflow_run_id.in_(run_ids))
             )
             await session.execute(
@@ -312,6 +321,7 @@ async def _cleanup(scope: Scope) -> None:
             await session.execute(
                 delete(AgentDefinition).where(AgentDefinition.tenant_id == scope.tenant_id)
             )
+            await session.execute(delete(PolicyRule).where(PolicyRule.tenant_id == scope.tenant_id))
             await session.execute(delete(Task).where(Task.id == scope.task_id))
             await session.execute(delete(Project).where(Project.id == scope.project_id))
             await session.execute(delete(Workspace).where(Workspace.id == scope.workspace_id))
@@ -486,6 +496,13 @@ async def _vertical_state(scope: Scope, run_id: UUID) -> dict[str, object]:
                     .order_by(RuntimeEvent.occurred_at, RuntimeEvent.id)
                 )
             )
+            resolutions = list(
+                await session.scalars(
+                    select(AgentChallengeResolution)
+                    .where(AgentChallengeResolution.tenant_id == scope.tenant_id)
+                    .order_by(AgentChallengeResolution.created_at, AgentChallengeResolution.id)
+                )
+            )
             plan_count = int(
                 await session.scalar(
                     select(func.count())
@@ -510,6 +527,13 @@ async def _vertical_state(scope: Scope, run_id: UUID) -> dict[str, object]:
                 )
                 or 0
             )
+            audits = list(
+                await session.scalars(
+                    select(AuditRecord)
+                    .where(AuditRecord.tenant_id == scope.tenant_id)
+                    .order_by(AuditRecord.occurred_at, AuditRecord.id)
+                )
+            )
             approval_count = int(
                 await session.scalar(
                     select(func.count())
@@ -526,9 +550,11 @@ async def _vertical_state(scope: Scope, run_id: UUID) -> dict[str, object]:
                 "agent_runs": agent_runs,
                 "model_runs": model_runs,
                 "events": events,
+                "resolutions": resolutions,
                 "plan_count": plan_count,
                 "workflow_run_count": workflow_run_count,
                 "audit_count": audit_count,
+                "audits": audits,
                 "approval_count": approval_count,
             }
     finally:
@@ -719,9 +745,249 @@ def test_i029_meaningful_challenge_stops_downstream_execution(
     assert result["reason_code"] == "agent_challenge"
     assert len(state["agent_runs"]) == len(state["model_runs"]) == expected_runs
     assert len(provider.calls) == expected_runs
+    assert len(state["resolutions"]) == 1
+    assert state["resolutions"][0].decision is None
     repeated = _advance_fresh(provider, advance)
-    assert repeated["reason_code"] == "step_requires_intervention"
+    assert repeated["reason_code"] == "agent_challenge"
+    assert repeated["challenge_level"] == "HUMAN_REVIEW_RECOMMENDED"
     assert len(provider.calls) == expected_runs
+
+
+def _resolution_url(scope: Scope, run_id: str, step_run_id: str) -> str:
+    return (
+        f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+        f"/workflow-runs/{run_id}/steps/{step_run_id}/challenge-resolution"
+    )
+
+
+def test_i037_accept_qa_warning_completes_without_new_model_and_is_idempotent(
+    scope: Scope,
+) -> None:
+    qa = _challenged(_qa("PASS_WITH_WARNINGS"))
+    provider = QueueProvider([_manager(), _worker(), qa])
+    created, advance = _create_vertical(scope, provider)
+    for _ in range(3):
+        waiting = _advance_fresh(provider, advance)
+    assert waiting["outcome"] == "WAITING_FOR_HUMAN"
+    run_id = str(created["workflow_run"]["id"])
+    step_run_id = str(waiting["workflow_step_run_id"])
+    url = _resolution_url(scope, run_id, step_run_id)
+    payload = {"decision": "ACCEPT_RESULT", "reason": "Reviewed bounded QA warnings."}
+
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        accepted = client.post(url, json=payload)
+        repeated = client.post(
+            url,
+            json={"decision": "ACCEPT_RESULT", "reason": "  Reviewed bounded QA warnings.  "},
+        )
+    assert accepted.status_code == repeated.status_code == 200
+    assert accepted.json() == repeated.json()
+    assert accepted.json()["outcome"] == "WORKFLOW_COMPLETED"
+    assert accepted.json()["workflow_status"] == "COMPLETED"
+    assert accepted.json()["step_status"] == "COMPLETED"
+    assert len(provider.calls) == 3
+
+    state = asyncio.run(_vertical_state(scope, UUID(run_id)))
+    assert state["run"].status == "COMPLETED"  # type: ignore[union-attr]
+    assert len(state["agent_runs"]) == len(state["model_runs"]) == 3
+    assert state["approval_count"] == 0
+    resolutions = state["resolutions"]
+    assert len(resolutions) == 1
+    assert resolutions[0].decision == "ACCEPT_RESULT"
+    assert resolutions[0].decision_actor_type == "local_user"
+    assert resolutions[0].qa_verdict == "PASS_WITH_WARNINGS"
+    events = [item for item in state["events"] if item.event_type == "workflow.challenge.resolved"]
+    assert len(events) == 1
+    resolution_audits = [
+        item for item in state["audits"] if item.action == "workflow.challenge.resolve"
+    ]
+    assert len(resolution_audits) == 1
+    assert resolution_audits[0].actor_type == "local_user"
+    assert resolution_audits[0].metadata_json["reason_supplied"] is True
+    assert events[0].payload == {
+        "agent_run_id": str(resolutions[0].agent_run_id),
+        "challenge_level": "HUMAN_REVIEW_RECOMMENDED",
+        "decision": "ACCEPT_RESULT",
+        "decision_actor_type": "local_user",
+        "qa_verdict": "PASS_WITH_WARNINGS",
+        "specialization_role": "qa_worker",
+        "step_status": "RUNNING",
+        "workflow_run_id": run_id,
+        "workflow_status": "RUNNING",
+        "workflow_step_run_id": step_run_id,
+    }
+    serialized = json.dumps([item.payload for item in state["events"]], sort_keys=True)
+    assert "Reviewed bounded QA warnings" not in serialized
+
+
+def test_i037_reject_is_terminal_and_conflicting_decision_is_rejected(scope: Scope) -> None:
+    provider = QueueProvider([_challenged(_manager())])
+    created, advance = _create_vertical(scope, provider)
+    waiting = _advance_fresh(provider, advance)
+    url = _resolution_url(
+        scope,
+        str(created["workflow_run"]["id"]),
+        str(waiting["workflow_step_run_id"]),
+    )
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        rejected = client.post(url, json={"decision": "REJECT_RESULT"})
+        conflict = client.post(url, json={"decision": "ACCEPT_RESULT"})
+    assert rejected.status_code == 200
+    assert rejected.json()["outcome"] == "WORKFLOW_FAILED"
+    assert rejected.json()["reason_code"] == "agent_challenge_rejected"
+    assert conflict.status_code == 409
+    assert len(provider.calls) == 1
+
+
+def test_i037_simultaneous_identical_resolution_has_one_authoritative_record(
+    scope: Scope,
+) -> None:
+    provider = QueueProvider([_challenged(_manager())])
+    created, advance = _create_vertical(scope, provider)
+    waiting = _advance_fresh(provider, advance)
+    run_id = str(created["workflow_run"]["id"])
+    url = _resolution_url(scope, run_id, str(waiting["workflow_step_run_id"]))
+
+    def submit() -> tuple[int, dict[str, object]]:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            response = client.post(url, json={"decision": "ACCEPT_RESULT"})
+        return response.status_code, response.json()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(lambda _: submit(), range(2)))
+    assert [status for status, _ in responses] == [200, 200]
+    assert responses[0][1] == responses[1][1]
+    state = asyncio.run(_vertical_state(scope, UUID(run_id)))
+    assert len(state["resolutions"]) == 1
+    assert (
+        len([item for item in state["events"] if item.event_type == "workflow.challenge.resolved"])
+        == 1
+    )
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("verdict", "reason_code"),
+    [("FAIL", "qa_failed"), ("INCONCLUSIVE", "qa_inconclusive")],
+)
+def test_i037_acceptance_never_rewrites_negative_qa_verdict(
+    scope: Scope, verdict: str, reason_code: str
+) -> None:
+    provider = QueueProvider([_manager(), _worker(), _challenged(_qa(verdict))])
+    created, advance = _create_vertical(scope, provider)
+    for _ in range(3):
+        waiting = _advance_fresh(provider, advance)
+    url = _resolution_url(
+        scope,
+        str(created["workflow_run"]["id"]),
+        str(waiting["workflow_step_run_id"]),
+    )
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        response = client.post(url, json={"decision": "ACCEPT_RESULT"})
+    assert response.status_code == 200
+    assert response.json()["outcome"] == "WORKFLOW_FAILED"
+    assert response.json()["reason_code"] == reason_code
+    assert len(provider.calls) == 3
+
+
+def test_i037_block_recommended_cannot_be_accepted_and_can_be_rejected(scope: Scope) -> None:
+    challenged = _manager() | {
+        "challenge": {
+            "level": "BLOCK_RECOMMENDED",
+            "reason": "Continuation is unsafe without rejection.",
+            "evidence_source_references": [],
+            "suggested_action": "Reject the result.",
+        }
+    }
+    provider = QueueProvider([challenged])
+    created, advance = _create_vertical(scope, provider)
+    waiting = _advance_fresh(provider, advance)
+    url = _resolution_url(
+        scope,
+        str(created["workflow_run"]["id"]),
+        str(waiting["workflow_step_run_id"]),
+    )
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        blocked = client.post(url, json={"decision": "ACCEPT_RESULT"})
+        rejected = client.post(url, json={"decision": "REJECT_RESULT"})
+    assert blocked.status_code == 409
+    assert rejected.status_code == 200
+    assert rejected.json()["outcome"] == "WORKFLOW_FAILED"
+
+
+def test_i037_caller_cannot_forge_human_authority_or_cross_scope(scope: Scope) -> None:
+    provider = QueueProvider([_challenged(_manager())])
+    created, advance = _create_vertical(scope, provider)
+    waiting = _advance_fresh(provider, advance)
+    run_id = str(created["workflow_run"]["id"])
+    step_run_id = str(waiting["workflow_step_run_id"])
+    url = _resolution_url(scope, run_id, step_run_id)
+    other_scope_url = url.replace(str(scope.tenant_id), str(uuid4()), 1)
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        forged = client.post(
+            url,
+            json={"decision": "ACCEPT_RESULT", "decision_actor_type": "model"},
+        )
+        missing = client.post(other_scope_url, json={"decision": "ACCEPT_RESULT"})
+    assert forged.status_code == 422
+    assert missing.status_code == 404
+    state = asyncio.run(_vertical_state(scope, UUID(run_id)))
+    assert state["resolutions"][0].decision is None
+
+
+def test_i037_policy_block_prevents_resolution(scope: Scope) -> None:
+    async def add_block() -> None:
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                await policy_service.create_rule(
+                    session,
+                    data=PolicyRuleCreate(
+                        tenant_id=scope.tenant_id,
+                        workspace_id=scope.workspace_id,
+                        name="Block challenge resolution",
+                        action_pattern="workflow.challenge.resolve",
+                        effect=PolicyEffect.BLOCK,
+                        actor_type="local_user",
+                        resource_type="task",
+                    ),
+                )
+        finally:
+            await database.dispose()
+
+    asyncio.run(add_block())
+    provider = QueueProvider([_challenged(_manager())])
+    created, advance = _create_vertical(scope, provider)
+    waiting = _advance_fresh(provider, advance)
+    url = _resolution_url(
+        scope,
+        str(created["workflow_run"]["id"]),
+        str(waiting["workflow_step_run_id"]),
+    )
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        response = client.post(url, json={"decision": "REJECT_RESULT"})
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "challenge_resolution_policy_blocked"
+    state = asyncio.run(_vertical_state(scope, UUID(str(created["workflow_run"]["id"]))))
+    assert state["run"].status == "RUNNING"  # type: ignore[union-attr]
+    assert state["resolutions"][0].decision is None
+
+
+@pytest.mark.parametrize(
+    ("status", "failure_code"),
+    [("BLOCKED", "agent_result_blocked"), ("NEEDS_INPUT", "agent_result_needs_input")],
+)
+def test_i037_blocked_or_needs_input_result_never_creates_resolvable_challenge(
+    scope: Scope, status: str, failure_code: str
+) -> None:
+    result = _challenged(_manager()) | {"status": status}
+    provider = QueueProvider([result])
+    created, advance = _create_vertical(scope, provider)
+    failed = _advance_fresh(provider, advance)
+    state = asyncio.run(_vertical_state(scope, UUID(str(created["workflow_run"]["id"]))))
+    assert failed["outcome"] == "WORKFLOW_FAILED"
+    assert failed["reason_code"] == failure_code
+    assert state["resolutions"] == []
 
 
 def test_i029_malformed_manager_result_fails_without_downstream_handoff(scope: Scope) -> None:

@@ -763,6 +763,27 @@ For important ambiguity, significant risk, or unresolved contradiction, it shoul
 
 A challenge such as `HUMAN_REVIEW_RECOMMENDED` or `BLOCK_RECOMMENDED` forces explicit reconsideration rather than silent continuation.
 
+### Controlled continuation after an Agent challenge
+
+An Agent challenge leaves the exact WorkflowStepRun `RUNNING` and the WorkflowRun `RUNNING` while
+the Orchestrator reports `WAITING_FOR_HUMAN`. A normal `advance` cannot consume that unresolved
+challenge.
+
+The trusted challenge-resolution operation records the local-human decision and performs the
+deterministic state transition in one transaction:
+
+- accepted result whose existing role/QA semantics permit success: `RUNNING -> COMPLETED`, then
+  normal dependency unlocking and WorkflowRun completion evaluation;
+- accepted result whose existing QA verdict or result status is non-successful:
+  `RUNNING -> FAILED`, and WorkflowRun `RUNNING -> FAILED` with the existing failure code;
+- rejected result: `RUNNING -> FAILED`, and WorkflowRun `RUNNING -> FAILED` with
+  `agent_challenge_rejected`.
+
+For the fixed Manager -> Developer -> QA workflow, a challenged completed Manager or Developer
+result may persist its already-validated metadata-only handoff before waiting. Resolution never
+executes requested actions, mutates the immutable plan, grants tools, reruns the Agent, or creates a
+ModelRun.
+
 ---
 
 # 27. Domain-manager workflow adaptation

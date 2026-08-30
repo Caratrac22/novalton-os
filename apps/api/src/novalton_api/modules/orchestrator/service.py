@@ -17,7 +17,7 @@ from novalton_api.modules.agents.contracts import (
     ModelRequirementHints,
 )
 from novalton_api.modules.agents.schemas import AgentRunStatus
-from novalton_api.modules.orchestrator import specializations
+from novalton_api.modules.orchestrator import challenge_repository, specializations
 from novalton_api.modules.orchestrator.schemas import OrchestrationOutcome, OrchestrationResult
 from novalton_api.modules.qa_worker.contracts import QAVerdict, QAWorkerResult
 from novalton_api.modules.runtime_events.schemas import RuntimeEventCreate
@@ -254,6 +254,11 @@ async def advance(
         )
         if waiting is not None:
             step_run, step = waiting
+            resolution = await challenge_repository.get_for_step(
+                session,
+                workflow_run_id=run.id,
+                workflow_step_run_id=step_run.id,
+            )
             return await _result(
                 session,
                 run,
@@ -261,7 +266,12 @@ async def advance(
                 step_run=step_run,
                 step=step,
                 agent_run_id=step_run.agent_run_id,
-                reason_code="step_requires_intervention",
+                reason_code="agent_challenge"
+                if resolution is not None and resolution.decision is None
+                else "step_requires_intervention",
+                challenge_level=ChallengeLevel(resolution.challenge_level)
+                if resolution is not None and resolution.decision is None
+                else None,
             )
         return await _result(
             session, run, OrchestrationOutcome.NO_RUNNABLE_STEP, reason_code="no_ready_step"
@@ -430,6 +440,37 @@ async def advance(
 
     challenge = executed.result.challenge.level
     if challenge in _MEANINGFUL_CHALLENGES:
+        if (
+            specialization_role in {"developer_manager", "developer_worker"}
+            and executed.result.status == AgentResultStatus.COMPLETED
+        ):
+            try:
+                await specializations.persist_next_handoff(
+                    session, run=run, step_run=step_run, result=executed.result
+                )
+            except ApplicationError as error:
+                return await _fail(
+                    session,
+                    run,
+                    step_run,
+                    step,
+                    error.code,
+                    agent_run_id=executed.agent_run_id,
+                )
+        await challenge_repository.create_pending(
+            session,
+            tenant_id=run.tenant_id,
+            workspace_id=run.workspace_id,
+            workflow_run_id=run.id,
+            workflow_step_run_id=step_run.id,
+            agent_run_id=executed.agent_run_id,
+            challenge_level=challenge.value,
+            result_status=executed.result.status.value,
+            specialization_role=specialization_role,
+            qa_verdict=executed.result.verdict.value
+            if isinstance(executed.result, QAWorkerResult)
+            else None,
+        )
         await _event(
             session,
             run,
@@ -441,6 +482,7 @@ async def advance(
             challenge_level=challenge,
             specialization_role=specialization_role,
         )
+        await session.commit()
         return await _result(
             session,
             run,

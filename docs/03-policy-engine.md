@@ -92,6 +92,17 @@ The action is forbidden under the current policy context.
 
 The user may need to change policy explicitly before the action can ever proceed.
 
+## 3.5 Agent challenges are not ApprovalRequests
+
+An Agent's `HUMAN_REVIEW_RECOMMENDED` signal does not originate from deterministic Policy and must
+not manufacture an `ApprovalRequest` claiming a `REQUIRE_CONFIRMATION` effect. Its trusted human
+decision is represented by the dedicated Agent challenge-resolution record.
+
+Challenge resolution cannot override Policy `BLOCK`. The resolution service evaluates the fixed
+`workflow.challenge.resolve` action for the server-established `local_user` actor and exact task
+scope; a matching `BLOCK` prevents either challenge decision. Other Policy and Approval records
+retain their existing meaning and scope. Resolving a challenge grants no action or tool authority.
+
 ---
 
 # 4. Strictness ordering

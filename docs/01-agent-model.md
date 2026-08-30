@@ -533,6 +533,25 @@ For high-risk challenge categories, the Policy Engine may require human confirma
 
 The Orchestrator must never silently ignore `BLOCK_RECOMMENDED` or `HUMAN_REVIEW_RECOMMENDED`.
 
+## 13.1 Durable human challenge resolution
+
+`HUMAN_REVIEW_RECOMMENDED` is advisory Agent disagreement, not a Policy
+`REQUIRE_CONFIRMATION` decision. When orchestration waits on this signal, the runtime persists one
+minimal challenge record tied to the exact WorkflowRun, WorkflowStepRun, and successful AgentRun.
+It stores only the challenge level and the bounded result semantics needed to finish the local
+workflow transition; it does not store the AgentResult body, prompt, provider output, handoff body,
+or requested actions.
+
+The trusted local V1 human may choose `ACCEPT_RESULT` or `REJECT_RESULT`. Acceptance resolves the
+challenge without changing the Agent result or QA verdict and performs no new model invocation.
+Rejection deterministically fails the active step and workflow. A duplicate decision is idempotent
+only when its decision and canonical reason match: a supplied reason is trimmed, `null` means no
+reason, and blank or over-500-character input is rejected. A conflicting decision is rejected.
+
+`BLOCK_RECOMMENDED` is deliberately stricter in V1: it may be rejected but not accepted. Actual
+AgentResult statuses `BLOCKED` and `NEEDS_INPUT` fail the AgentRun and never become resolvable
+successful challenges. An Agent or model cannot resolve its own challenge.
+
 ---
 
 # 14. Requested actions
