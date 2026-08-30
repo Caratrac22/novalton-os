@@ -32,7 +32,7 @@ jobs:
       NOVALTON_TEST_DATABASE_URL: postgresql://novalton:novalton_test_only@127.0.0.1:5432/novalton_test
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13.15"
           cache: pip
