@@ -6,9 +6,15 @@ from pydantic import ValidationError
 
 from novalton_api.modules.developer_manager.contracts import (
     MAX_PROPOSED_TASKS,
+    DeveloperManagerResult,
     DevelopmentPlanningInput,
     DevelopmentPlanProposal,
 )
+
+
+def test_manager_contract_has_no_tool_proposal_surface() -> None:
+    schema = DeveloperManagerResult.model_json_schema()
+    assert "tool_proposals" not in schema["properties"]
 
 
 def _task(key: str, *, depends_on: list[str] | None = None) -> dict[str, object]:

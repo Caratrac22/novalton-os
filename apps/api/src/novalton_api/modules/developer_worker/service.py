@@ -30,11 +30,17 @@ DEVELOPER_WORKER_CAPABILITIES = [
     "software_implementation",
     "test_planning",
 ]
+DEVELOPER_WORKER_PERMISSIONS = [
+    "workspace.list_files",
+    "workspace.read_file",
+    "workspace.search_text",
+]
 _CONTRACT_INSTRUCTIONS = (
-    "Return implementation metadata only. Do not include code bodies, commands, tool or function "
-    "calls, credentials, provider/model overrides, approval flags, repository writes, worker "
-    "delegation, workflow mutations, QA execution, or executable payloads. Proposed changes do "
-    "not authorize execution."
+    "Return implementation metadata only. A tool_proposals entry may name only an explicitly "
+    "permitted server-owned read-only tool; it is a proposal, not provider-native execution or "
+    "authority. Do not include code bodies, commands, credentials, provider/model overrides, "
+    "approval flags, repository writes, worker delegation, workflow mutations, QA execution, or "
+    "executable payloads. Proposed changes do not authorize execution."
 )
 
 

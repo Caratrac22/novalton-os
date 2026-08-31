@@ -4,7 +4,7 @@ import { StatusBadge, type StatusTone } from "@/components/status-badge";
 import { formatDateTime, humanize } from "@/lib/format";
 import { parseRuntimeEventData, type SafeRuntimeEvent } from "@/lib/runtime-event";
 
-const EVENT_TYPES = ["project.created", "task.created", "workflow.run.started", "workflow.step.started", "workflow.step.completed", "workflow.step.failed", "workflow.run.waiting_for_human", "workflow.challenge.resolved", "workflow.run.completed", "workflow.run.failed"] as const;
+const EVENT_TYPES = ["project.created", "task.created", "workflow.run.started", "workflow.step.started", "workflow.step.completed", "workflow.step.failed", "workflow.run.waiting_for_human", "workflow.challenge.resolved", "workflow.run.completed", "workflow.run.failed", "tool.call.approval_required", "tool.call.completed", "tool.call.failed", "tool.call.blocked"] as const;
 const MAX_EVENTS = 40;
 type ConnectionState = "connecting" | "live" | "reconnecting" | "unavailable";
 type ActivityFeedProps = Readonly<{ projectId?: string; taskId?: string; workflowRunId?: string; onWorkflowEvent?: () => void }>;

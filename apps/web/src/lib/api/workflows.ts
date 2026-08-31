@@ -46,10 +46,13 @@ function isChallenge(value: unknown): boolean {
   return isRecord(value) && ["HUMAN_REVIEW_RECOMMENDED", "BLOCK_RECOMMENDED"].includes(String(value.challenge_level)) && ["COMPLETED", "PARTIAL"].includes(String(value.result_status)) && nullableString(value.specialization_role) && nullableString(value.qa_verdict) && nullableString(value.decision) && (value.decided_at === null || isTimestamp(value.decided_at));
 }
 function isAgentRun(value: unknown): boolean {
-  return isRecord(value) && isUuid(value.id) && typeof value.status === "string" && typeof value.agent_name === "string" && typeof value.agent_slug === "string" && nullableString(value.failure_code) && Array.isArray(value.model_runs) && value.model_runs.every(isModelRun);
+  return isRecord(value) && isUuid(value.id) && typeof value.status === "string" && typeof value.agent_name === "string" && typeof value.agent_slug === "string" && nullableString(value.failure_code) && Array.isArray(value.model_runs) && value.model_runs.every(isModelRun) && Array.isArray(value.tool_calls) && value.tool_calls.every(isToolCall);
 }
 function isModelRun(value: unknown): boolean {
   return isRecord(value) && isUuid(value.id) && typeof value.status === "string" && typeof value.provider_id === "string" && typeof value.provider_model_id === "string" && nullableString(value.execution_target_class) && nullableNumber(value.input_tokens) && nullableNumber(value.output_tokens) && nullableNumber(value.total_tokens) && nullableNumber(value.duration_ms) && nullableString(value.failure_code) && typeof value.recovery_attempt_kind === "string" && typeof value.recovery_attempt_index === "number";
+}
+function isToolCall(value: unknown): boolean {
+  return isRecord(value) && isUuid(value.id) && typeof value.tool_name === "string" && typeof value.status === "string" && nullableString(value.policy_effect) && (value.approval_request_id === null || isUuid(value.approval_request_id)) && value.execution_target_class === "LOCAL" && nullableNumber(value.duration_ms) && nullableNumber(value.result_count) && nullableNumber(value.bytes_returned) && (value.truncated === null || typeof value.truncated === "boolean") && nullableString(value.failure_code);
 }
 
 export async function postWorkflow(path: string, body?: unknown): Promise<Response> {

@@ -10,6 +10,7 @@ from pydantic import Field, field_validator, model_validator
 from novalton_api.modules.agents.contracts import (
     AgentInput,
     AgentResult,
+    AgentResultStatus,
     ArtifactReference,
     ContractModel,
     Identifier,
@@ -18,8 +19,14 @@ from novalton_api.modules.agents.contracts import (
     _identifier,
     _safe_text,
 )
+from novalton_api.modules.tools.contracts import ToolProposal
 
 DEVELOPER_WORKER_OUTPUT = "development.implementation_result"
+DEVELOPER_WORKER_TOOLS = [
+    "workspace.list_files",
+    "workspace.read_file",
+    "workspace.search_text",
+]
 MAX_PROPOSED_CHANGES = 32
 MAX_ACCEPTANCE_CHECKS = 24
 MAX_TEST_RECOMMENDATIONS = 24
@@ -30,14 +37,16 @@ class DevelopmentAssignmentInput(AgentInput):
     """One trusted bounded assignment with no tool or model override authority."""
 
     expected_output_type: Identifier = DEVELOPER_WORKER_OUTPUT
-    permitted_tools: list[Identifier] = Field(default_factory=list, max_length=0)
+    permitted_tools: list[Identifier] = Field(default_factory=list, max_length=3)
 
     @model_validator(mode="after")
     def validate_worker_input(self) -> Self:
         if self.expected_output_type != DEVELOPER_WORKER_OUTPUT:
             raise ValueError("expected_output_type must request an implementation result")
+        if any(tool not in DEVELOPER_WORKER_TOOLS for tool in self.permitted_tools):
+            raise ValueError("Developer Worker permits only trusted read-only workspace tools")
         if self.model_requirements is not None and self.model_requirements.tool_calling_required:
-            raise ValueError("Developer Worker execution cannot require tool calling")
+            raise ValueError("provider-native tool calling is not used for trusted tool proposals")
         return self
 
 
@@ -126,6 +135,7 @@ class DeveloperWorkerResult(AgentResult):
     blockers: list[ShortText] = Field(max_length=16)
     artifacts: list[ArtifactReference] = Field(default_factory=list, max_length=0)
     requested_actions: list[RequestedAction] = Field(default_factory=list, max_length=0)
+    tool_proposals: list[ToolProposal] = Field(default_factory=list, max_length=1)
 
     @field_validator("task_interpretation", "implementation_summary")
     @classmethod
@@ -142,6 +152,8 @@ class DeveloperWorkerResult(AgentResult):
 
     @model_validator(mode="after")
     def normalize_result(self) -> Self:
+        if self.tool_proposals and self.status != AgentResultStatus.PARTIAL:
+            raise ValueError("a tool proposal requires PARTIAL status")
         change_keys = [(change.path, change.kind.value) for change in self.changes]
         if len(change_keys) != len(set(change_keys)):
             raise ValueError("duplicate proposed change descriptor")

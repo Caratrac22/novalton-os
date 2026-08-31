@@ -106,9 +106,12 @@ def test_worker_result_rejects_duplicates_bounds_and_executable_fields() -> None
         DeveloperWorkerResult.model_validate_json(json.dumps(unsafe))
 
 
-def test_worker_input_forbids_tools_and_output_or_provider_overrides() -> None:
+def test_worker_input_allows_only_trusted_tools_and_forbids_provider_overrides() -> None:
     base = {"objective": "Implement one bounded change."}
     assert DevelopmentAssignmentInput.model_validate(base).permitted_tools == []
+    assert DevelopmentAssignmentInput.model_validate(
+        base | {"permitted_tools": ["workspace.read_file"]}
+    ).permitted_tools == ["workspace.read_file"]
     for change in (
         {"permitted_tools": ["shell"]},
         {"expected_output_type": "qa.result"},

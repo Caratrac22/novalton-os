@@ -47,8 +47,21 @@ export type OperatorModelRun = Readonly<{
   total_tokens: number | null;
   duration_ms: number | null;
   failure_code: string | null;
-  recovery_attempt_kind: "INITIAL" | "TRUNCATION" | "CONTRACT_REPAIR";
+  recovery_attempt_kind: "INITIAL" | "TRUNCATION" | "CONTRACT_REPAIR" | "TOOL_CONTINUATION";
   recovery_attempt_index: number;
+}>;
+export type OperatorToolCall = Readonly<{
+  id: string;
+  tool_name: string;
+  status: "PROPOSED" | "PENDING_APPROVAL" | "RUNNING" | "SUCCEEDED" | "FAILED" | "BLOCKED";
+  policy_effect: "ALLOW" | "ALLOW_WITH_LOG" | "REQUIRE_CONFIRMATION" | "BLOCK" | null;
+  approval_request_id: string | null;
+  execution_target_class: "LOCAL";
+  duration_ms: number | null;
+  result_count: number | null;
+  bytes_returned: number | null;
+  truncated: boolean | null;
+  failure_code: string | null;
 }>;
 export type OperatorAgentRun = Readonly<{
   id: string;
@@ -57,6 +70,7 @@ export type OperatorAgentRun = Readonly<{
   agent_slug: string;
   failure_code: string | null;
   model_runs: OperatorModelRun[];
+  tool_calls: OperatorToolCall[];
 }>;
 export type OperatorStepDetail = Readonly<{
   workflow_step_run_id: string;

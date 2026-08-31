@@ -24,6 +24,7 @@ from novalton_api.modules.agents.contracts import AgentInput, AgentResult
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+Permission = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 
 
 class AgentDefinitionStatus(StrEnum):
@@ -47,7 +48,7 @@ class DefinitionFields(BaseModel):
     category: Identifier | None = None
     mission: str = Field(min_length=1, max_length=2000)
     capabilities: list[Identifier] = Field(default_factory=list, max_length=32)
-    permissions: list[Identifier] = Field(default_factory=list, max_length=32)
+    permissions: list[Permission] = Field(default_factory=list, max_length=32)
 
     @field_validator("name", "mission")
     @classmethod
@@ -64,12 +65,21 @@ class DefinitionFields(BaseModel):
             raise ValueError("category must be a normalized identifier")
         return value
 
-    @field_validator("capabilities", "permissions")
+    @field_validator("capabilities")
     @classmethod
     def normalize_identifiers(cls, values: list[str]) -> list[str]:
         normalized = sorted({value.strip().lower() for value in values})
         if any(_IDENTIFIER.fullmatch(value) is None for value in normalized):
             raise ValueError("items must be normalized identifiers")
+        return normalized
+
+    @field_validator("permissions")
+    @classmethod
+    def normalize_permissions(cls, values: list[str]) -> list[str]:
+        normalized = sorted({value.strip().lower() for value in values})
+        pattern = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
+        if any(pattern.fullmatch(value) is None for value in normalized):
+            raise ValueError("permissions must be normalized identifiers")
         return normalized
 
 

@@ -5,7 +5,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 
-def test_alembic_configuration_loads_i037_after_memory_disclosure_policy() -> None:
+def test_alembic_configuration_loads_i040_after_challenge_resolution() -> None:
     api_root = Path(__file__).parents[1]
     config = Config(api_root / "alembic.ini")
     scripts = ScriptDirectory.from_config(config)
@@ -14,9 +14,9 @@ def test_alembic_configuration_loads_i037_after_memory_disclosure_policy() -> No
     revision = scripts.get_revision(head)
     baseline = scripts.get_revision("20260820_0001")
 
-    assert head == "20260830_0024"
+    assert head == "20260831_0025"
     assert revision is not None
-    assert revision.down_revision == "20260830_0023"
+    assert revision.down_revision == "20260830_0024"
     assert baseline is not None
     assert baseline.down_revision is None
 

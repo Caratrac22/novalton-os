@@ -24,6 +24,7 @@ from novalton_api.modules.developer_worker.service import (
     DEVELOPER_WORKER_CATEGORY,
     DEVELOPER_WORKER_MISSION,
     DEVELOPER_WORKER_NAME,
+    DEVELOPER_WORKER_PERMISSIONS,
     DEVELOPER_WORKER_SLUG,
 )
 from novalton_api.modules.qa_worker.service import (
@@ -63,6 +64,7 @@ async def _bootstrap_agent_definition(
     category: str,
     mission: str,
     capabilities: list[str],
+    permissions: list[str],
 ) -> AgentDefinition:
     definition = await session.scalar(
         select(AgentDefinition).where(
@@ -72,19 +74,39 @@ async def _bootstrap_agent_definition(
             AgentDefinition.version == 1,
         )
     )
-    expected = (name, 1, "ENABLED", category, mission, capabilities, [])
+    target_version = 1
+    if definition is not None and definition.permissions == [] and permissions:
+        legacy = (
+            definition.name,
+            definition.status,
+            definition.category,
+            definition.mission,
+            definition.capabilities,
+        )
+        if legacy != (name, "ENABLED", category, mission, capabilities):
+            raise BootstrapError(f"{name} definition conflicts with existing data")
+        target_version = 2
+        definition = await session.scalar(
+            select(AgentDefinition).where(
+                AgentDefinition.tenant_id == tenant_id,
+                AgentDefinition.workspace_id == workspace_id,
+                AgentDefinition.slug == slug,
+                AgentDefinition.version == target_version,
+            )
+        )
+    expected = (name, target_version, "ENABLED", category, mission, capabilities, permissions)
     if definition is None:
         definition = AgentDefinition(
             tenant_id=tenant_id,
             workspace_id=workspace_id,
             name=name,
             slug=slug,
-            version=1,
+            version=target_version,
             status="ENABLED",
             category=category,
             mission=mission,
             capabilities=capabilities,
-            permissions=[],
+            permissions=permissions,
         )
         session.add(definition)
         await session.flush()
@@ -150,6 +172,7 @@ async def bootstrap_local_scope(session: AsyncSession, settings: Settings) -> Bo
         category=DEVELOPER_MANAGER_CATEGORY,
         mission=DEVELOPER_MANAGER_MISSION,
         capabilities=DEVELOPER_MANAGER_CAPABILITIES,
+        permissions=[],
     )
     developer_worker = await _bootstrap_agent_definition(
         session,
@@ -160,6 +183,7 @@ async def bootstrap_local_scope(session: AsyncSession, settings: Settings) -> Bo
         category=DEVELOPER_WORKER_CATEGORY,
         mission=DEVELOPER_WORKER_MISSION,
         capabilities=DEVELOPER_WORKER_CAPABILITIES,
+        permissions=DEVELOPER_WORKER_PERMISSIONS,
     )
     qa_worker = await _bootstrap_agent_definition(
         session,
@@ -170,6 +194,7 @@ async def bootstrap_local_scope(session: AsyncSession, settings: Settings) -> Bo
         category=QA_WORKER_CATEGORY,
         mission=QA_WORKER_MISSION,
         capabilities=QA_WORKER_CAPABILITIES,
+        permissions=[],
     )
     return BootstrapResult(
         tenant=tenant,

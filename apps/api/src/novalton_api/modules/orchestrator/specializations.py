@@ -14,7 +14,9 @@ from novalton_api.modules.developer_manager import service as manager_service
 from novalton_api.modules.developer_manager.contracts import DeveloperManagerResult
 from novalton_api.modules.developer_manager.schemas import DeveloperManagerPlanningRequest
 from novalton_api.modules.developer_worker import service as developer_service
-from novalton_api.modules.developer_worker.contracts import DeveloperWorkerResult
+from novalton_api.modules.developer_worker.contracts import (
+    DeveloperWorkerResult,
+)
 from novalton_api.modules.developer_worker.schemas import DeveloperWorkerExecutionRequest
 from novalton_api.modules.qa_worker import service as qa_service
 from novalton_api.modules.qa_worker.contracts import ValidationCriterion
@@ -39,6 +41,11 @@ FIXED_MANAGER_RESULT_CONSTRAINTS: tuple[ResultShapeConstraint, ...] = (
     ),
 )
 
+# The fixed development workflow needs one evidence source only.  The broader
+# Developer Worker registry remains available to explicitly authorized direct
+# assignments, but this orchestrator never widens that authority.
+_DEVELOPMENT_WORKFLOW_DEVELOPER_TOOLS = ("workspace.read_file",)
+
 
 @dataclass(frozen=True)
 class SpecializedExecution:
@@ -52,13 +59,17 @@ def _trusted(definition: object, service: object) -> bool:
         if service is qa_service
         else ("DEVELOPER_MANAGER" if service is manager_service else "DEVELOPER_WORKER")
     )
+    expected_permissions = (
+        developer_service.DEVELOPER_WORKER_PERMISSIONS if service is developer_service else []
+    )
+    expected_version = 2 if service is developer_service else 1
     return (
-        getattr(definition, "version", None) == 1
+        getattr(definition, "version", None) == expected_version
         and getattr(definition, "name", None) == getattr(service, f"{prefix}_NAME")
         and getattr(definition, "category", None) == getattr(service, f"{prefix}_CATEGORY")
         and getattr(definition, "mission", None) == getattr(service, f"{prefix}_MISSION")
         and getattr(definition, "capabilities", None) == getattr(service, f"{prefix}_CAPABILITIES")
-        and getattr(definition, "permissions", None) == []
+        and getattr(definition, "permissions", None) == expected_permissions
         and getattr(definition, "status", None) == "ENABLED"
     )
 
@@ -118,18 +129,25 @@ async def dispatch(
             status_code=409,
         )
     handoff = await _input_handoff(session, run, step_run, handoff_type)
+    permitted_tools = (
+        list(_DEVELOPMENT_WORKFLOW_DEVELOPER_TOOLS) if role == "developer_worker" else []
+    )
     common = dict(
         objective=handoff.objective,
         constraints=[
             "Requested actions are proposals only",
-            "Do not use tools or execute external actions",
+            (
+                "Use only the explicitly permitted read-only workspace tools"
+                if permitted_tools
+                else "Do not use tools or execute external actions"
+            ),
             "Remain within the fixed persisted workflow step",
             *[f"Trusted handoff metadata: {item}" for item in handoff.evidence_items],
         ],
         project_id=str(run.project_id),
         task_id=str(run.task_id),
         prior_result_references=[str(handoff.id)],
-        permitted_tools=[],
+        permitted_tools=permitted_tools,
         model_requirements=ModelRequirementHints(
             required_capabilities=[step.assigned_capability] if step.assigned_capability else [],
             minimum_contract_enforcement_grade=ContractEnforcementGrade.PROVIDER_ENFORCED,

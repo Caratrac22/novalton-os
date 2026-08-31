@@ -53,7 +53,8 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_model_runs_truncation_classification",
         ),
         CheckConstraint(
-            "recovery_attempt_kind IN ('INITIAL', 'TRUNCATION', 'CONTRACT_REPAIR')",
+            "recovery_attempt_kind IN "
+            "('INITIAL', 'TRUNCATION', 'CONTRACT_REPAIR', 'TOOL_CONTINUATION')",
             name="ck_model_runs_recovery_attempt_kind",
         ),
         CheckConstraint(

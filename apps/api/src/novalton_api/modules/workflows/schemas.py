@@ -19,6 +19,7 @@ from novalton_api.infrastructure.providers.contracts import ExecutionTargetClass
 from novalton_api.modules.agents.contracts import AgentResultStatus, ChallengeLevel
 from novalton_api.modules.agents.schemas import AgentRunStatus
 from novalton_api.modules.model_usage.schemas import ModelRunStatus
+from novalton_api.modules.policy.schemas import PolicyEffect
 from novalton_api.modules.qa_worker.contracts import QAVerdict
 
 Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
@@ -257,8 +258,26 @@ class OperatorModelRunResponse(BaseModel):
     total_tokens: int | None
     duration_ms: float | None
     failure_code: str | None
-    recovery_attempt_kind: Literal["INITIAL", "TRUNCATION", "CONTRACT_REPAIR"]
+    recovery_attempt_kind: Literal["INITIAL", "TRUNCATION", "CONTRACT_REPAIR", "TOOL_CONTINUATION"]
     recovery_attempt_index: int
+
+
+class OperatorToolCallResponse(BaseModel):
+    """Safe tool activity with no input query or file body."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: UUID
+    tool_name: str
+    status: Literal["PROPOSED", "PENDING_APPROVAL", "RUNNING", "SUCCEEDED", "FAILED", "BLOCKED"]
+    policy_effect: PolicyEffect | None
+    approval_request_id: UUID | None
+    execution_target_class: Literal["LOCAL"]
+    duration_ms: float | None
+    result_count: int | None
+    bytes_returned: int | None
+    truncated: bool | None
+    failure_code: str | None
 
 
 class OperatorAgentRunResponse(BaseModel):
@@ -272,6 +291,7 @@ class OperatorAgentRunResponse(BaseModel):
     agent_slug: str
     failure_code: str | None
     model_runs: list[OperatorModelRunResponse]
+    tool_calls: list[OperatorToolCallResponse]
 
 
 class OperatorStepDetailResponse(BaseModel):

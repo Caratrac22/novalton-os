@@ -43,6 +43,7 @@ from novalton_api.modules.projects.models import Project  # noqa: E402, F401
 from novalton_api.modules.runtime_events.models import RuntimeEvent  # noqa: E402, F401
 from novalton_api.modules.tasks.models import Task  # noqa: E402, F401
 from novalton_api.modules.tenants.models import Tenant  # noqa: E402, F401
+from novalton_api.modules.tools.models import ToolCall  # noqa: E402, F401
 from novalton_api.modules.workflows.models import (  # noqa: E402, F401
     WorkflowPlan,
     WorkflowRun,

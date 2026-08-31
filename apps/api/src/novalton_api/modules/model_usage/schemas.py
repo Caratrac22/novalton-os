@@ -53,7 +53,7 @@ class ModelRunStart(BaseModel):
     execution_max_output_tokens: int | None = Field(default=None, ge=1, le=65_536)
     output_budget_source: str | None = Field(default=None, pattern=r"^[a-z_]{1,64}$")
     recovery_attempt_kind: str = Field(
-        default="INITIAL", pattern=r"^(INITIAL|TRUNCATION|CONTRACT_REPAIR)$"
+        default="INITIAL", pattern=r"^(INITIAL|TRUNCATION|CONTRACT_REPAIR|TOOL_CONTINUATION)$"
     )
     recovery_attempt_index: int = Field(default=0, ge=0, le=1)
 

@@ -364,15 +364,22 @@ async def create_run(
 
 
 def _trusted_definition(
-    definition: object, *, name: str, category: str, mission: str, capabilities: list[str]
+    definition: object,
+    *,
+    name: str,
+    version: int,
+    category: str,
+    mission: str,
+    capabilities: list[str],
+    permissions: list[str],
 ) -> bool:
     return (
-        getattr(definition, "version", None) == 1
+        getattr(definition, "version", None) == version
         and getattr(definition, "name", None) == name
         and getattr(definition, "category", None) == category
         and getattr(definition, "mission", None) == mission
         and getattr(definition, "capabilities", None) == capabilities
-        and getattr(definition, "permissions", None) == []
+        and getattr(definition, "permissions", None) == permissions
     )
 
 
@@ -404,30 +411,42 @@ async def create_development_workflow(
         (
             manager,
             manager_service.DEVELOPER_MANAGER_NAME,
+            1,
             manager_service.DEVELOPER_MANAGER_CATEGORY,
             manager_service.DEVELOPER_MANAGER_MISSION,
             manager_service.DEVELOPER_MANAGER_CAPABILITIES,
+            [],
         ),
         (
             developer,
             developer_service.DEVELOPER_WORKER_NAME,
+            2,
             developer_service.DEVELOPER_WORKER_CATEGORY,
             developer_service.DEVELOPER_WORKER_MISSION,
             developer_service.DEVELOPER_WORKER_CAPABILITIES,
+            developer_service.DEVELOPER_WORKER_PERMISSIONS,
         ),
         (
             qa,
             qa_service.QA_WORKER_NAME,
+            1,
             qa_service.QA_WORKER_CATEGORY,
             qa_service.QA_WORKER_MISSION,
             qa_service.QA_WORKER_CAPABILITIES,
+            [],
         ),
     )
     if not all(
         _trusted_definition(
-            item, name=name, category=category, mission=mission, capabilities=capabilities
+            item,
+            name=name,
+            version=version,
+            category=category,
+            mission=mission,
+            capabilities=capabilities,
+            permissions=permissions,
         )
-        for item, name, category, mission, capabilities in checks
+        for item, name, version, category, mission, capabilities, permissions in checks
     ):
         raise ApplicationError(
             "development_workflow_unavailable",

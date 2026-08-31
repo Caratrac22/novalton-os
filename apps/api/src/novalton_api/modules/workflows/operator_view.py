@@ -10,12 +10,14 @@ from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_usage.models import ModelRun
 from novalton_api.modules.orchestrator.models import AgentChallengeResolution
 from novalton_api.modules.runtime_events.models import RuntimeEvent
+from novalton_api.modules.tools import repository as tools_repository
 from novalton_api.modules.workflows import repository, service
 from novalton_api.modules.workflows.schemas import (
     OperatorAgentRunResponse,
     OperatorChallengeResponse,
     OperatorModelRunResponse,
     OperatorStepDetailResponse,
+    OperatorToolCallResponse,
     OperatorWorkflowResponse,
     OperatorWorkflowRunResponse,
     WorkflowPlanResponse,
@@ -117,6 +119,39 @@ async def get_operator_view(
             )
         )
 
+    tool_calls_by_agent: dict[UUID, list[OperatorToolCallResponse]] = {}
+    for item in await tools_repository.list_for_agent_runs(session, agent_run_ids=agent_run_ids):
+        metadata = item.result_metadata or {}
+        tool_calls_by_agent.setdefault(item.agent_run_id, []).append(
+            OperatorToolCallResponse(
+                id=item.id,
+                tool_name=item.tool_id,
+                status=item.status,
+                policy_effect=item.policy_effect,
+                approval_request_id=item.approval_request_id,
+                execution_target_class="LOCAL",
+                duration_ms=(
+                    float(metadata["duration_ms"])
+                    if isinstance(metadata.get("duration_ms"), int | float)
+                    else None
+                ),
+                result_count=(
+                    metadata["result_count"]
+                    if isinstance(metadata.get("result_count"), int)
+                    else None
+                ),
+                bytes_returned=(
+                    metadata["bytes_returned"]
+                    if isinstance(metadata.get("bytes_returned"), int)
+                    else None
+                ),
+                truncated=(
+                    metadata["truncated"] if isinstance(metadata.get("truncated"), bool) else None
+                ),
+                failure_code=item.failure_code,
+            )
+        )
+
     qa_verdict = next((item.qa_verdict for item in challenges if item.qa_verdict is not None), None)
     if qa_verdict is None:
         event = await session.scalar(
@@ -168,6 +203,7 @@ async def get_operator_view(
                     agent_slug=agent.agent_slug,
                     failure_code=agent.failure_code,
                     model_runs=model_runs_by_agent.get(agent.id, []),
+                    tool_calls=tool_calls_by_agent.get(agent.id, []),
                 )
                 if agent is not None
                 else None,
