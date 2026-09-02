@@ -117,6 +117,7 @@ export type OperatorWorkflow = Readonly<{
   step_details: OperatorStepDetail[];
   qa_verdict: QAVerdict | null;
 }>;
+export type GitCommitAction = Readonly<{ id: string; branch_ref: string; prepared_head_sha: string; prepared_paths: ReadonlyArray<Readonly<{ path: string }>>; preview: Readonly<{ diff: string; path_count: number; diff_truncated: false }>; commit_message: string; action_fingerprint: string; policy_effect: "REQUIRE_CONFIRMATION"; approval_request_id: string | null; status: "PENDING_APPROVAL" | "APPLYING" | "APPLIED" | "FAILED" | "REJECTED"; resulting_commit_sha: string | null; failure_code: string | null }>;
 export type AdvanceResult = Readonly<{
   workflow_run_id: string;
   workflow_status: WorkflowRunStatus;

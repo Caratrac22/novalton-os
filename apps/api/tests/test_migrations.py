@@ -19,7 +19,7 @@ from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.workspaces.models import Workspace
 
 
-def test_alembic_configuration_loads_i041_safe_review_summary() -> None:
+def test_alembic_configuration_loads_i042_controlled_git_changeset() -> None:
     api_root = Path(__file__).parents[1]
     config = Config(api_root / "alembic.ini")
     scripts = ScriptDirectory.from_config(config)
@@ -28,9 +28,9 @@ def test_alembic_configuration_loads_i041_safe_review_summary() -> None:
     revision = scripts.get_revision(head)
     baseline = scripts.get_revision("20260820_0001")
 
-    assert head == "20260901_0029"
+    assert head == "20260902_0030"
     assert revision is not None
-    assert revision.down_revision == "20260831_0028"
+    assert revision.down_revision == "20260901_0029"
     assert baseline is not None
     assert baseline.down_revision is None
 

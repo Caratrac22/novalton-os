@@ -34,6 +34,7 @@ class Base(DeclarativeBase):
 from novalton_api.modules.agents.models import AgentDefinition, AgentRun  # noqa: E402, F401
 from novalton_api.modules.approvals.models import ApprovalRequest  # noqa: E402, F401
 from novalton_api.modules.audit.models import AuditRecord  # noqa: E402, F401
+from novalton_api.modules.git_changesets.models import GitCommitAction  # noqa: E402, F401
 from novalton_api.modules.memories.models import MemoryProvenance, MemoryRecord  # noqa: E402, F401
 from novalton_api.modules.model_catalog.models import ModelDefinition  # noqa: E402, F401
 from novalton_api.modules.model_usage.models import ModelRun  # noqa: E402, F401

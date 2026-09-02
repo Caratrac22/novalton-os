@@ -14,6 +14,8 @@ from novalton_api.modules.approvals.schemas import (
     ApprovalResponse,
     ApprovalStatus,
 )
+from novalton_api.modules.git_changesets import repository as git_repository
+from novalton_api.modules.git_changesets import service as git_service
 
 router = APIRouter(
     prefix="/tenants/{tenant_id}/workspaces/{workspace_id}/approvals",
@@ -79,19 +81,28 @@ async def approve(
     current = await service.get_approval(
         session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
     )
-    approval = (
-        await mutation_resume.approve_and_resume(
+    git_action = await git_repository.get_for_approval(
+        session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+    )
+    if git_action is not None:
+        approval = await service.approve(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+        )
+        await git_service.approve_and_apply(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+        )
+    elif current.mutation_fingerprint is not None:
+        approval = await mutation_resume.approve_and_resume(
             session,
             registry=request.app.state.provider_registry,
             tenant_id=tenant_id,
             workspace_id=workspace_id,
             approval_id=approval_id,
         )
-        if current.mutation_fingerprint is not None
-        else await service.approve(
+    else:
+        approval = await service.approve(
             session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
         )
-    )
     return ApprovalResponse.model_validate(approval)
 
 
@@ -105,13 +116,21 @@ async def reject(
     current = await service.get_approval(
         session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
     )
-    approval = (
-        await mutation_resume.reject_and_terminalize(
-            session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
-        )
-        if current.mutation_fingerprint is not None
-        else await service.reject(
-            session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
-        )
+    git_action = await git_repository.get_for_approval(
+        session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
     )
+    if git_action is not None:
+        approval = await service.reject(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+        )
+        git_action.status = "REJECTED"
+        await session.commit()
+    elif current.mutation_fingerprint is not None:
+        approval = await mutation_resume.reject_and_terminalize(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+        )
+    else:
+        approval = await service.reject(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+        )
     return ApprovalResponse.model_validate(approval)
