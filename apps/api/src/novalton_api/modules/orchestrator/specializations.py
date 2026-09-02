@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from novalton_api.core.config import get_settings
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.contracts import ContractEnforcementGrade
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
@@ -16,6 +17,7 @@ from novalton_api.modules.developer_manager.schemas import DeveloperManagerPlann
 from novalton_api.modules.developer_worker import service as developer_service
 from novalton_api.modules.developer_worker.contracts import (
     DeveloperWorkerResult,
+    DeveloperWorkerTerminalResult,
 )
 from novalton_api.modules.developer_worker.schemas import DeveloperWorkerExecutionRequest
 from novalton_api.modules.qa_worker import service as qa_service
@@ -44,7 +46,15 @@ FIXED_MANAGER_RESULT_CONSTRAINTS: tuple[ResultShapeConstraint, ...] = (
 # The fixed development workflow needs one evidence source only.  The broader
 # Developer Worker registry remains available to explicitly authorized direct
 # assignments, but this orchestrator never widens that authority.
-_DEVELOPMENT_WORKFLOW_DEVELOPER_TOOLS = ("workspace.read_file",)
+_DEVELOPMENT_WORKFLOW_DEVELOPER_TOOLS = ("workspace.read_file", "workspace.replace_text")
+
+
+def _development_workflow_tools() -> list[str]:
+    return (
+        list(_DEVELOPMENT_WORKFLOW_DEVELOPER_TOOLS)
+        if get_settings().workspace_root is not None
+        else []
+    )
 
 
 @dataclass(frozen=True)
@@ -62,7 +72,9 @@ def _trusted(definition: object, service: object) -> bool:
     expected_permissions = (
         developer_service.DEVELOPER_WORKER_PERMISSIONS if service is developer_service else []
     )
-    expected_version = 2 if service is developer_service else 1
+    expected_version = (
+        developer_service.DEVELOPER_WORKER_VERSION if service is developer_service else 1
+    )
     return (
         getattr(definition, "version", None) == expected_version
         and getattr(definition, "name", None) == getattr(service, f"{prefix}_NAME")
@@ -129,9 +141,7 @@ async def dispatch(
             status_code=409,
         )
     handoff = await _input_handoff(session, run, step_run, handoff_type)
-    permitted_tools = (
-        list(_DEVELOPMENT_WORKFLOW_DEVELOPER_TOOLS) if role == "developer_worker" else []
-    )
+    permitted_tools = _development_workflow_tools() if role == "developer_worker" else []
     common = dict(
         objective=handoff.objective,
         constraints=[
@@ -187,6 +197,62 @@ async def dispatch(
     return SpecializedExecution(response=response, role=role)
 
 
+async def developer_assignment_for_resume(
+    session: AsyncSession, *, run: WorkflowRun, step_run: WorkflowStepRun
+) -> tuple[object, DeveloperWorkerExecutionRequest]:
+    """Rebuild the bounded Developer assignment only from the immutable fixed workflow."""
+    graph = await repository.ordered_step_runs(session, run_id=run.id)
+    if [(item.step_key, item.position) for _, item in graph] != [
+        ("manager_plan", 0),
+        ("developer_execute", 1),
+        ("qa_validate", 2),
+    ]:
+        raise ApplicationError(
+            "workflow_specialization_invalid",
+            "Trusted workflow specialization is invalid",
+            status_code=409,
+        )
+    step = next((item for value, item in graph if value.id == step_run.id), None)
+    definition = await developer_service.resolve_definition(
+        session, tenant_id=run.tenant_id, workspace_id=run.workspace_id
+    )
+    if (
+        step is None
+        or step.step_key != "developer_execute"
+        or step.agent_definition_id != definition.id
+        or step_run.agent_run_id is None
+        or not _trusted(definition, developer_service)
+    ):
+        raise ApplicationError(
+            "workflow_specialization_invalid",
+            "Trusted workflow specialization is invalid",
+            status_code=409,
+        )
+    handoff = await _input_handoff(session, run, step_run, "MANAGER_ASSIGNMENT")
+    permitted_tools = _development_workflow_tools()
+    if "workspace.replace_text" not in permitted_tools:
+        raise ApplicationError(
+            "workspace_root_unavailable", "Approved workspace root is unavailable", status_code=409
+        )
+    return definition, DeveloperWorkerExecutionRequest(
+        objective=handoff.objective,
+        constraints=[
+            "Requested actions are proposals only",
+            "Use only the explicitly permitted server-owned workspace tools",
+            "Remain within the fixed persisted workflow step",
+            *[f"Trusted handoff metadata: {item}" for item in handoff.evidence_items],
+        ],
+        project_id=str(run.project_id),
+        task_id=str(run.task_id),
+        prior_result_references=[str(handoff.id)],
+        permitted_tools=permitted_tools,
+        model_requirements=ModelRequirementHints(
+            required_capabilities=[step.assigned_capability] if step.assigned_capability else [],
+            minimum_contract_enforcement_grade=ContractEnforcementGrade.PROVIDER_ENFORCED,
+        ),
+    )
+
+
 async def persist_next_handoff(
     session: AsyncSession,
     *,
@@ -220,7 +286,7 @@ async def persist_next_handoff(
         evidence = [f"task:{proposal.task_key}", f"output:{proposal.expected_output}"] + [
             f"capability:{value}" for value in proposal.required_capabilities
         ]
-    elif isinstance(result, DeveloperWorkerResult):
+    elif isinstance(result, (DeveloperWorkerResult, DeveloperWorkerTerminalResult)):
         handoff_type = "WORKER_EVIDENCE"
         evidence = [
             f"acceptance:{item.criterion_id}:{item.status.value}"

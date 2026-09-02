@@ -47,6 +47,7 @@ async def resolve_definition(
         tenant_id=tenant_id,
         workspace_id=workspace_id,
         slug=QA_WORKER_SLUG,
+        exclude_archived=True,
     )
     if definition is None:
         raise ApplicationError("qa_worker_unavailable", "QA Worker is unavailable", status_code=404)

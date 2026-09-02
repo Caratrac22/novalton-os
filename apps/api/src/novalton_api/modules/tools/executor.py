@@ -1,6 +1,8 @@
 """Conservative read-only workspace executors with one approved root."""
 
 import hashlib
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -14,6 +16,7 @@ from novalton_api.modules.tools.contracts import (
     ToolDefinition,
     WorkspaceListFilesInput,
     WorkspaceReadFileInput,
+    WorkspaceReplaceTextInput,
     WorkspaceSearchTextInput,
 )
 
@@ -31,6 +34,8 @@ _DENIED_SUFFIXES = {".key", ".pem", ".p12", ".pfx"}
 _MAX_SCANNED_FILES = 1_000
 _MAX_SEARCH_FILE_BYTES = 65_536
 _MAX_SNIPPET_CHARACTERS = 300
+_MAX_MUTATION_FILE_BYTES = 65_536
+_MAX_DIFF_BYTES = 16_384
 
 
 class ToolExecutionError(ValueError):
@@ -249,6 +254,117 @@ class SearchTextExecutor:
         return evidence, metadata
 
 
+class ReplaceTextExecutor:
+    input_model = WorkspaceReplaceTextInput
+
+    def prepare(
+        self, root: WorkspaceRoot, data: WorkspaceReplaceTextInput
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        path = root.resolve(data.path, allow_directory=False)
+        try:
+            before = path.read_bytes()
+        except OSError:
+            raise ToolExecutionError("workspace_read_failed") from None
+        if len(before) > _MAX_MUTATION_FILE_BYTES:
+            raise ToolExecutionError("oversized_file_denied")
+        if b"\x00" in before:
+            raise ToolExecutionError("binary_file_denied")
+        try:
+            text = before.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            raise ToolExecutionError("non_utf8_file_denied") from None
+        matches = text.count(data.search)
+        if matches != data.expected_matches:
+            raise ToolExecutionError("replace_match_count_mismatch")
+        candidate = text.replace(data.search, data.replacement)
+        candidate_bytes = candidate.encode("utf-8")
+        if len(candidate_bytes) > _MAX_MUTATION_FILE_BYTES:
+            raise ToolExecutionError("oversized_candidate_denied")
+        before_sha = hashlib.sha256(before).hexdigest()
+        candidate_sha = hashlib.sha256(candidate_bytes).hexdigest()
+        mutation_sha = hashlib.sha256(
+            (root.relative(path) + "\0" + before_sha + "\0" + candidate_sha).encode()
+        ).hexdigest()
+        import difflib
+
+        diff = "".join(
+            difflib.unified_diff(
+                text.splitlines(keepends=True),
+                candidate.splitlines(keepends=True),
+                fromfile=root.relative(path),
+                tofile=root.relative(path),
+            )
+        )
+        diff_bytes = diff.encode("utf-8")
+        truncated = len(diff_bytes) > _MAX_DIFF_BYTES
+        if truncated:
+            raise ToolExecutionError("diff_preview_too_large")
+        preview = diff_bytes[:_MAX_DIFF_BYTES].decode("utf-8", errors="replace")
+        metadata = {
+            "path": root.relative(path),
+            "preimage_sha256": before_sha,
+            "candidate_sha256": candidate_sha,
+            "mutation_fingerprint": mutation_sha,
+            "before_bytes": len(before),
+            "after_bytes": len(candidate_bytes),
+            "before_lines": text.count("\n") + (1 if text else 0),
+            "after_lines": candidate.count("\n") + (1 if candidate else 0),
+            "diff_preview": preview,
+            "diff_truncated": truncated,
+            "search": data.search,
+            "replacement": data.replacement,
+            "expected_matches": data.expected_matches,
+        }
+        return {
+            "path": root.relative(path),
+            "preview": preview,
+            "diff_truncated": truncated,
+        }, metadata
+
+    def apply(
+        self, root: WorkspaceRoot, data: WorkspaceReplaceTextInput, prepared: dict[str, Any]
+    ) -> dict[str, Any]:
+        path = root.resolve(data.path, allow_directory=False)
+        try:
+            current = path.read_bytes()
+        except OSError:
+            raise ToolExecutionError("workspace_read_failed") from None
+        current_sha = hashlib.sha256(current).hexdigest()
+        if current_sha == prepared["candidate_sha256"]:
+            return {"path": root.relative(path), "already_applied": True}
+        if current_sha != prepared["preimage_sha256"]:
+            raise ToolExecutionError("stale_preimage")
+        try:
+            current_text = current.decode("utf-8", errors="strict")
+            search = str(prepared["search"])
+            replacement = str(prepared["replacement"])
+            expected_matches = int(prepared["expected_matches"])
+        except (UnicodeDecodeError, KeyError, TypeError, ValueError):
+            raise ToolExecutionError("prepared_mutation_invalid") from None
+        if current_text.count(search) != expected_matches:
+            raise ToolExecutionError("stale_preimage")
+        candidate = current_text.replace(search, replacement).encode("utf-8")
+        candidate_sha = hashlib.sha256(candidate).hexdigest()
+        mutation_sha = hashlib.sha256(
+            (root.relative(path) + "\0" + current_sha + "\0" + candidate_sha).encode()
+        ).hexdigest()
+        if candidate_sha != prepared.get("candidate_sha256") or mutation_sha != prepared.get(
+            "mutation_fingerprint"
+        ):
+            raise ToolExecutionError("mutation_fingerprint_mismatch")
+        fd, temporary = tempfile.mkstemp(prefix=".novalton-i041-", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(candidate)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return {"path": root.relative(path), "already_applied": False}
+
+
 @dataclass(frozen=True)
 class RegisteredTool:
     definition: ToolDefinition
@@ -271,18 +387,25 @@ class ToolRegistry:
         return tuple(self._tools[key].definition for key in sorted(self._tools))
 
 
-def _registered(tool_id: str, description: str, executor: Executor) -> RegisteredTool:
+def _registered(
+    tool_id: str,
+    description: str,
+    executor: Executor,
+    *,
+    side_effect: SideEffectClass = SideEffectClass.READ_ONLY,
+    risk: RiskLevel = RiskLevel.LOW,
+) -> RegisteredTool:
     return RegisteredTool(
         definition=ToolDefinition(
             tool_id=tool_id,
             description=description,
             input_schema=executor.input_model.model_json_schema(),
             output_max_bytes=131_072,
-            risk_class=RiskLevel.LOW,
+            risk_class=risk,
             execution_locality=ExecutionTargetClass.LOCAL,
             required_permission=tool_id,
             policy_action=f"tool.{tool_id}",
-            side_effect_class=SideEffectClass.READ_ONLY,
+            side_effect_class=side_effect,
         ),
         executor=executor,
     )
@@ -300,6 +423,13 @@ TRUSTED_TOOL_REGISTRY = ToolRegistry(
             "workspace.search_text",
             "Search bounded workspace text literally.",
             SearchTextExecutor(),
+        ),
+        _registered(
+            "workspace.replace_text",
+            "Replace exact bounded text in one UTF-8 file.",
+            ReplaceTextExecutor(),
+            side_effect=SideEffectClass.MUTATION,
+            risk=RiskLevel.MEDIUM,
         ),
     )
 )

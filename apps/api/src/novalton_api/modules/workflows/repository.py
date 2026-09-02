@@ -168,13 +168,23 @@ async def step_runs_for_runs(
 
 
 async def get_step_run(
-    session: AsyncSession, *, run_id: UUID, step_run_id: UUID
+    session: AsyncSession, *, run_id: UUID, step_run_id: UUID, for_update: bool = False
 ) -> WorkflowStepRun | None:
-    return await session.scalar(
-        select(WorkflowStepRun).where(
-            WorkflowStepRun.workflow_run_id == run_id, WorkflowStepRun.id == step_run_id
-        )
+    statement = select(WorkflowStepRun).where(
+        WorkflowStepRun.workflow_run_id == run_id, WorkflowStepRun.id == step_run_id
     )
+    if for_update:
+        statement = statement.with_for_update()
+    return await session.scalar(statement)
+
+
+async def step_run_for_agent(
+    session: AsyncSession, *, agent_run_id: UUID, for_update: bool = False
+) -> WorkflowStepRun | None:
+    statement = select(WorkflowStepRun).where(WorkflowStepRun.agent_run_id == agent_run_id)
+    if for_update:
+        statement = statement.with_for_update()
+    return await session.scalar(statement)
 
 
 async def ordered_step_runs(

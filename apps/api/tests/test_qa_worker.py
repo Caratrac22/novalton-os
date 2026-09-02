@@ -68,6 +68,7 @@ async def test_qa_worker_uses_i022_execution_exactly_once(monkeypatch) -> None:
             "tenant_id": tenant_id,
             "workspace_id": workspace_id,
             "slug": service.QA_WORKER_SLUG,
+            "exclude_archived": True,
         }
         return definition
 
@@ -125,6 +126,7 @@ async def test_qa_worker_resolves_latest_same_scope_and_rejects_unavailable(monk
             "tenant_id": tenant_id,
             "workspace_id": workspace_id,
             "slug": service.QA_WORKER_SLUG,
+            "exclude_archived": True,
         }
     ]
 

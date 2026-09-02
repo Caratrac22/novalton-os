@@ -39,6 +39,7 @@ class ToolContract(BaseModel):
 
 class SideEffectClass(StrEnum):
     READ_ONLY = "READ_ONLY"
+    MUTATION = "MUTATION"
 
 
 class WorkspaceListFilesInput(ToolContract):
@@ -92,13 +93,44 @@ class WorkspaceSearchTextArguments(WorkspaceSearchTextInput):
     """Closed proposal arguments for workspace.search_text."""
 
 
+class WorkspaceReplaceTextInput(ToolContract):
+    path: str = Field(min_length=1, max_length=300)
+    search: str = Field(min_length=1, max_length=16_384)
+    replacement: str = Field(max_length=16_384)
+    expected_matches: int = Field(default=1, ge=1, le=8)
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        return _relative_path(value)
+
+    @field_validator("search", "replacement")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        if any(ord(character) < 32 and character not in "\n\t\r" for character in value):
+            raise ValueError("text contains forbidden control characters")
+        return value
+
+
+class WorkspaceReplaceTextArguments(WorkspaceReplaceTextInput):
+    """Closed proposal arguments for workspace.replace_text."""
+
+
 class ToolProposal(ToolContract):
     """A model-authored proposal with a closed, tool-specific argument schema."""
 
     call_key: Identifier
-    tool_name: Literal["workspace.list_files", "workspace.read_file", "workspace.search_text"]
+    tool_name: Literal[
+        "workspace.list_files",
+        "workspace.read_file",
+        "workspace.search_text",
+        "workspace.replace_text",
+    ]
     arguments: (
-        WorkspaceListFilesArguments | WorkspaceReadFileArguments | WorkspaceSearchTextArguments
+        WorkspaceListFilesArguments
+        | WorkspaceReadFileArguments
+        | WorkspaceSearchTextArguments
+        | WorkspaceReplaceTextArguments
     )
 
     @model_validator(mode="before")
@@ -111,6 +143,7 @@ class ToolProposal(ToolContract):
             "workspace.list_files": WorkspaceListFilesArguments,
             "workspace.read_file": WorkspaceReadFileArguments,
             "workspace.search_text": WorkspaceSearchTextArguments,
+            "workspace.replace_text": WorkspaceReplaceTextArguments,
         }
         model = argument_models.get(tool_name)
         if model is None:

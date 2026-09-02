@@ -53,6 +53,9 @@ class ApprovalCreate(BaseModel):
     task_id: UUID | None = None
     scope_type: Literal[ApprovalScopeType.ONE_ACTION] = ApprovalScopeType.ONE_ACTION
     context: PolicyEvaluationContext = Field(default_factory=PolicyEvaluationContext)
+    mutation_fingerprint: str | None = Field(
+        default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
 
     @field_validator("action")
     @classmethod
@@ -108,6 +111,7 @@ class ApprovalResponse(BaseModel):
     requested_at: datetime
     decided_at: datetime | None
     correlation_id: str | None
+    mutation_fingerprint: str | None
 
 
 class ApprovalListResponse(BaseModel):

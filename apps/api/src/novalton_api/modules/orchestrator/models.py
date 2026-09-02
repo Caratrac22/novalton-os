@@ -13,6 +13,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -49,6 +50,16 @@ class AgentChallengeResolution(UUIDPrimaryKeyMixin, Base):
             "(specialization_role = 'qa_worker' AND qa_verdict IS NOT NULL) OR "
             "(specialization_role IS DISTINCT FROM 'qa_worker' AND qa_verdict IS NULL)",
             name="ck_agent_challenge_resolutions_qa_role_verdict",
+        ),
+        CheckConstraint(
+            "safe_review_summary IS NULL OR specialization_role = 'qa_worker'",
+            name="ck_agent_challenge_resolutions_review_role",
+        ),
+        CheckConstraint(
+            "safe_review_summary IS NULL OR "
+            "(jsonb_typeof(safe_review_summary) = 'object' "
+            "AND octet_length(safe_review_summary::text) <= 524288)",
+            name="ck_agent_challenge_resolutions_review_shape",
         ),
         CheckConstraint(
             "decision IS NULL OR decision IN ('ACCEPT_RESULT', 'REJECT_RESULT')",
@@ -106,6 +117,9 @@ class AgentChallengeResolution(UUIDPrimaryKeyMixin, Base):
     result_status: Mapped[str] = mapped_column(String(16), nullable=False)
     specialization_role: Mapped[str | None] = mapped_column(String(24), nullable=True)
     qa_verdict: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    safe_review_summary: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     decision: Mapped[str | None] = mapped_column(String(24), nullable=True)
     decision_actor_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
     decision_actor_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

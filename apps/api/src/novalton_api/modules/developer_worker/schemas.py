@@ -5,6 +5,7 @@ from pydantic import ConfigDict
 from novalton_api.modules.agents.schemas import AgentExecutionResponse
 from novalton_api.modules.developer_worker.contracts import (
     DeveloperWorkerResult,
+    DeveloperWorkerTerminalResult,
     DevelopmentAssignmentInput,
 )
 
@@ -15,4 +16,4 @@ class DeveloperWorkerExecutionRequest(DevelopmentAssignmentInput):
 
 class DeveloperWorkerExecutionResponse(AgentExecutionResponse):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    result: DeveloperWorkerResult | None = None
+    result: DeveloperWorkerResult | DeveloperWorkerTerminalResult | None = None

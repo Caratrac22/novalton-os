@@ -123,3 +123,4 @@ class ApprovalRequest(UUIDPrimaryKeyMixin, Base):
     )
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    mutation_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)

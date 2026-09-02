@@ -1,4 +1,4 @@
-import type { ChallengeDecision, ChallengeLevel, WorkflowRun, WorkflowStep } from "./api/workflow-types";
+import type { ChallengeDecision, ChallengeLevel, OperatorChallenge, WorkflowRun, WorkflowStep } from "./api/workflow-types";
 
 export function orderedWorkflowSteps(steps: readonly WorkflowStep[]): WorkflowStep[] {
   return [...steps].sort((left, right) => left.position - right.position);
@@ -10,6 +10,10 @@ export function canAdvanceWorkflow(run: WorkflowRun, busy = false): boolean {
 
 export function challengeDecisions(level: ChallengeLevel): ChallengeDecision[] {
   return level === "BLOCK_RECOMMENDED" ? ["REJECT_RESULT"] : ["ACCEPT_RESULT", "REJECT_RESULT"];
+}
+
+export function canResolveChallenge(challenge: OperatorChallenge): boolean {
+  return challenge.review_summary_status !== "MISSING";
 }
 
 export function challengeResolutionBody(decision: ChallengeDecision, reason: string): Readonly<{ decision: ChallengeDecision; reason: string | null }> {

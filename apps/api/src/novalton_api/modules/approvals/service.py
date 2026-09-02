@@ -127,6 +127,7 @@ async def create_approval(
             matched_rule_ids=[str(rule_id) for rule_id in result.matched_rule_ids],
             policy_reasons=result.reasons,
             correlation_id=get_correlation_id(),
+            mutation_fingerprint=data.mutation_fingerprint,
         )
         await append_record(
             session, data=_audit_data(approval, action="approval.request"), commit=False
@@ -272,7 +273,11 @@ async def reject(
     )
 
 
-def _exact_scope_matches(approval: ApprovalRequest, request: PolicyEvaluationRequest) -> bool:
+def _exact_scope_matches(
+    approval: ApprovalRequest,
+    request: PolicyEvaluationRequest,
+    mutation_fingerprint: str | None = None,
+) -> bool:
     return (
         approval.tenant_id == request.tenant_id
         and approval.workspace_id == request.workspace_id
@@ -284,6 +289,7 @@ def _exact_scope_matches(approval: ApprovalRequest, request: PolicyEvaluationReq
         and approval.project_id == request.project_id
         and approval.task_id == request.task_id
         and approval.scope_type == "ONE_ACTION"
+        and approval.mutation_fingerprint == mutation_fingerprint
     )
 
 
@@ -292,6 +298,7 @@ async def is_approval_satisfied(
     *,
     approval_id: UUID,
     request: PolicyEvaluationRequest,
+    mutation_fingerprint: str | None = None,
 ) -> bool:
     """Check exact prior authority and re-evaluate so a later BLOCK always wins."""
     approval = await repository.get_scoped_approval(
@@ -302,7 +309,7 @@ async def is_approval_satisfied(
     )
     if approval is None or approval.status != ApprovalStatus.APPROVED.value:
         return False
-    if not _exact_scope_matches(approval, request):
+    if not _exact_scope_matches(approval, request, mutation_fingerprint):
         return False
     if not isinstance(approval.matched_rule_ids, list) or not isinstance(
         approval.policy_reasons, list

@@ -34,7 +34,9 @@ class ToolCall(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_tool_calls_policy_effect_value",
         ),
         CheckConstraint("execution_target_class = 'LOCAL'", name="ck_tool_calls_target_local"),
-        CheckConstraint("side_effect_class = 'READ_ONLY'", name="ck_tool_calls_read_only"),
+        CheckConstraint(
+            "side_effect_class IN ('READ_ONLY','MUTATION')", name="ck_tool_calls_side_effect"
+        ),
         CheckConstraint(
             "failure_code IS NULL OR char_length(failure_code) BETWEEN 1 AND 64",
             name="ck_tool_calls_failure_code_length",
@@ -112,3 +114,7 @@ class ToolCall(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    mutation_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    preimage_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    candidate_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prepared_mutation: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)

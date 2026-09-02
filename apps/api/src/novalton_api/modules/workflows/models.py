@@ -232,7 +232,8 @@ class WorkflowStepRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "id", "workflow_run_id", "workflow_plan_id", name="uq_workflow_step_runs_id_run_plan"
         ),
         CheckConstraint(
-            "status IN ('PENDING', 'READY', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED')",
+            "status IN ('PENDING', 'READY', 'RUNNING', 'WAITING_FOR_APPROVAL', "
+            "'COMPLETED', 'FAILED', 'CANCELLED')",
             name="ck_workflow_step_runs_status_value",
         ),
         CheckConstraint(
@@ -242,6 +243,8 @@ class WorkflowStepRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(
             "(status IN ('PENDING', 'READY') AND started_at IS NULL AND completed_at IS NULL "
             "AND failure_code IS NULL) OR (status = 'RUNNING' AND started_at IS NOT NULL "
+            "AND completed_at IS NULL AND failure_code IS NULL) OR "
+            "(status = 'WAITING_FOR_APPROVAL' AND started_at IS NOT NULL "
             "AND completed_at IS NULL AND failure_code IS NULL) OR (status = 'COMPLETED' "
             "AND started_at IS NOT NULL AND completed_at IS NOT NULL AND failure_code IS NULL) "
             "OR (status = 'FAILED' AND started_at IS NOT NULL AND completed_at IS NOT NULL "
@@ -276,7 +279,7 @@ class WorkflowStepRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=True,
         unique=True,
     )
-    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
     failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

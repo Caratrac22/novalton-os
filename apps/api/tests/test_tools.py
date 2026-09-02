@@ -26,12 +26,14 @@ from novalton_api.modules.tools.contracts import (
     ToolProposal,
     WorkspaceListFilesArguments,
     WorkspaceReadFileArguments,
+    WorkspaceReplaceTextArguments,
     WorkspaceSearchTextArguments,
 )
 from novalton_api.modules.tools.executor import (
     TRUSTED_TOOL_REGISTRY,
     ListFilesExecutor,
     ReadFileExecutor,
+    ReplaceTextExecutor,
     SearchTextExecutor,
     ToolExecutionError,
     WorkspaceRoot,
@@ -51,16 +53,17 @@ def safe_workspace(tmp_path: Path) -> WorkspaceRoot:
     return WorkspaceRoot.approved(tmp_path)
 
 
-def test_registry_contains_only_server_owned_read_only_workspace_tools() -> None:
+def test_registry_contains_only_server_owned_workspace_tools() -> None:
     definitions = TRUSTED_TOOL_REGISTRY.definitions
     assert [item.tool_id for item in definitions] == [
         "workspace.list_files",
         "workspace.read_file",
+        "workspace.replace_text",
         "workspace.search_text",
     ]
-    assert all(item.side_effect_class.value == "READ_ONLY" for item in definitions)
+    assert all(item.side_effect_class.value in {"READ_ONLY", "MUTATION"} for item in definitions)
     assert all(item.execution_locality.value == "LOCAL" for item in definitions)
-    assert not any("shell" in item.tool_id or "write" in item.tool_id for item in definitions)
+    assert not any("shell" in item.tool_id for item in definitions)
 
 
 def test_tool_proposal_schema_is_closed_world_and_tool_specific() -> None:
@@ -89,6 +92,13 @@ def test_tool_proposal_schema_is_closed_world_and_tool_specific() -> None:
     assert ToolProposal(
         call_key="search", tool_name="workspace.search_text", arguments={"query": "marker"}
     ).arguments == WorkspaceSearchTextArguments(query="marker")
+    assert ToolProposal(
+        call_key="replace",
+        tool_name="workspace.replace_text",
+        arguments={"path": "fixture.txt", "search": "old", "replacement": "new"},
+    ).arguments == WorkspaceReplaceTextArguments(
+        path="fixture.txt", search="old", replacement="new"
+    )
 
     for tool_name, arguments in (
         ("workspace.list_files", {"path": ".", "query": "x"}),
@@ -105,6 +115,18 @@ def test_tool_proposal_schema_is_closed_world_and_tool_specific() -> None:
             tool_name="workspace.read_file",
             arguments={"path": "fixture.txt", "permission": "admin"},
         )
+
+
+def test_replace_text_is_deterministic_and_stale_safe(tmp_path: Path) -> None:
+    path = tmp_path / "fixture.txt"
+    path.write_text("old\n", encoding="utf-8")
+    root = WorkspaceRoot.approved(tmp_path)
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.txt", search="old", replacement="new")
+    _, prepared = executor.prepare(root, data)
+    path.write_text("changed\n", encoding="utf-8")
+    with pytest.raises(ToolExecutionError, match="stale_preimage"):
+        executor.apply(root, data, prepared)
 
 
 def test_read_file_is_bounded_and_treats_instruction_text_as_data(
@@ -167,7 +189,9 @@ def test_list_and_literal_search_are_deterministically_bounded(
     assert "query" not in search_metadata
 
 
-async def _seed_gateway(permission: bool = True) -> tuple[UUID, UUID, UUID, UUID, UUID]:
+async def _seed_gateway(
+    permission: bool = True, permissions: list[str] | None = None
+) -> tuple[UUID, UUID, UUID, UUID, UUID]:
     database = Database.from_settings(Settings())
     try:
         async with database.session_factory.begin() as session:
@@ -191,7 +215,9 @@ async def _seed_gateway(permission: bool = True) -> tuple[UUID, UUID, UUID, UUID
                 category="development",
                 mission="Inspect one safe fixture.",
                 capabilities=["software_implementation"],
-                permissions=["workspace.read_file"] if permission else [],
+                permissions=permissions
+                if permissions is not None
+                else (["workspace.read_file"] if permission else []),
             )
             session.add_all((task, definition))
             await session.flush()
@@ -238,7 +264,12 @@ async def _cleanup_gateway(tenant_id: UUID) -> None:
         await database.dispose()
 
 
-async def _rule(tenant_id: UUID, workspace_id: UUID, effect: PolicyEffect) -> None:
+async def _rule(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    effect: PolicyEffect,
+    action_pattern: str = "tool.workspace.read_file",
+) -> None:
     database = Database.from_settings(Settings())
     try:
         async with database.session_factory() as session:
@@ -248,7 +279,7 @@ async def _rule(tenant_id: UUID, workspace_id: UUID, effect: PolicyEffect) -> No
                     tenant_id=tenant_id,
                     workspace_id=workspace_id,
                     name=f"Tool {effect.value}",
-                    action_pattern="tool.workspace.read_file",
+                    action_pattern=action_pattern,
                     effect=effect,
                     actor_type="agent",
                 ),
@@ -572,6 +603,137 @@ async def test_cross_workspace_agent_linkage_is_not_disclosed(
                     workspace_root=safe_workspace,
                 )
         assert error.value.code == "resource_not_found"
+    finally:
+        await database.dispose()
+        await _cleanup_gateway(tenant_id)
+
+
+@pytest.mark.asyncio
+async def test_replace_text_requires_bound_approval_and_applies_exact_candidate(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "fixture.txt"
+    path.write_text("before\n", encoding="utf-8")
+    root = WorkspaceRoot.approved(tmp_path)
+    tenant_id, workspace_id, _, _, run_id = await _seed_gateway(
+        permissions=["workspace.replace_text"]
+    )
+    await _rule(
+        tenant_id,
+        workspace_id,
+        PolicyEffect.REQUIRE_CONFIRMATION,
+        "tool.workspace.replace_text",
+    )
+    proposal = ToolProposal(
+        call_key="replace_fixture",
+        tool_name="workspace.replace_text",
+        arguments={"path": "fixture.txt", "search": "before", "replacement": "after"},
+    )
+    database = Database.from_settings(Settings())
+    try:
+        async with database.session_factory() as session:
+            pending = await service.execute_proposal(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_run_id=run_id,
+                proposal=proposal,
+                permitted_tools=["workspace.replace_text"],
+                workspace_root=root,
+            )
+            assert pending.status == ToolExecutionStatus.PENDING_APPROVAL
+            assert pending.approval_id is not None
+            assert path.read_text(encoding="utf-8") == "before\n"
+            call = await session.scalar(select(ToolCall).where(ToolCall.agent_run_id == run_id))
+            approval = await session.get(ApprovalRequest, UUID(pending.approval_id))
+            assert call is not None and approval is not None
+            assert call.mutation_fingerprint == approval.mutation_fingerprint
+            assert call.mutation_fingerprint is not None
+            assert "candidate_text" not in (call.result_metadata or {})
+            await approvals_service.approve(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                approval_id=approval.id,
+            )
+            applied = await service.execute_proposal(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_run_id=run_id,
+                proposal=proposal,
+                permitted_tools=["workspace.replace_text"],
+                workspace_root=root,
+                approval_id=approval.id,
+            )
+            replay = await service.execute_proposal(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_run_id=run_id,
+                proposal=proposal,
+                permitted_tools=["workspace.replace_text"],
+                workspace_root=root,
+                approval_id=approval.id,
+            )
+        assert applied.status == ToolExecutionStatus.SUCCEEDED
+        assert replay.status == ToolExecutionStatus.SUCCEEDED
+        assert path.read_text(encoding="utf-8") == "after\n"
+    finally:
+        await database.dispose()
+        await _cleanup_gateway(tenant_id)
+
+
+@pytest.mark.asyncio
+async def test_replace_text_changed_preimage_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "fixture.txt"
+    path.write_text("before\n", encoding="utf-8")
+    root = WorkspaceRoot.approved(tmp_path)
+    tenant_id, workspace_id, _, _, run_id = await _seed_gateway(
+        permissions=["workspace.replace_text"]
+    )
+    await _rule(
+        tenant_id,
+        workspace_id,
+        PolicyEffect.REQUIRE_CONFIRMATION,
+        "tool.workspace.replace_text",
+    )
+    proposal = ToolProposal(
+        call_key="replace_stale",
+        tool_name="workspace.replace_text",
+        arguments={"path": "fixture.txt", "search": "before", "replacement": "after"},
+    )
+    database = Database.from_settings(Settings())
+    try:
+        async with database.session_factory() as session:
+            pending = await service.execute_proposal(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_run_id=run_id,
+                proposal=proposal,
+                permitted_tools=["workspace.replace_text"],
+                workspace_root=root,
+            )
+            assert pending.approval_id is not None
+            approval_id = UUID(pending.approval_id)
+            await approvals_service.approve(
+                session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+            )
+            path.write_text("changed\n", encoding="utf-8")
+            result = await service.execute_proposal(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_run_id=run_id,
+                proposal=proposal,
+                permitted_tools=["workspace.replace_text"],
+                workspace_root=root,
+                approval_id=approval_id,
+            )
+        assert result.status == ToolExecutionStatus.FAILED
+        assert result.failure_code == "stale_preimage"
+        assert path.read_text(encoding="utf-8") == "changed\n"
     finally:
         await database.dispose()
         await _cleanup_gateway(tenant_id)

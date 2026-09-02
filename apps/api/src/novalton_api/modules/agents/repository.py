@@ -31,18 +31,21 @@ async def get_definition(
 
 
 async def latest_definition(
-    session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID, slug: str
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    slug: str,
+    exclude_archived: bool = False,
 ) -> AgentDefinition | None:
-    return await session.scalar(
-        select(AgentDefinition)
-        .where(
-            AgentDefinition.tenant_id == tenant_id,
-            AgentDefinition.workspace_id == workspace_id,
-            AgentDefinition.slug == slug,
-        )
-        .order_by(AgentDefinition.version.desc())
-        .limit(1)
+    statement = select(AgentDefinition).where(
+        AgentDefinition.tenant_id == tenant_id,
+        AgentDefinition.workspace_id == workspace_id,
+        AgentDefinition.slug == slug,
     )
+    if exclude_archived:
+        statement = statement.where(AgentDefinition.status != "ARCHIVED")
+    return await session.scalar(statement.order_by(AgentDefinition.version.desc()).limit(1))
 
 
 async def list_definitions(
@@ -65,11 +68,14 @@ async def list_definitions(
                 candidate.tenant_id == tenant_id,
                 candidate.workspace_id == workspace_id,
                 candidate.slug == AgentDefinition.slug,
+                candidate.status != "ARCHIVED",
             )
             .correlate(AgentDefinition)
             .scalar_subquery()
         )
-        statement = statement.where(AgentDefinition.version == latest_version)
+        statement = statement.where(
+            AgentDefinition.status != "ARCHIVED", AgentDefinition.version == latest_version
+        )
     rows = await session.scalars(
         statement.order_by(AgentDefinition.slug.asc(), AgentDefinition.version.desc())
         .limit(limit)
@@ -86,15 +92,21 @@ async def create_run(session: AsyncSession, **values: object) -> AgentRun:
 
 
 async def get_run(
-    session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID, run_id: UUID
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    run_id: UUID,
+    for_update: bool = False,
 ) -> AgentRun | None:
-    return await session.scalar(
-        select(AgentRun).where(
-            AgentRun.id == run_id,
-            AgentRun.tenant_id == tenant_id,
-            AgentRun.workspace_id == workspace_id,
-        )
+    statement = select(AgentRun).where(
+        AgentRun.id == run_id,
+        AgentRun.tenant_id == tenant_id,
+        AgentRun.workspace_id == workspace_id,
     )
+    if for_update:
+        statement = statement.with_for_update()
+    return await session.scalar(statement)
 
 
 async def list_runs(

@@ -1,5 +1,6 @@
 """Safe read-only composition for the local workflow operator console."""
 
+import json
 from uuid import UUID
 
 from sqlalchemy import select
@@ -9,6 +10,7 @@ from novalton_api.modules.agents.models import AgentRun
 from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_usage.models import ModelRun
 from novalton_api.modules.orchestrator.models import AgentChallengeResolution
+from novalton_api.modules.qa_worker.contracts import QAHumanReviewSummary
 from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tools import repository as tools_repository
 from novalton_api.modules.workflows import repository, service
@@ -149,6 +151,22 @@ async def get_operator_view(
                     metadata["truncated"] if isinstance(metadata.get("truncated"), bool) else None
                 ),
                 failure_code=item.failure_code,
+                target_path=(item.prepared_mutation or {}).get("path")
+                if item.prepared_mutation
+                else None,
+                mutation_fingerprint=item.mutation_fingerprint,
+                before_lines=(item.prepared_mutation or {}).get("before_lines")
+                if item.prepared_mutation
+                else None,
+                after_lines=(item.prepared_mutation or {}).get("after_lines")
+                if item.prepared_mutation
+                else None,
+                diff_preview=(item.prepared_mutation or {}).get("diff_preview")
+                if item.prepared_mutation
+                else None,
+                diff_truncated=(item.prepared_mutation or {}).get("diff_truncated")
+                if item.prepared_mutation
+                else None,
             )
         )
 
@@ -182,6 +200,11 @@ async def get_operator_view(
         step_run = step_run_by_step[step.id]
         challenge = challenge_by_step.get(step_run.id)
         agent = agent_by_id.get(step_run.agent_run_id)
+        safe_review_summary = (
+            QAHumanReviewSummary.model_validate_json(json.dumps(challenge.safe_review_summary))
+            if challenge is not None and challenge.safe_review_summary is not None
+            else None
+        )
         details.append(
             OperatorStepDetailResponse(
                 workflow_step_run_id=step_run.id,
@@ -191,6 +214,14 @@ async def get_operator_view(
                     result_status=challenge.result_status,
                     specialization_role=challenge.specialization_role,
                     qa_verdict=challenge.qa_verdict,
+                    review_summary_status=(
+                        "AVAILABLE"
+                        if challenge.safe_review_summary is not None
+                        else "MISSING"
+                        if challenge.specialization_role == "qa_worker"
+                        else "NOT_APPLICABLE"
+                    ),
+                    safe_review_summary=safe_review_summary,
                     decision=challenge.decision,
                     decided_at=challenge.decided_at,
                 )

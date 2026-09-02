@@ -20,7 +20,7 @@ from novalton_api.modules.agents.contracts import AgentResultStatus, ChallengeLe
 from novalton_api.modules.agents.schemas import AgentRunStatus
 from novalton_api.modules.model_usage.schemas import ModelRunStatus
 from novalton_api.modules.policy.schemas import PolicyEffect
-from novalton_api.modules.qa_worker.contracts import QAVerdict
+from novalton_api.modules.qa_worker.contracts import QAHumanReviewSummary, QAVerdict
 
 Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 Summary = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
@@ -62,6 +62,7 @@ class WorkflowStepRunStatus(StrEnum):
     PENDING = "PENDING"
     READY = "READY"
     RUNNING = "RUNNING"
+    WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -231,7 +232,7 @@ class DevelopmentWorkflowResponse(BaseModel):
 
 
 class OperatorChallengeResponse(BaseModel):
-    """Safe persisted challenge facts; agent and human free text are intentionally absent."""
+    """Safe challenge facts plus an allow-listed validated QA review projection."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -239,6 +240,8 @@ class OperatorChallengeResponse(BaseModel):
     result_status: AgentResultStatus
     specialization_role: Literal["developer_manager", "developer_worker", "qa_worker"] | None
     qa_verdict: QAVerdict | None
+    review_summary_status: Literal["AVAILABLE", "MISSING", "NOT_APPLICABLE"]
+    safe_review_summary: QAHumanReviewSummary | None
     decision: Literal["ACCEPT_RESULT", "REJECT_RESULT"] | None
     decided_at: datetime | None
 
@@ -278,6 +281,12 @@ class OperatorToolCallResponse(BaseModel):
     bytes_returned: int | None
     truncated: bool | None
     failure_code: str | None
+    target_path: str | None = None
+    mutation_fingerprint: str | None = None
+    before_lines: int | None = None
+    after_lines: int | None = None
+    diff_preview: str | None = None
+    diff_truncated: bool | None = None
 
 
 class OperatorAgentRunResponse(BaseModel):

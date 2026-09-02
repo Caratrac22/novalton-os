@@ -420,7 +420,7 @@ async def create_development_workflow(
         (
             developer,
             developer_service.DEVELOPER_WORKER_NAME,
-            2,
+            developer_service.DEVELOPER_WORKER_VERSION,
             developer_service.DEVELOPER_WORKER_CATEGORY,
             developer_service.DEVELOPER_WORKER_MISSION,
             developer_service.DEVELOPER_WORKER_CAPABILITIES,
@@ -645,6 +645,10 @@ async def transition_step(
     await get_run(session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run_id)
     if (expected, target) not in {
         (WorkflowStepRunStatus.READY, WorkflowStepRunStatus.RUNNING),
+        (WorkflowStepRunStatus.RUNNING, WorkflowStepRunStatus.WAITING_FOR_APPROVAL),
+        (WorkflowStepRunStatus.WAITING_FOR_APPROVAL, WorkflowStepRunStatus.RUNNING),
+        (WorkflowStepRunStatus.WAITING_FOR_APPROVAL, WorkflowStepRunStatus.FAILED),
+        (WorkflowStepRunStatus.WAITING_FOR_APPROVAL, WorkflowStepRunStatus.CANCELLED),
         (WorkflowStepRunStatus.RUNNING, WorkflowStepRunStatus.COMPLETED),
         (WorkflowStepRunStatus.RUNNING, WorkflowStepRunStatus.FAILED),
         (WorkflowStepRunStatus.PENDING, WorkflowStepRunStatus.CANCELLED),
@@ -664,7 +668,7 @@ async def transition_step(
         )
     now = datetime.now(UTC)
     values: dict[str, object] = {"status": target.value, "updated_at": now}
-    if target == WorkflowStepRunStatus.RUNNING:
+    if target == WorkflowStepRunStatus.RUNNING and expected == WorkflowStepRunStatus.READY:
         values["started_at"] = now
     elif target in {
         WorkflowStepRunStatus.COMPLETED,

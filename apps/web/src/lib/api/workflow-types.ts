@@ -28,11 +28,26 @@ export type WorkflowStepRun = Readonly<{
 export type ChallengeLevel = "HUMAN_REVIEW_RECOMMENDED" | "BLOCK_RECOMMENDED";
 export type QAVerdict = "PASS" | "PASS_WITH_WARNINGS" | "FAIL" | "INCONCLUSIVE";
 export type ChallengeDecision = "ACCEPT_RESULT" | "REJECT_RESULT";
+export type QAReviewSummary = Readonly<{
+  schema_version: 1;
+  verdict: QAVerdict;
+  challenge_level: ChallengeLevel;
+  challenge_reason: string;
+  challenge_evidence_references: string[];
+  suggested_action: string | null;
+  validation_summary: string;
+  warnings: ReadonlyArray<Readonly<{ category: "REGRESSION_RISK" | "BLOCKER"; message: string }>>;
+  recommendations: ReadonlyArray<Readonly<{ category: "TEST" | "SECURITY_REVIEW" | "MANUAL_REVIEW"; message: string }>>;
+  acceptance_results: ReadonlyArray<Readonly<{ criterion_id: string; status: "PASS" | "FAIL" | "NOT_VERIFIED"; rationale: string; evidence_references: string[] }>>;
+  concerns: ReadonlyArray<Readonly<{ defect_key: string; title: string; severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"; component_path: string | null; description: string; affected_criteria: string[]; remediation_summary: string }>>;
+}>;
 export type OperatorChallenge = Readonly<{
   challenge_level: ChallengeLevel;
   result_status: "COMPLETED" | "PARTIAL";
   specialization_role: "developer_manager" | "developer_worker" | "qa_worker" | null;
   qa_verdict: QAVerdict | null;
+  review_summary_status: "AVAILABLE" | "MISSING" | "NOT_APPLICABLE";
+  safe_review_summary: QAReviewSummary | null;
   decision: ChallengeDecision | null;
   decided_at: string | null;
 }>;
@@ -62,6 +77,12 @@ export type OperatorToolCall = Readonly<{
   bytes_returned: number | null;
   truncated: boolean | null;
   failure_code: string | null;
+  target_path: string | null;
+  mutation_fingerprint: string | null;
+  before_lines: number | null;
+  after_lines: number | null;
+  diff_preview: string | null;
+  diff_truncated: boolean | null;
 }>;
 export type OperatorAgentRun = Readonly<{
   id: string;

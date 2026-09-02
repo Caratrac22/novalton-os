@@ -36,6 +36,7 @@ class AgentDefinitionStatus(StrEnum):
 class AgentRunStatus(StrEnum):
     CREATED = "CREATED"
     RUNNING = "RUNNING"
+    WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"

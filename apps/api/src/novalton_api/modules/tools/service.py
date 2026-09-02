@@ -33,10 +33,12 @@ from novalton_api.modules.tools.contracts import (
     ToolExecutionStatus,
     ToolGatewayResult,
     ToolProposal,
+    WorkspaceReplaceTextInput,
     WorkspaceSearchTextInput,
 )
 from novalton_api.modules.tools.executor import (
     TRUSTED_TOOL_REGISTRY,
+    ReplaceTextExecutor,
     ToolExecutionError,
     ToolRegistry,
     WorkspaceRoot,
@@ -65,6 +67,11 @@ def _safe_input_metadata(value: Any) -> dict[str, object]:
         data.pop("query", None)
         data["query_sha256"] = hashlib.sha256(query.encode("utf-8")).hexdigest()
         data["query_length"] = len(query)
+    if isinstance(value, WorkspaceReplaceTextInput):
+        for field in ("search", "replacement"):
+            raw = str(data.pop(field, ""))
+            data[f"{field}_sha256"] = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            data[f"{field}_length"] = len(raw)
     return data
 
 
@@ -76,7 +83,9 @@ def _policy_resource(run: AgentRun) -> tuple[str | None, UUID | None]:
     return None, None
 
 
-def _policy_request(*, run: AgentRun, action: str, tool_call_id: UUID) -> PolicyEvaluationRequest:
+def _policy_request(
+    *, run: AgentRun, action: str, tool_call_id: UUID, risk_level: str = "LOW"
+) -> PolicyEvaluationRequest:
     resource_type, resource_id = _policy_resource(run)
     return PolicyEvaluationRequest(
         tenant_id=run.tenant_id,
@@ -89,7 +98,7 @@ def _policy_request(*, run: AgentRun, action: str, tool_call_id: UUID) -> Policy
         project_id=run.project_id,
         task_id=run.task_id,
         context=PolicyEvaluationContext(
-            risk_level="LOW", environment=get_settings().environment, reversible=True
+            risk_level=risk_level, environment=get_settings().environment, reversible=True
         ),
     )
 
@@ -279,6 +288,18 @@ async def execute_proposal(
         agent_run_id=agent_run_id,
         call_key=proposal.call_key,
     )
+    prepared: dict[str, object] | None = None
+    if (
+        existing is None
+        and registered is not None
+        and isinstance(registered.executor, ReplaceTextExecutor)
+        and parsed_input is not None
+    ):
+        try:
+            _, prepared = registered.executor.prepare(workspace_root, parsed_input)  # type: ignore[arg-type]
+        except ToolExecutionError as error:
+            prepared = {"failure_code": error.code}
+
     if existing is not None:
         if existing.tool_id != proposal.tool_name or existing.safe_input_metadata != safe_input:
             return _result(existing, failure_code="tool_call_replay_mismatch")
@@ -297,6 +318,19 @@ async def execute_proposal(
             call_key=proposal.call_key,
             tool_id=proposal.tool_name,
             safe_input_metadata=safe_input,
+            side_effect_class=registered.definition.side_effect_class.value
+            if registered
+            else "READ_ONLY",
+            mutation_fingerprint=prepared.get("mutation_fingerprint")
+            if prepared and "mutation_fingerprint" in prepared
+            else None,
+            preimage_sha256=prepared.get("preimage_sha256")
+            if prepared and "preimage_sha256" in prepared
+            else None,
+            candidate_sha256=prepared.get("candidate_sha256")
+            if prepared and "candidate_sha256" in prepared
+            else None,
+            prepared_mutation=prepared,
         )
         await session.commit()
 
@@ -304,6 +338,8 @@ async def execute_proposal(
         return await _deny(session, value=value, code="unknown_tool_denied")
     if parsed_input is None:
         return await _deny(session, value=value, code="invalid_tool_input")
+    if prepared is not None and "failure_code" in prepared:
+        return await _deny(session, value=value, code=str(prepared["failure_code"]))
     if (
         proposal.tool_name not in permitted_tools
         or registered.definition.required_permission not in definition.permissions
@@ -311,7 +347,10 @@ async def execute_proposal(
         return await _deny(session, value=value, code="tool_permission_denied")
 
     request = _policy_request(
-        run=run, action=registered.definition.policy_action, tool_call_id=value.id
+        run=run,
+        action=registered.definition.policy_action,
+        tool_call_id=value.id,
+        risk_level=registered.definition.risk_class.value,
     )
     if value.status == "PENDING_APPROVAL":
         if approval_id is None or value.approval_request_id != approval_id:
@@ -327,8 +366,22 @@ async def execute_proposal(
                 policy_effect=decision.effect.value,
                 matched_rule_ids=matched_rule_ids,
             )
+        if (
+            isinstance(registered.executor, ReplaceTextExecutor)
+            and decision.effect != PolicyEffect.REQUIRE_CONFIRMATION
+        ):
+            return await _deny(
+                session,
+                value=value,
+                code="mutation_confirmation_required",
+                policy_effect=decision.effect.value,
+                matched_rule_ids=matched_rule_ids,
+            )
         if not await approvals_service.is_approval_satisfied(
-            session, approval_id=approval_id, request=request
+            session,
+            approval_id=approval_id,
+            request=request,
+            mutation_fingerprint=value.mutation_fingerprint,
         ):
             return _result(value, failure_code="approval_not_satisfied")
     else:
@@ -340,6 +393,17 @@ async def execute_proposal(
                 session,
                 value=value,
                 code="tool_policy_blocked",
+                policy_effect=decision.effect.value,
+                matched_rule_ids=matched_rule_ids,
+            )
+        if (
+            isinstance(registered.executor, ReplaceTextExecutor)
+            and decision.effect != PolicyEffect.REQUIRE_CONFIRMATION
+        ):
+            return await _deny(
+                session,
+                value=value,
+                code="mutation_confirmation_required",
                 policy_effect=decision.effect.value,
                 matched_rule_ids=matched_rule_ids,
             )
@@ -357,6 +421,7 @@ async def execute_proposal(
                     project_id=request.project_id,
                     task_id=request.task_id,
                     context=request.context,
+                    mutation_fingerprint=value.mutation_fingerprint,
                 ),
             )
             value = await repository.set_state(
@@ -385,9 +450,22 @@ async def execute_proposal(
     await session.commit()
     timer = perf_counter()
     try:
-        evidence_data, result_metadata = await asyncio.to_thread(
-            registered.executor.execute, workspace_root, parsed_input
-        )
+        if isinstance(registered.executor, ReplaceTextExecutor):
+            evidence_data = await asyncio.to_thread(
+                registered.executor.apply,
+                workspace_root,
+                parsed_input,
+                value.prepared_mutation or {},
+            )  # type: ignore[arg-type]
+            result_metadata = {
+                "path": evidence_data["path"],
+                "already_applied": evidence_data["already_applied"],
+                "mutation_fingerprint": value.mutation_fingerprint,
+            }
+        else:
+            evidence_data, result_metadata = await asyncio.to_thread(
+                registered.executor.execute, workspace_root, parsed_input
+            )
     except ToolExecutionError as error:
         value = await repository.set_state(
             session,
@@ -419,3 +497,202 @@ async def execute_proposal(
             data=evidence_data,
         ),
     )
+
+
+async def resume_prepared_mutation(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    approval_id: UUID,
+    workspace_root: WorkspaceRoot,
+    registry: ToolRegistry = TRUSTED_TOOL_REGISTRY,
+) -> tuple[ToolGatewayResult, AgentRun]:
+    """Apply the exact locked prepared mutation without accepting caller-authored authority."""
+    value = await repository.get_for_approval(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        approval_request_id=approval_id,
+        for_update=True,
+    )
+    if value is None:
+        raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
+    run = await session.scalar(
+        select(AgentRun)
+        .where(
+            AgentRun.id == value.agent_run_id,
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.workspace_id == workspace_id,
+        )
+        .with_for_update()
+    )
+    if run is None:
+        raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
+    if value.status == "SUCCEEDED":
+        return _result(
+            value,
+            evidence=ToolEvidence(
+                tool_name=value.tool_id,
+                call_key=value.call_key,
+                data={
+                    "path": str((value.result_metadata or {}).get("path", "")),
+                    "already_applied": True,
+                },
+            ),
+        ), run
+    if value.status != "PENDING_APPROVAL" or run.status != "WAITING_FOR_APPROVAL":
+        return _result(value, failure_code="approval_resume_invalid_state"), run
+    registered = registry.get(value.tool_id)
+    if registered is None or not isinstance(registered.executor, ReplaceTextExecutor):
+        return await _deny(session, value=value, code="unknown_tool_denied"), run
+    definition = await session.scalar(
+        select(AgentDefinition).where(
+            AgentDefinition.id == run.agent_definition_id,
+            AgentDefinition.tenant_id == tenant_id,
+            AgentDefinition.workspace_id == workspace_id,
+            AgentDefinition.version == run.agent_version,
+        )
+    )
+    if (
+        definition is None
+        or registered.definition.required_permission not in definition.permissions
+    ):
+        return await _deny(session, value=value, code="tool_permission_denied"), run
+    prepared = value.prepared_mutation or {}
+    if (
+        prepared.get("mutation_fingerprint") != value.mutation_fingerprint
+        or prepared.get("preimage_sha256") != value.preimage_sha256
+        or prepared.get("candidate_sha256") != value.candidate_sha256
+    ):
+        return await _deny(session, value=value, code="mutation_fingerprint_mismatch"), run
+    try:
+        parsed_input = WorkspaceReplaceTextInput.model_validate(
+            {
+                "path": prepared["path"],
+                "search": prepared["search"],
+                "replacement": prepared["replacement"],
+                "expected_matches": prepared["expected_matches"],
+            },
+            strict=True,
+        )
+    except (KeyError, ValidationError):
+        return await _deny(session, value=value, code="prepared_mutation_invalid"), run
+    if _safe_input_metadata(parsed_input) != value.safe_input_metadata:
+        return await _deny(session, value=value, code="mutation_fingerprint_mismatch"), run
+    request = _policy_request(
+        run=run,
+        action=registered.definition.policy_action,
+        tool_call_id=value.id,
+        risk_level=registered.definition.risk_class.value,
+    )
+    decision = await policy_service.evaluate(session, request=request)
+    matched_rule_ids = [str(rule_id) for rule_id in decision.matched_rule_ids]
+    if decision.effect == PolicyEffect.BLOCK:
+        return (
+            await _deny(
+                session,
+                value=value,
+                code="tool_policy_blocked",
+                policy_effect=decision.effect.value,
+                matched_rule_ids=matched_rule_ids,
+            ),
+            run,
+        )
+    if (
+        decision.effect != PolicyEffect.REQUIRE_CONFIRMATION
+        or not await approvals_service.is_approval_satisfied(
+            session,
+            approval_id=approval_id,
+            request=request,
+            mutation_fingerprint=value.mutation_fingerprint,
+        )
+    ):
+        return await _deny(session, value=value, code="approval_not_satisfied"), run
+    started = datetime.now(UTC)
+    value = await repository.set_state(
+        session,
+        tool_call_id=value.id,
+        status="RUNNING",
+        policy_effect=decision.effect.value,
+        matched_rule_ids=matched_rule_ids,
+        started_at=started,
+    )
+    timer = perf_counter()
+    try:
+        evidence_data = await asyncio.to_thread(
+            registered.executor.apply, workspace_root, parsed_input, prepared
+        )
+    except ToolExecutionError as error:
+        value = await repository.set_state(
+            session,
+            tool_call_id=value.id,
+            status="FAILED",
+            failure_code=error.code,
+            completed_at=datetime.now(UTC),
+            result_metadata={"duration_ms": round((perf_counter() - timer) * 1000, 3)},
+        )
+        await _observable(session, value=value, event_type="tool.call.failed", outcome="failure")
+        await session.commit()
+        return _result(value), run
+    value = await repository.set_state(
+        session,
+        tool_call_id=value.id,
+        status="SUCCEEDED",
+        result_metadata={
+            "path": evidence_data["path"],
+            "already_applied": evidence_data["already_applied"],
+            "mutation_fingerprint": value.mutation_fingerprint,
+            "duration_ms": round((perf_counter() - timer) * 1000, 3),
+        },
+        completed_at=datetime.now(UTC),
+    )
+    await _observable(session, value=value, event_type="tool.call.completed", outcome="success")
+    await session.commit()
+    return (
+        _result(
+            value,
+            evidence=ToolEvidence(
+                tool_name=value.tool_id, call_key=value.call_key, data=evidence_data
+            ),
+        ),
+        run,
+    )
+
+
+async def reject_prepared_mutation(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    approval_id: UUID,
+) -> AgentRun:
+    value = await repository.get_for_approval(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        approval_request_id=approval_id,
+        for_update=True,
+    )
+    if value is None:
+        raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
+    run = await session.scalar(
+        select(AgentRun)
+        .where(
+            AgentRun.id == value.agent_run_id,
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.workspace_id == workspace_id,
+        )
+        .with_for_update()
+    )
+    if run is None:
+        raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
+    if value.status == "PENDING_APPROVAL":
+        await _deny(session, value=value, code="approval_rejected")
+    elif value.status != "BLOCKED" or value.failure_code != "approval_rejected":
+        raise ApplicationError(
+            "approval_resume_invalid_state",
+            "Approval-linked action is not rejectable",
+            status_code=409,
+        )
+    return run

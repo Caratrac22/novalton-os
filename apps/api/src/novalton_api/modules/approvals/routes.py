@@ -3,11 +3,11 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.database import get_async_session
-from novalton_api.modules.approvals import service
+from novalton_api.modules.approvals import mutation_resume, service
 from novalton_api.modules.approvals.schemas import (
     ApprovalCreate,
     ApprovalListResponse,
@@ -74,9 +74,23 @@ async def approve(
     workspace_id: UUID,
     approval_id: UUID,
     session: Session,
+    request: Request,
 ) -> ApprovalResponse:
-    approval = await service.approve(
+    current = await service.get_approval(
         session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+    )
+    approval = (
+        await mutation_resume.approve_and_resume(
+            session,
+            registry=request.app.state.provider_registry,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            approval_id=approval_id,
+        )
+        if current.mutation_fingerprint is not None
+        else await service.approve(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+        )
     )
     return ApprovalResponse.model_validate(approval)
 
@@ -88,7 +102,16 @@ async def reject(
     approval_id: UUID,
     session: Session,
 ) -> ApprovalResponse:
-    approval = await service.reject(
+    current = await service.get_approval(
         session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+    )
+    approval = (
+        await mutation_resume.reject_and_terminalize(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+        )
+        if current.mutation_fingerprint is not None
+        else await service.reject(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+        )
     )
     return ApprovalResponse.model_validate(approval)

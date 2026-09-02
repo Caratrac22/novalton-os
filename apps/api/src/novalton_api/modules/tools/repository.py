@@ -22,6 +22,24 @@ async def get_by_key(
     )
 
 
+async def get_for_approval(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    approval_request_id: UUID,
+    for_update: bool = False,
+) -> ToolCall | None:
+    statement = select(ToolCall).where(
+        ToolCall.tenant_id == tenant_id,
+        ToolCall.workspace_id == workspace_id,
+        ToolCall.approval_request_id == approval_request_id,
+    )
+    if for_update:
+        statement = statement.with_for_update()
+    return await session.scalar(statement)
+
+
 async def create(
     session: AsyncSession,
     *,
@@ -34,6 +52,11 @@ async def create(
     call_key: str,
     tool_id: str,
     safe_input_metadata: dict[str, object],
+    side_effect_class: str = "READ_ONLY",
+    mutation_fingerprint: str | None = None,
+    preimage_sha256: str | None = None,
+    candidate_sha256: str | None = None,
+    prepared_mutation: dict[str, object] | None = None,
 ) -> ToolCall:
     value = ToolCall(
         tenant_id=tenant_id,
@@ -48,7 +71,11 @@ async def create(
         status="PROPOSED",
         matched_rule_ids=[],
         execution_target_class="LOCAL",
-        side_effect_class="READ_ONLY",
+        side_effect_class=side_effect_class,
+        mutation_fingerprint=mutation_fingerprint,
+        preimage_sha256=preimage_sha256,
+        candidate_sha256=candidate_sha256,
+        prepared_mutation=prepared_mutation,
     )
     session.add(value)
     await session.flush()

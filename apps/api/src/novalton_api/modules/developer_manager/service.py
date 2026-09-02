@@ -34,7 +34,14 @@ DEVELOPER_MANAGER_CAPABILITIES = [
 _CONTRACT_INSTRUCTIONS = (
     "The development_plan is advisory only. Do not request actions, tools, shell or Git "
     "execution, spawn workers, mutate workflows, grant permissions or approvals, select a "
-    "provider/model, or include executable payloads."
+    "provider/model, or include executable payloads. A downstream worker assignment may describe "
+    "bounded use of a server-owned tool, but the plan grants no tool permission or execution "
+    "authority. Deterministic permission checks, Policy evaluation, and any required human "
+    "approval occur later and remain authoritative. The need for later human approval does not "
+    "by itself mean the objective is BLOCKED or warrants BLOCK_RECOMMENDED. Use BLOCKED or "
+    "BLOCK_RECOMMENDED only when the objective itself remains unsafe, prohibited, unauthorized, "
+    "or unacceptable even if downstream governance succeeds; use HUMAN_REVIEW_RECOMMENDED for "
+    "material ambiguity that requires a human decision."
 )
 
 
@@ -46,6 +53,7 @@ async def resolve_definition(
         tenant_id=tenant_id,
         workspace_id=workspace_id,
         slug=DEVELOPER_MANAGER_SLUG,
+        exclude_archived=True,
     )
     if definition is None:
         raise ApplicationError(

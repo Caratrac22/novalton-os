@@ -89,7 +89,8 @@ class AgentRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         CheckConstraint("agent_slug ~ '^[a-z][a-z0-9_]{0,63}$'", name="ck_agent_runs_slug_format"),
         CheckConstraint(
-            "status IN ('CREATED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')",
+            "status IN ('CREATED', 'RUNNING', 'WAITING_FOR_APPROVAL', "
+            "'SUCCEEDED', 'FAILED', 'CANCELLED')",
             name="ck_agent_runs_status_value",
         ),
         CheckConstraint(
@@ -110,6 +111,8 @@ class AgentRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(
             "(status = 'CREATED' AND started_at IS NULL AND completed_at IS NULL "
             "AND failure_code IS NULL) OR (status = 'RUNNING' AND started_at IS NOT NULL "
+            "AND completed_at IS NULL AND failure_code IS NULL) OR "
+            "(status = 'WAITING_FOR_APPROVAL' AND started_at IS NOT NULL "
             "AND completed_at IS NULL AND failure_code IS NULL) OR (status = 'SUCCEEDED' "
             "AND started_at IS NOT NULL AND completed_at IS NOT NULL AND failure_code IS NULL) "
             "OR (status = 'FAILED' AND started_at IS NOT NULL AND completed_at IS NOT NULL "
@@ -157,7 +160,7 @@ class AgentRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("agent_runs.id", ondelete="RESTRICT"),
         nullable=True,
     )
-    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

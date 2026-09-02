@@ -13,6 +13,7 @@ from sqlalchemy import (
     Index,
     Numeric,
     String,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -179,6 +180,12 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         Index("ix_model_runs_scope_created", "tenant_id", "workspace_id", "created_at", "id"),
         Index("ix_model_runs_agent_run_created", "agent_run_id", "created_at", "id"),
+        Index(
+            "uq_model_runs_agent_tool_continuation",
+            "agent_run_id",
+            unique=True,
+            postgresql_where=text("recovery_attempt_kind = 'TOOL_CONTINUATION'"),
+        ),
     )
 
     tenant_id: Mapped[UUID] = mapped_column(

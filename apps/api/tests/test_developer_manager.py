@@ -260,6 +260,10 @@ def test_manager_executes_once_and_only_returns_a_validated_proposal() -> None:
         request = provider.calls[0]
         assert "tools" not in request.model_dump()
         assert "no tools" in request.messages[0].content.lower()
+        instructions = request.messages[0].content
+        assert "the plan grants no tool permission or execution authority" in instructions
+        assert "human approval does not by itself mean the objective is BLOCKED" in instructions
+        assert "deterministic permission checks, policy evaluation" in instructions.lower()
 
         async def counts() -> tuple[int, int, int, int, int, int]:
             database = Database.from_settings(Settings())
@@ -347,5 +351,29 @@ def test_manager_request_rejects_tools_and_provider_overrides_before_execution()
             response = client.post(_url(scope), json=value)
         assert response.status_code == 422
         assert provider.calls == []
+    finally:
+        asyncio.run(_cleanup(scope))
+
+
+def test_manager_human_approval_objective_is_not_mechanically_blocked() -> None:
+    scope = asyncio.run(_seed())
+    provider = MockProvider(_result(challenge="NONE"))
+    value = _input(scope)
+    value["objective"] = (
+        "Plan one bounded workspace mutation assignment. The downstream mutation requires "
+        "deterministic Policy evaluation and explicit human approval before execution."
+    )
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            response = client.post(_url(scope), json=value)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "SUCCEEDED"
+        assert body["result"]["status"] == "COMPLETED"
+        assert body["result"]["challenge"]["level"] == "NONE"
+        assert len(provider.calls) == 1
+        provider_input = json.loads(provider.calls[0].messages[1].content)["agent_input"]
+        assert provider_input["permitted_tools"] == []
+        assert provider_input["model_requirements"]["tool_calling_required"] is False
     finally:
         asyncio.run(_cleanup(scope))

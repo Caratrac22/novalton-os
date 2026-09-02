@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from novalton_api.modules.developer_worker.contracts import (
     MAX_PROPOSED_CHANGES,
     DeveloperWorkerResult,
+    DeveloperWorkerTerminalResult,
     DevelopmentAssignmentInput,
 )
 
@@ -68,6 +69,18 @@ def test_worker_result_normalizes_metadata_deterministically() -> None:
         "tests_pass",
     ]
     assert result.test_recommendations == ["Run all backend tests.", "Run focused tests."]
+
+
+def test_terminal_result_schema_forbids_tool_proposals_and_requested_actions() -> None:
+    schema = DeveloperWorkerTerminalResult.model_json_schema()
+    assert "tool_proposals" not in schema["properties"]
+    assert schema["properties"]["requested_actions"]["maxItems"] == 0
+
+    with_tool = _result() | {"tool_proposals": []}
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        DeveloperWorkerTerminalResult.model_validate(with_tool)
+
+    assert "tool_proposals" in DeveloperWorkerResult.model_json_schema()["properties"]
 
 
 @pytest.mark.parametrize(

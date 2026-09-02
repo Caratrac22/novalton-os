@@ -6,8 +6,10 @@ from pydantic import ValidationError
 
 from novalton_api.modules.qa_worker.contracts import (
     MAX_DEFECTS,
+    QAHumanReviewSummary,
     QAValidationInput,
     QAWorkerResult,
+    human_review_summary,
 )
 
 
@@ -189,3 +191,92 @@ def test_qa_input_forbids_tools_overrides_and_duplicate_criteria() -> None:
     duplicate["acceptance_criteria"] *= 2
     with pytest.raises(ValidationError, match="duplicate validation criterion"):
         QAValidationInput.model_validate(duplicate)
+
+
+def test_pass_with_warnings_builds_only_bounded_allow_listed_human_review_data() -> None:
+    value = _result(verdict="PASS_WITH_WARNINGS")
+    value["summary"] = "RAW_PROVIDER_OUTPUT_MUST_NOT_PERSIST"
+    value["findings"] = [
+        {
+            "category": "provider_metadata",
+            "title": "Prompt detail",
+            "detail": "PROMPT_CONTENT_MUST_NOT_PERSIST",
+        }
+    ]
+    value["challenge"] = {
+        "level": "HUMAN_REVIEW_RECOMMENDED",
+        "reason": "One criterion needs a human evidence judgment.",
+        "evidence_source_references": ["evidence:one"],
+        "suggested_action": "Review the bounded evidence state.",
+    }
+    value["acceptance_results"][0]["status"] = "NOT_VERIFIED"  # type: ignore[index]
+    value["acceptance_results"][0]["rationale"] = "The persisted evidence is incomplete."  # type: ignore[index]
+    value["regression_risks"] = ["A later change could invalidate the evidence binding."]
+    value["test_recommendations"] = ["Repeat the bounded negative check."]
+    value["security_review_recommendations"] = ["Confirm the approval fingerprint binding."]
+    value["manual_review_recommendations"] = ["Inspect the safe mutation metadata."]
+
+    summary = human_review_summary(_validate(value))
+    payload = summary.model_dump(mode="json")
+    serialized = json.dumps(payload, sort_keys=True)
+
+    assert payload["verdict"] == "PASS_WITH_WARNINGS"
+    assert payload["warnings"] == [
+        {
+            "category": "REGRESSION_RISK",
+            "message": "A later change could invalidate the evidence binding.",
+        }
+    ]
+    assert [item["category"] for item in payload["recommendations"]] == [
+        "TEST",
+        "SECURITY_REVIEW",
+        "MANUAL_REVIEW",
+    ]
+    assert payload["acceptance_results"][1]["rationale"] == (
+        "The persisted evidence is incomplete."
+    )
+    assert "RAW_PROVIDER_OUTPUT_MUST_NOT_PERSIST" not in serialized
+    assert "PROMPT_CONTENT_MUST_NOT_PERSIST" not in serialized
+    assert set(payload) == {
+        "schema_version",
+        "verdict",
+        "challenge_level",
+        "challenge_reason",
+        "challenge_evidence_references",
+        "suggested_action",
+        "validation_summary",
+        "warnings",
+        "recommendations",
+        "acceptance_results",
+        "concerns",
+    }
+
+
+def test_human_review_summary_bounds_and_secret_sanitization_fail_closed() -> None:
+    value = _result(verdict="PASS_WITH_WARNINGS")
+    value["challenge"] = {
+        "level": "HUMAN_REVIEW_RECOMMENDED",
+        "reason": "Review bounded evidence.",
+        "evidence_source_references": [],
+        "suggested_action": None,
+    }
+    value["test_recommendations"] = ["Authorization: Bearer hidden-secret-value"]
+    with pytest.raises(ValidationError, match="credential"):
+        _validate(value)
+
+    valid = human_review_summary(
+        _validate(
+            _result(verdict="PASS_WITH_WARNINGS")
+            | {
+                "challenge": {
+                    "level": "HUMAN_REVIEW_RECOMMENDED",
+                    "reason": "Review bounded evidence.",
+                    "evidence_source_references": [],
+                    "suggested_action": None,
+                }
+            }
+        )
+    ).model_dump(mode="json")
+    valid["warnings"] = [{"category": "BLOCKER", "message": "x" * 501}]
+    with pytest.raises(ValidationError):
+        QAHumanReviewSummary.model_validate(valid, strict=True)

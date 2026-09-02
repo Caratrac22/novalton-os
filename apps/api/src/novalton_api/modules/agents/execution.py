@@ -19,6 +19,7 @@ from novalton_api.infrastructure.providers.contracts import (
     MessageRole,
     ProviderExecutionCapabilities,
     ProviderRequestOptions,
+    QualificationSource,
     StructuredOutputRequest,
 )
 from novalton_api.infrastructure.providers.errors import (
@@ -479,6 +480,280 @@ async def _fail_agent(
     )
 
 
+class _InvalidToolContinuationResult(ValueError):
+    """The provider returned no valid terminal Agent result for a tool continuation."""
+
+
+class _ToolContinuationRoundLimitExceeded(ValueError):
+    """A continuation attempted to propose an additional governed tool round."""
+
+
+def _validate_tool_continuation_result[AgentResultT: AgentResult](
+    content: str,
+    *,
+    result_contract: type[AgentResultT],
+    result_shape_constraints: tuple[ResultShapeConstraint, ...],
+) -> AgentResultT:
+    """Classify another tool proposal separately from an invalid terminal result."""
+    try:
+        untrusted = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise _InvalidToolContinuationResult from error
+    if isinstance(untrusted, dict):
+        proposals = untrusted.get("tool_proposals")
+        if isinstance(proposals, list) and proposals:
+            raise _ToolContinuationRoundLimitExceeded
+    try:
+        result = result_contract.model_validate_json(content, strict=True)
+    except ValidationError as error:
+        raise _InvalidToolContinuationResult from error
+    if validate_result_shape(result, result_shape_constraints):
+        raise _InvalidToolContinuationResult
+    return result
+
+
+async def continue_with_tool_evidence[AgentResultT: AgentResult](
+    session: AsyncSession,
+    *,
+    registry: ProviderRegistry,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    run: AgentRun,
+    definition: AgentDefinition,
+    data: AgentInput,
+    initial_model_run,
+    evidence: ToolEvidence,
+    result_contract: type[AgentResultT],
+    initial_result_contract: type[AgentResult] | None = None,
+    contract_instructions: str | None,
+    trusted_tools: tuple[ToolDefinition, ...],
+    selected: SelectedModelResponse | None = None,
+    strategy: ContractGenerationStrategy | None = None,
+    result_shape_constraints: tuple[ResultShapeConstraint, ...] = (),
+) -> AgentExecutionResponse:
+    """Run the single server-owned continuation from durable governed authority."""
+    profile = compile_contract(result_contract)
+    initial_profile = compile_contract(initial_result_contract or result_contract)
+    if initial_model_run.contract_fingerprint != initial_profile.fingerprint:
+        run = await _fail_agent(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            run_id=run.id,
+            code="tool_continuation_contract_mismatch",
+        )
+        return _response(run, definition=definition, error_code=run.failure_code)
+    try:
+        provider = registry.get(initial_model_run.provider_id)
+    except Exception:
+        run = await _fail_agent(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            run_id=run.id,
+            code="tool_continuation_provider_unavailable",
+        )
+        return _response(run, definition=definition, error_code=run.failure_code)
+    if strategy is None:
+        try:
+            tier = ContractStrategyTier(initial_model_run.contract_strategy_tier)
+        except (TypeError, ValueError):
+            run = await _fail_agent(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                run_id=run.id,
+                code="tool_continuation_contract_mismatch",
+            )
+            return _response(run, definition=definition, error_code=run.failure_code)
+        capabilities = getattr(provider, "execution_capabilities", ProviderExecutionCapabilities())
+        strategy = ContractGenerationStrategy(
+            tier=tier,
+            native_structured_output=tier == ContractStrategyTier.STRICT_SCHEMA,
+            json_object_output=tier == ContractStrategyTier.JSON_OBJECT,
+            require_parameters=initial_model_run.provider_require_parameters,
+            response_healing=capabilities.response_healing,
+        )
+    budget = initial_model_run.execution_max_output_tokens
+    if budget is None:
+        run = await _fail_agent(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            run_id=run.id,
+            code="tool_continuation_contract_mismatch",
+        )
+        return _response(run, definition=definition, error_code=run.failure_code)
+    continuation_model_run = await usage_service.start_run(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        data=ModelRunStart(
+            model_definition_id=initial_model_run.model_definition_id,
+            provider_id=initial_model_run.provider_id,
+            provider_model_id=initial_model_run.provider_model_id,
+            agent_run_id=run.id,
+            project_id=run.project_id,
+            estimated_cost=initial_model_run.estimated_cost,
+            currency=initial_model_run.currency,
+            target_structured_output_capability=(
+                initial_model_run.target_structured_output_capability
+            ),
+            contract_enforcement_grade=ContractEnforcementGrade(
+                initial_model_run.contract_enforcement_grade
+            ),
+            minimum_contract_enforcement_grade=ContractEnforcementGrade(
+                initial_model_run.minimum_contract_enforcement_grade
+            ),
+            enforcement_metadata_source=initial_model_run.enforcement_metadata_source,
+            qualification_present=initial_model_run.qualification_present,
+            qualification_source=(
+                QualificationSource(initial_model_run.qualification_source)
+                if initial_model_run.qualification_source
+                else None
+            ),
+            upstream_provider_constraint=initial_model_run.upstream_provider_constraint,
+            provider_allow_fallbacks=initial_model_run.provider_allow_fallbacks,
+            provider_require_parameters=initial_model_run.provider_require_parameters,
+            contract_strategy_tier=strategy.tier.value,
+            contract_fingerprint=profile.fingerprint,
+            contextual_constraint_count=0,
+            execution_max_output_tokens=budget,
+            output_budget_source=initial_model_run.output_budget_source,
+            recovery_attempt_kind="TOOL_CONTINUATION",
+            recovery_attempt_index=1,
+        ),
+    )
+    provider_options = _qualified_provider_options(strategy, initial_model_run)
+    try:
+        continuation = await provider.complete(
+            _generation_request(
+                definition,
+                data,
+                provider_model_id=initial_model_run.provider_model_id,
+                profile=profile,
+                strategy=strategy,
+                max_output_tokens=budget,
+                contract_instructions=contract_instructions,
+                provider_options=provider_options,
+                trusted_tools=trusted_tools,
+                tool_evidence=evidence,
+            )
+        )
+        if (continuation.provider_id, continuation.model_id) != (
+            initial_model_run.provider_id,
+            initial_model_run.provider_model_id,
+        ) or not _upstream_constraint_matches(initial_model_run, continuation.upstream_provider_id):
+            raise ProviderError(
+                ProviderFailure.INVALID_REQUEST, provider_id=initial_model_run.provider_id
+            )
+        if classify_truncation(continuation.finish_reason) == "TOKEN_LIMIT":
+            raise ProviderError(
+                ProviderFailure.MALFORMED_RESPONSE, provider_id=initial_model_run.provider_id
+            )
+        await usage_service.mark_succeeded(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            model_run_id=continuation_model_run.id,
+            result=continuation,
+            truncation_classification=classify_truncation(continuation.finish_reason),
+        )
+        final_result = _validate_tool_continuation_result(
+            continuation.content,
+            result_contract=result_contract,
+            result_shape_constraints=result_shape_constraints,
+        )
+    except (ProviderCancellationError, asyncio.CancelledError):
+        await usage_service.cancel_run(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            model_run_id=continuation_model_run.id,
+        )
+        await service.cancel_run(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run.id
+        )
+        raise
+    except ProviderError as error:
+        await usage_service.mark_failed(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            model_run_id=continuation_model_run.id,
+            failure=error.failure,
+        )
+        run = await _fail_agent(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            run_id=run.id,
+            code="tool_continuation_failed",
+        )
+        return _response(
+            run,
+            definition=definition,
+            selected=selected,
+            model_run_id=continuation_model_run.id,
+            error_code=run.failure_code,
+        )
+    except _ToolContinuationRoundLimitExceeded:
+        run = await _fail_agent(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            run_id=run.id,
+            code="tool_round_limit_exceeded",
+        )
+        return _response(
+            run,
+            definition=definition,
+            selected=selected,
+            model_run_id=continuation_model_run.id,
+            error_code=run.failure_code,
+        )
+    except _InvalidToolContinuationResult:
+        run = await _fail_agent(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            run_id=run.id,
+            code="invalid_agent_result",
+        )
+        return _response(
+            run,
+            definition=definition,
+            selected=selected,
+            model_run_id=continuation_model_run.id,
+            error_code=run.failure_code,
+        )
+    terminal, failure_code = map_result_status(final_result.status)
+    if terminal == AgentRunStatus.SUCCEEDED:
+        run = await service.succeed_run(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run.id
+        )
+    elif terminal == AgentRunStatus.CANCELLED:
+        run = await service.cancel_run(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run.id
+        )
+    else:
+        run = await _fail_agent(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            run_id=run.id,
+            code=failure_code or "agent_result_failed",
+        )
+    return _response(
+        run,
+        definition=definition,
+        selected=selected,
+        model_run_id=continuation_model_run.id,
+        result=final_result,
+        error_code=failure_code,
+    )
+
+
 async def execute[AgentResultT: AgentResult](
     session: AsyncSession,
     *,
@@ -488,6 +763,7 @@ async def execute[AgentResultT: AgentResult](
     definition_id: UUID,
     data: AgentInput,
     result_contract: type[AgentResultT] = AgentResult,
+    continuation_result_contract: type[AgentResult] | None = None,
     contract_instructions: str | None = None,
     result_shape_constraints: tuple[ResultShapeConstraint, ...] = (),
     memory_context_request: MemoryContextRequest | None = None,
@@ -1383,6 +1659,9 @@ async def execute[AgentResultT: AgentResult](
             workspace_root=workspace_root,
         )
         if gateway_result.status == ToolExecutionStatus.PENDING_APPROVAL:
+            run = await service.suspend_run(
+                session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run.id
+            )
             return _response(
                 run,
                 definition=definition,
@@ -1411,124 +1690,26 @@ async def execute[AgentResultT: AgentResult](
                 error_code=code,
             )
 
-        continuation_model_run = await usage_service.start_run(
+        await session.refresh(model_run)
+        assert gateway_result.evidence is not None
+        return await continue_with_tool_evidence(
             session,
+            registry=registry,
             tenant_id=tenant_id,
             workspace_id=workspace_id,
-            data=ModelRunStart(
-                model_definition_id=routed.catalog_model_id,
-                provider_id=routed.provider_id,
-                provider_model_id=routed.provider_model_id,
-                agent_run_id=run.id,
-                project_id=project_id,
-                estimated_cost=estimate.amount if estimate is not None else None,
-                currency=estimate.currency if estimate is not None else None,
-                target_structured_output_capability=routed.structured_output_capability,
-                contract_enforcement_grade=routed.contract_enforcement_grade,
-                minimum_contract_enforcement_grade=routed.minimum_contract_enforcement_grade,
-                enforcement_metadata_source=routed.enforcement_metadata_source,
-                qualification_present=routed.qualification_present,
-                qualification_source=routed.qualification_source,
-                upstream_provider_constraint=routed.upstream_provider_constraint,
-                provider_allow_fallbacks=routed.provider_allow_fallbacks,
-                provider_require_parameters=routed.provider_require_parameters,
-                contract_strategy_tier=strategy.tier.value,
-                contract_fingerprint=profile.fingerprint,
-                contextual_constraint_count=len(profile.result_shape_constraints),
-                execution_max_output_tokens=budget.tokens,
-                output_budget_source=budget.source,
-                recovery_attempt_kind="TOOL_CONTINUATION",
-                recovery_attempt_index=1,
-            ),
+            run=run,
+            definition=definition,
+            data=data,
+            initial_model_run=model_run,
+            evidence=gateway_result.evidence,
+            result_contract=continuation_result_contract or result_contract,
+            initial_result_contract=result_contract,
+            contract_instructions=contract_instructions,
+            trusted_tools=trusted_tools,
+            selected=selected,
+            strategy=strategy,
+            result_shape_constraints=result_shape_constraints,
         )
-        try:
-            continuation = await provider.complete(
-                _generation_request(
-                    definition,
-                    data,
-                    provider_model_id=routed.provider_model_id,
-                    profile=profile,
-                    strategy=strategy,
-                    max_output_tokens=budget.tokens,
-                    contract_instructions=contract_instructions,
-                    provider_options=provider_options,
-                    memory_context=provider_memory_context,
-                    trusted_tools=trusted_tools,
-                    tool_evidence=gateway_result.evidence,
-                )
-            )
-            if (continuation.provider_id, continuation.model_id) != (
-                routed.provider_id,
-                routed.provider_model_id,
-            ) or not _upstream_constraint_matches(routed, continuation.upstream_provider_id):
-                raise ProviderError(ProviderFailure.INVALID_REQUEST, provider_id=routed.provider_id)
-            if classify_truncation(continuation.finish_reason) == "TOKEN_LIMIT":
-                raise ProviderError(
-                    ProviderFailure.MALFORMED_RESPONSE, provider_id=routed.provider_id
-                )
-            await usage_service.mark_succeeded(
-                session,
-                tenant_id=tenant_id,
-                workspace_id=workspace_id,
-                model_run_id=continuation_model_run.id,
-                result=continuation,
-                truncation_classification=classify_truncation(continuation.finish_reason),
-            )
-            final_result = result_contract.model_validate_json(continuation.content, strict=True)
-            if getattr(final_result, "tool_proposals", []) or validate_result_shape(
-                final_result, profile.result_shape_constraints
-            ):
-                raise ValueError("tool continuation cannot request another tool")
-        except (ProviderCancellationError, asyncio.CancelledError):
-            await usage_service.cancel_run(
-                session,
-                tenant_id=tenant_id,
-                workspace_id=workspace_id,
-                model_run_id=continuation_model_run.id,
-            )
-            await service.cancel_run(
-                session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run.id
-            )
-            raise
-        except ProviderError as error:
-            await usage_service.mark_failed(
-                session,
-                tenant_id=tenant_id,
-                workspace_id=workspace_id,
-                model_run_id=continuation_model_run.id,
-                failure=error.failure,
-            )
-            run = await _fail_agent(
-                session,
-                tenant_id=tenant_id,
-                workspace_id=workspace_id,
-                run_id=run.id,
-                code="tool_continuation_failed",
-            )
-            return _response(
-                run,
-                definition=definition,
-                selected=selected,
-                model_run_id=continuation_model_run.id,
-                error_code="tool_continuation_failed",
-            )
-        except (ValidationError, ValueError):
-            run = await _fail_agent(
-                session,
-                tenant_id=tenant_id,
-                workspace_id=workspace_id,
-                run_id=run.id,
-                code="tool_round_limit_exceeded",
-            )
-            return _response(
-                run,
-                definition=definition,
-                selected=selected,
-                model_run_id=continuation_model_run.id,
-                error_code="tool_round_limit_exceeded",
-            )
-        result = final_result
-        model_run = continuation_model_run
 
     terminal, failure_code = map_result_status(result.status)
     if terminal == AgentRunStatus.SUCCEEDED:

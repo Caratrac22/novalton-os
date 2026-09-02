@@ -19,7 +19,11 @@ from novalton_api.modules.agents.contracts import (
 from novalton_api.modules.agents.schemas import AgentRunStatus
 from novalton_api.modules.orchestrator import challenge_repository, specializations
 from novalton_api.modules.orchestrator.schemas import OrchestrationOutcome, OrchestrationResult
-from novalton_api.modules.qa_worker.contracts import QAVerdict, QAWorkerResult
+from novalton_api.modules.qa_worker.contracts import (
+    QAVerdict,
+    QAWorkerResult,
+    human_review_summary,
+)
 from novalton_api.modules.runtime_events.schemas import RuntimeEventCreate
 from novalton_api.modules.runtime_events.service import append_event
 from novalton_api.modules.workflows import repository
@@ -428,6 +432,35 @@ async def advance(
         step_run_id=step_run.id,
         agent_run_id=executed.agent_run_id,
     )
+    if executed.status == AgentRunStatus.WAITING_FOR_APPROVAL:
+        step_run = await workflow_service.transition_step(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            run_id=run.id,
+            step_run_id=step_run.id,
+            expected=WorkflowStepRunStatus.RUNNING,
+            target=WorkflowStepRunStatus.WAITING_FOR_APPROVAL,
+        )
+        await _event(
+            session,
+            run,
+            "workflow.step.waiting_for_approval",
+            step_run=step_run,
+            step=step,
+            agent_run_id=executed.agent_run_id,
+            reason_code="tool_approval_required",
+        )
+        await session.commit()
+        return await _result(
+            session,
+            run,
+            OrchestrationOutcome.WAITING_FOR_HUMAN,
+            step_run=step_run,
+            step=step,
+            agent_run_id=executed.agent_run_id,
+            reason_code="tool_approval_required",
+        )
     if executed.status != AgentRunStatus.SUCCEEDED or executed.result is None:
         return await _fail(
             session,
@@ -470,6 +503,11 @@ async def advance(
             qa_verdict=executed.result.verdict.value
             if isinstance(executed.result, QAWorkerResult)
             else None,
+            safe_review_summary=(
+                human_review_summary(executed.result).model_dump(mode="json")
+                if isinstance(executed.result, QAWorkerResult)
+                else None
+            ),
         )
         await _event(
             session,

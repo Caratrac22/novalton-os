@@ -310,7 +310,7 @@ async def _transition(
     await get_run(session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run_id)
     now = datetime.now(UTC)
     values: dict[str, object] = {"status": target.value, "updated_at": now}
-    if target == AgentRunStatus.RUNNING:
+    if target == AgentRunStatus.RUNNING and expected == AgentRunStatus.CREATED:
         values["started_at"] = now
     elif target in {AgentRunStatus.SUCCEEDED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}:
         values["completed_at"] = now
@@ -357,6 +357,32 @@ async def succeed_run(
     )
 
 
+async def suspend_run(
+    session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID, run_id: UUID
+) -> AgentRun:
+    return await _transition(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        run_id=run_id,
+        expected=AgentRunStatus.RUNNING,
+        target=AgentRunStatus.WAITING_FOR_APPROVAL,
+    )
+
+
+async def resume_run(
+    session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID, run_id: UUID
+) -> AgentRun:
+    return await _transition(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        run_id=run_id,
+        expected=AgentRunStatus.WAITING_FOR_APPROVAL,
+        target=AgentRunStatus.RUNNING,
+    )
+
+
 async def fail_run(
     session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID, run_id: UUID, failure_code: str
 ) -> AgentRun:
@@ -368,6 +394,22 @@ async def fail_run(
         workspace_id=workspace_id,
         run_id=run_id,
         expected=AgentRunStatus.RUNNING,
+        target=AgentRunStatus.FAILED,
+        failure_code=failure_code,
+    )
+
+
+async def fail_waiting_run(
+    session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID, run_id: UUID, failure_code: str
+) -> AgentRun:
+    if _FAILURE.fullmatch(failure_code) is None:
+        raise ApplicationError("agent_run_invalid_failure", "Failure code is invalid")
+    return await _transition(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        run_id=run_id,
+        expected=AgentRunStatus.WAITING_FOR_APPROVAL,
         target=AgentRunStatus.FAILED,
         failure_code=failure_code,
     )

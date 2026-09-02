@@ -10,6 +10,7 @@ from novalton_api.modules.agents.schemas import AgentExecutionResponse, AgentRun
 from novalton_api.modules.developer_worker import service
 from novalton_api.modules.developer_worker.contracts import (
     DeveloperWorkerResult,
+    DeveloperWorkerTerminalResult,
     DevelopmentAssignmentInput,
 )
 from novalton_api.modules.developer_worker.schemas import DeveloperWorkerExecutionRequest
@@ -57,6 +58,7 @@ async def test_worker_uses_specialized_i022_execution_exactly_once(monkeypatch) 
             "tenant_id": tenant_id,
             "workspace_id": workspace_id,
             "slug": service.DEVELOPER_WORKER_SLUG,
+            "exclude_archived": True,
         }
         return definition
 
@@ -85,6 +87,7 @@ async def test_worker_uses_specialized_i022_execution_exactly_once(monkeypatch) 
     assert calls[0]["definition_id"] == definition_id
     assert calls[0]["data"] is data
     assert calls[0]["result_contract"] is DeveloperWorkerResult
+    assert calls[0]["continuation_result_contract"] is DeveloperWorkerTerminalResult
     assert response.status == AgentRunStatus.SUCCEEDED
     assert response.result is not None
     assert response.result.challenge.level.value == "WARNING"
@@ -110,6 +113,7 @@ async def test_worker_resolves_only_latest_same_scope_and_rejects_unavailable(mo
             "tenant_id": tenant_id,
             "workspace_id": workspace_id,
             "slug": service.DEVELOPER_WORKER_SLUG,
+            "exclude_archived": True,
         }
     ]
 

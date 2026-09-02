@@ -8,8 +8,9 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 
-from novalton_api.core.config import Settings
+from novalton_api.core.config import Settings, get_settings
 from novalton_api.core.database import Database
 from novalton_api.infrastructure.providers.contracts import (
     ContractEnforcementGrade,
@@ -25,6 +26,7 @@ from novalton_api.modules.developer_manager import service as manager_service
 from novalton_api.modules.developer_worker import service as developer_service
 from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_usage.models import ModelRun
+from novalton_api.modules.orchestrator import challenge_repository
 from novalton_api.modules.orchestrator.models import AgentChallengeResolution
 from novalton_api.modules.policy import service as policy_service
 from novalton_api.modules.policy.models import PolicyRule
@@ -34,6 +36,7 @@ from novalton_api.modules.qa_worker import service as qa_service
 from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tenants.models import Tenant
+from novalton_api.modules.tools.models import ToolCall
 from novalton_api.modules.workflows.models import (
     WorkflowPlan,
     WorkflowRun,
@@ -57,16 +60,17 @@ class Scope:
 class QueueProvider:
     provider_id = "mock"
 
-    def __init__(self, results: list[dict[str, object]]) -> None:
+    def __init__(self, results: list[dict[str, object] | str]) -> None:
         self.results = results
         self.calls: list[GenerationRequest] = []
 
     async def complete(self, request: GenerationRequest) -> GenerationResult:
         self.calls.append(request)
+        result = self.results.pop(0)
         return GenerationResult(
             provider_id=self.provider_id,
             model_id=request.model_id,
-            content=json.dumps(self.results.pop(0)),
+            content=result if isinstance(result, str) else json.dumps(result),
             input_tokens=10,
             output_tokens=5,
             total_tokens=15,
@@ -228,7 +232,11 @@ async def _seed(
                     else service.DEVELOPER_WORKER_SLUG
                     if service is developer_service
                     else service.QA_WORKER_SLUG,
-                    version=1,
+                    version=(
+                        developer_service.DEVELOPER_WORKER_VERSION
+                        if service is developer_service
+                        else 1
+                    ),
                     status="ENABLED",
                     category=service.DEVELOPER_MANAGER_CATEGORY
                     if service is manager_service
@@ -245,7 +253,11 @@ async def _seed(
                     else service.DEVELOPER_WORKER_CAPABILITIES
                     if service is developer_service
                     else service.QA_WORKER_CAPABILITIES,
-                    permissions=[],
+                    permissions=(
+                        developer_service.DEVELOPER_WORKER_PERMISSIONS
+                        if service is developer_service
+                        else []
+                    ),
                 )
                 for service in (manager_service, developer_service, qa_service)
             ]
@@ -293,6 +305,10 @@ async def _cleanup(scope: Scope) -> None:
             )
             await session.execute(
                 delete(AuditRecord).where(AuditRecord.tenant_id == scope.tenant_id)
+            )
+            await session.execute(delete(ToolCall).where(ToolCall.tenant_id == scope.tenant_id))
+            await session.execute(
+                delete(ApprovalRequest).where(ApprovalRequest.tenant_id == scope.tenant_id)
             )
             await session.execute(
                 delete(WorkflowStepRun).where(WorkflowStepRun.workflow_run_id.in_(run_ids))
@@ -427,6 +443,435 @@ def test_fixed_vertical_workflow_is_durable_and_qa_controls_success(
     handoffs, agent_runs, model_runs = asyncio.run(counts())
     assert (agent_runs, model_runs) == (3, 3)
     assert handoffs >= 3
+
+
+def test_benign_approval_required_assignment_proceeds_without_manager_authority(
+    scope: Scope,
+) -> None:
+    provider = QueueProvider([_manager()])
+    base = (
+        f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+        f"/projects/{scope.project_id}/tasks/{scope.task_id}"
+    )
+    objective = (
+        "Plan a bounded workspace.replace_text assignment for a harmless test fixture. "
+        "The downstream mutation requires deterministic Policy evaluation and explicit human "
+        "approval before execution."
+    )
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        created = client.post(
+            f"{base}/development-workflows",
+            json={
+                "objective": objective,
+                "acceptance_criteria": ["The exact bounded assignment is represented."],
+            },
+        )
+        assert created.status_code == 201, created.text
+        run_id = created.json()["workflow_run"]["id"]
+        result = client.post(
+            f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+            f"/workflow-runs/{run_id}/advance"
+        ).json()
+
+    assert result["outcome"] == "STEP_COMPLETED"
+    assert result["step_key"] == "manager_plan"
+    assert len(provider.calls) == 1
+    manager_input = json.loads(provider.calls[0].messages[1].content)["agent_input"]
+    assert manager_input["objective"] == objective
+    assert manager_input["permitted_tools"] == []
+    assert manager_input["constraints"] == [
+        "Do not use tools or execute external actions",
+        "Remain within the fixed persisted workflow step",
+        "Requested actions are proposals only",
+    ]
+
+
+def test_i041_mutation_waits_then_approved_resume_preserves_runs_and_reaches_qa(
+    scope: Scope, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "fixture.txt"
+    target.write_text("before\n", encoding="utf-8")
+    monkeypatch.setenv("NOVALTON_WORKSPACE_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+
+    async def add_confirmation_policy() -> None:
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                await policy_service.create_rule(
+                    session,
+                    data=PolicyRuleCreate(
+                        tenant_id=scope.tenant_id,
+                        workspace_id=scope.workspace_id,
+                        name="Confirm exact workspace mutation",
+                        action_pattern="tool.workspace.replace_text",
+                        effect=PolicyEffect.REQUIRE_CONFIRMATION,
+                        actor_type="agent",
+                        resource_type="task",
+                    ),
+                )
+        finally:
+            await database.dispose()
+
+    asyncio.run(add_confirmation_policy())
+    proposal = _worker() | {
+        "status": "PARTIAL",
+        "tool_proposals": [
+            {
+                "call_key": "replace_fixture",
+                "tool_name": "workspace.replace_text",
+                "arguments": {
+                    "path": "fixture.txt",
+                    "search": "before",
+                    "replacement": "after",
+                    "expected_matches": 1,
+                },
+            }
+        ],
+    }
+    provider = QueueProvider([_manager(), proposal, _worker(), _qa("PASS")])
+    base = (
+        f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+        f"/projects/{scope.project_id}/tasks/{scope.task_id}"
+    )
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            created = client.post(
+                f"{base}/development-workflows",
+                json={
+                    "objective": "Replace the approved fixture marker.",
+                    "acceptance_criteria": ["The marker is replaced exactly once."],
+                },
+            ).json()
+            run_id = UUID(str(created["workflow_run"]["id"]))
+            advance = (
+                f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+                f"/workflow-runs/{run_id}/advance"
+            )
+            assert client.post(advance).json()["outcome"] == "STEP_COMPLETED"
+            waiting = client.post(advance).json()
+            assert waiting["outcome"] == "WAITING_FOR_HUMAN"
+            assert waiting["step_status"] == "WAITING_FOR_APPROVAL"
+            assert waiting["workflow_status"] == "RUNNING"
+            assert target.read_text(encoding="utf-8") == "before\n"
+
+            async def suspended_state():
+                database = Database.from_settings(Settings.from_environment())
+                try:
+                    async with database.session_factory() as session:
+                        approval = await session.scalar(
+                            select(ApprovalRequest).where(
+                                ApprovalRequest.tenant_id == scope.tenant_id
+                            )
+                        )
+                        tool_call = await session.scalar(
+                            select(ToolCall).where(ToolCall.tenant_id == scope.tenant_id)
+                        )
+                        agent_run = await session.get(AgentRun, UUID(str(waiting["agent_run_id"])))
+                        return approval, tool_call, agent_run
+                finally:
+                    await database.dispose()
+
+            approval, tool_call, agent_run = asyncio.run(suspended_state())
+            assert approval is not None and tool_call is not None and agent_run is not None
+            assert agent_run.status == "WAITING_FOR_APPROVAL"
+            assert tool_call.status == "PENDING_APPROVAL"
+            assert "candidate_text" not in (tool_call.prepared_mutation or {})
+            approval_url = (
+                f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+                f"/approvals/{approval.id}/approve"
+            )
+            approved = client.post(approval_url)
+            assert approved.status_code == 200, approved.text
+            assert target.read_text(encoding="utf-8") == "after\n"
+            assert len(provider.calls) == 3
+
+            state = asyncio.run(_vertical_state(scope, run_id))
+            assert [row[0].status for row in state["rows"]] == [
+                "COMPLETED",
+                "COMPLETED",
+                "READY",
+            ]
+            assert state["agent_runs"][1].id == UUID(str(waiting["agent_run_id"]))
+            assert state["agent_runs"][1].status == "SUCCEEDED"
+            assert [item.recovery_attempt_kind for item in state["model_runs"]] == [
+                "INITIAL",
+                "INITIAL",
+                "TOOL_CONTINUATION",
+            ]
+            replay = client.post(approval_url)
+            assert replay.status_code == 200
+            assert len(provider.calls) == 3
+            qa = client.post(advance).json()
+            assert qa["step_key"] == "qa_validate"
+            assert qa["workflow_status"] == "COMPLETED"
+            assert len(provider.calls) == 4
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("continuation", "expected_code"),
+    [
+        ("not-json", "invalid_agent_result"),
+        (
+            _worker()
+            | {
+                "status": "PARTIAL",
+                "tool_proposals": [
+                    {
+                        "call_key": "another_mutation",
+                        "tool_name": "workspace.replace_text",
+                        "arguments": {
+                            "path": "fixture.txt",
+                            "search": "after",
+                            "replacement": "again",
+                            "expected_matches": 1,
+                        },
+                    }
+                ],
+            },
+            "tool_round_limit_exceeded",
+        ),
+    ],
+)
+def test_i041_delayed_continuation_uses_shared_terminal_validation(
+    scope: Scope,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    continuation: dict[str, object] | str,
+    expected_code: str,
+) -> None:
+    target = tmp_path / "fixture.txt"
+    target.write_text("before\n", encoding="utf-8")
+    monkeypatch.setenv("NOVALTON_WORKSPACE_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+
+    async def add_policy() -> None:
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                await policy_service.create_rule(
+                    session,
+                    data=PolicyRuleCreate(
+                        tenant_id=scope.tenant_id,
+                        workspace_id=scope.workspace_id,
+                        name="Confirm classified mutation continuation",
+                        action_pattern="tool.workspace.replace_text",
+                        effect=PolicyEffect.REQUIRE_CONFIRMATION,
+                        actor_type="agent",
+                        resource_type="task",
+                    ),
+                )
+        finally:
+            await database.dispose()
+
+    asyncio.run(add_policy())
+    proposal = _worker() | {
+        "status": "PARTIAL",
+        "tool_proposals": [
+            {
+                "call_key": "replace_fixture",
+                "tool_name": "workspace.replace_text",
+                "arguments": {
+                    "path": "fixture.txt",
+                    "search": "before",
+                    "replacement": "after",
+                    "expected_matches": 1,
+                },
+            }
+        ],
+    }
+    provider = QueueProvider([_manager(), proposal, continuation])
+    base = (
+        f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+        f"/projects/{scope.project_id}/tasks/{scope.task_id}"
+    )
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            created = client.post(
+                f"{base}/development-workflows",
+                json={
+                    "objective": "Replace the classified fixture marker.",
+                    "acceptance_criteria": ["The marker is replaced exactly once."],
+                },
+            ).json()
+            run_id = UUID(str(created["workflow_run"]["id"]))
+            advance = (
+                f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+                f"/workflow-runs/{run_id}/advance"
+            )
+            assert client.post(advance).json()["outcome"] == "STEP_COMPLETED"
+            waiting = client.post(advance).json()
+            assert waiting["outcome"] == "WAITING_FOR_HUMAN"
+
+            async def approval_and_tool() -> tuple[UUID, UUID]:
+                database = Database.from_settings(Settings.from_environment())
+                try:
+                    async with database.session_factory() as session:
+                        approval_id = await session.scalar(
+                            select(ApprovalRequest.id).where(
+                                ApprovalRequest.tenant_id == scope.tenant_id
+                            )
+                        )
+                        tool_id = await session.scalar(
+                            select(ToolCall.id).where(ToolCall.tenant_id == scope.tenant_id)
+                        )
+                        assert approval_id is not None and tool_id is not None
+                        return approval_id, tool_id
+                finally:
+                    await database.dispose()
+
+            approval_id, tool_id = asyncio.run(approval_and_tool())
+            approved = client.post(
+                f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+                f"/approvals/{approval_id}/approve"
+            )
+            assert approved.status_code == 200
+            assert target.read_text(encoding="utf-8") == "after\n"
+            assert len(provider.calls) == 3
+
+            state = asyncio.run(_vertical_state(scope, run_id))
+            assert state["run"].status == "FAILED"
+            assert state["run"].failure_code == expected_code
+            assert [row[0].status for row in state["rows"]] == [
+                "COMPLETED",
+                "FAILED",
+                "PENDING",
+            ]
+            assert state["agent_runs"][1].id == UUID(str(waiting["agent_run_id"]))
+            assert state["agent_runs"][1].failure_code == expected_code
+            assert [item.recovery_attempt_kind for item in state["model_runs"]] == [
+                "INITIAL",
+                "INITIAL",
+                "TOOL_CONTINUATION",
+            ]
+
+            async def final_tool() -> tuple[int, str]:
+                database = Database.from_settings(Settings.from_environment())
+                try:
+                    async with database.session_factory() as session:
+                        count = int(
+                            await session.scalar(
+                                select(func.count())
+                                .select_from(ToolCall)
+                                .where(ToolCall.tenant_id == scope.tenant_id)
+                            )
+                            or 0
+                        )
+                        status = await session.scalar(
+                            select(ToolCall.status).where(ToolCall.id == tool_id)
+                        )
+                        assert status is not None
+                        return count, status
+                finally:
+                    await database.dispose()
+
+            assert asyncio.run(final_tool()) == (1, "SUCCEEDED")
+    finally:
+        get_settings.cache_clear()
+
+
+def test_i041_rejection_terminalizes_without_write_or_continuation(
+    scope: Scope, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "fixture.txt"
+    target.write_text("before\n", encoding="utf-8")
+    monkeypatch.setenv("NOVALTON_WORKSPACE_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+
+    async def add_policy() -> None:
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                await policy_service.create_rule(
+                    session,
+                    data=PolicyRuleCreate(
+                        tenant_id=scope.tenant_id,
+                        workspace_id=scope.workspace_id,
+                        name="Confirm rejected mutation",
+                        action_pattern="tool.workspace.replace_text",
+                        effect=PolicyEffect.REQUIRE_CONFIRMATION,
+                        actor_type="agent",
+                        resource_type="task",
+                    ),
+                )
+        finally:
+            await database.dispose()
+
+    asyncio.run(add_policy())
+    proposal = _worker() | {
+        "status": "PARTIAL",
+        "tool_proposals": [
+            {
+                "call_key": "replace_fixture",
+                "tool_name": "workspace.replace_text",
+                "arguments": {
+                    "path": "fixture.txt",
+                    "search": "before",
+                    "replacement": "after",
+                },
+            }
+        ],
+    }
+    provider = QueueProvider([_manager(), proposal])
+    base = (
+        f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+        f"/projects/{scope.project_id}/tasks/{scope.task_id}"
+    )
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            created = client.post(
+                f"{base}/development-workflows",
+                json={
+                    "objective": "Replace the fixture marker.",
+                    "acceptance_criteria": ["The marker is replaced."],
+                },
+            ).json()
+            run_id = UUID(str(created["workflow_run"]["id"]))
+            advance = (
+                f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+                f"/workflow-runs/{run_id}/advance"
+            )
+            client.post(advance)
+            waiting = client.post(advance).json()
+
+            async def approval_id() -> UUID:
+                database = Database.from_settings(Settings.from_environment())
+                try:
+                    async with database.session_factory() as session:
+                        value = await session.scalar(
+                            select(ApprovalRequest.id).where(
+                                ApprovalRequest.tenant_id == scope.tenant_id
+                            )
+                        )
+                        assert value is not None
+                        return value
+                finally:
+                    await database.dispose()
+
+            approval = asyncio.run(approval_id())
+            rejected = client.post(
+                f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+                f"/approvals/{approval}/reject"
+            )
+            assert rejected.status_code == 200
+            assert target.read_text(encoding="utf-8") == "before\n"
+            assert len(provider.calls) == 2
+            state = asyncio.run(_vertical_state(scope, run_id))
+            assert state["run"].status == "FAILED"
+            assert [row[0].status for row in state["rows"]] == [
+                "COMPLETED",
+                "FAILED",
+                "PENDING",
+            ]
+            assert state["agent_runs"][1].id == UUID(str(waiting["agent_run_id"]))
+            assert state["agent_runs"][1].status == "FAILED"
+            assert all(
+                item.recovery_attempt_kind != "TOOL_CONTINUATION" for item in state["model_runs"]
+            )
+    finally:
+        get_settings.cache_clear()
 
 
 def test_governed_steps_require_provider_enforced_contracts_before_generation() -> None:
@@ -649,7 +1094,11 @@ def test_i029_full_vertical_integration_across_fresh_app_and_db_boundaries(
         developer_service.DEVELOPER_WORKER_SLUG,
         qa_service.QA_WORKER_SLUG,
     ]
-    assert [item.agent_version for item in agent_runs] == [1, 1, 1]
+    assert [item.agent_version for item in agent_runs] == [
+        1,
+        developer_service.DEVELOPER_WORKER_VERSION,
+        1,
+    ]
     assert [row[1].agent_definition_id for row in rows] == [
         item.agent_definition_id for item in agent_runs
     ]
@@ -826,6 +1275,8 @@ def test_i039_operator_view_exposes_pending_challenge_without_human_reason_or_au
         "result_status": "COMPLETED",
         "specialization_role": "developer_manager",
         "qa_verdict": None,
+        "review_summary_status": "NOT_APPLICABLE",
+        "safe_review_summary": None,
         "decision": None,
         "decided_at": None,
     }
@@ -847,10 +1298,49 @@ def _resolution_url(scope: Scope, run_id: str, step_run_id: str) -> str:
     )
 
 
+def test_historical_qa_challenge_without_safe_summary_is_explicitly_missing(
+    scope: Scope, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_pending = challenge_repository.create_pending
+
+    async def create_pre_summary_challenge(session, **values):
+        values["safe_review_summary"] = None
+        return await create_pending(session, **values)
+
+    monkeypatch.setattr(challenge_repository, "create_pending", create_pre_summary_challenge)
+    provider = QueueProvider([_manager(), _worker(), _challenged(_qa("PASS_WITH_WARNINGS"))])
+    created, advance = _create_vertical(scope, provider)
+    for _ in range(3):
+        _advance_fresh(provider, advance)
+    run_id = UUID(str(created["workflow_run"]["id"]))
+
+    url = (
+        f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+        f"/workflow-runs/{run_id}/operator-view"
+    )
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        response = client.get(url)
+
+    assert response.status_code == 200
+    active = next(item for item in response.json()["step_details"] if item["challenge"] is not None)
+    assert active["challenge"]["review_summary_status"] == "MISSING"
+    assert active["challenge"]["safe_review_summary"] is None
+    assert response.json()["workflow_run"]["status"] == "RUNNING"
+    assert len(provider.calls) == 3
+
+
 def test_i037_accept_qa_warning_completes_without_new_model_and_is_idempotent(
     scope: Scope,
 ) -> None:
     qa = _challenged(_qa("PASS_WITH_WARNINGS"))
+    qa["summary"] = "RAW_PROVIDER_OUTPUT_MUST_NOT_PERSIST"
+    qa["validation_summary"] = "The bounded evidence passes with one verification warning."
+    qa["acceptance_results"][0]["status"] = "NOT_VERIFIED"  # type: ignore[index]
+    qa["acceptance_results"][0]["rationale"] = "The persisted evidence needs human confirmation."  # type: ignore[index]
+    qa["regression_risks"] = ["The evidence binding should remain immutable."]
+    qa["test_recommendations"] = ["Repeat the stale-preimage negative check."]
+    qa["security_review_recommendations"] = ["Confirm the one-action approval binding."]
+    qa["manual_review_recommendations"] = ["Inspect the safe persisted mutation metadata."]
     provider = QueueProvider([_manager(), _worker(), qa])
     created, advance = _create_vertical(scope, provider)
     for _ in range(3):
@@ -860,14 +1350,41 @@ def test_i037_accept_qa_warning_completes_without_new_model_and_is_idempotent(
     step_run_id = str(waiting["workflow_step_run_id"])
     url = _resolution_url(scope, run_id, step_run_id)
     payload = {"decision": "ACCEPT_RESULT", "reason": "Reviewed bounded QA warnings."}
+    operator_url = (
+        f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+        f"/workflow-runs/{run_id}/operator-view"
+    )
 
     with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        review = client.get(operator_url)
         accepted = client.post(url, json=payload)
         repeated = client.post(
             url,
             json={"decision": "ACCEPT_RESULT", "reason": "  Reviewed bounded QA warnings.  "},
         )
     assert accepted.status_code == repeated.status_code == 200
+    assert review.status_code == 200
+    active = next(item for item in review.json()["step_details"] if item["challenge"] is not None)
+    safe_summary = active["challenge"]["safe_review_summary"]
+    assert active["challenge"]["review_summary_status"] == "AVAILABLE"
+    assert safe_summary["verdict"] == "PASS_WITH_WARNINGS"
+    assert safe_summary["acceptance_results"] == [
+        {
+            "criterion_id": "criterion_01",
+            "status": "NOT_VERIFIED",
+            "rationale": "The persisted evidence needs human confirmation.",
+            "evidence_references": [],
+        }
+    ]
+    assert safe_summary["warnings"] == [
+        {"category": "REGRESSION_RISK", "message": "The evidence binding should remain immutable."}
+    ]
+    assert [item["category"] for item in safe_summary["recommendations"]] == [
+        "TEST",
+        "SECURITY_REVIEW",
+        "MANUAL_REVIEW",
+    ]
+    assert "RAW_PROVIDER_OUTPUT_MUST_NOT_PERSIST" not in json.dumps(review.json())
     assert accepted.json() == repeated.json()
     assert accepted.json()["outcome"] == "WORKFLOW_COMPLETED"
     assert accepted.json()["workflow_status"] == "COMPLETED"
@@ -883,6 +1400,23 @@ def test_i037_accept_qa_warning_completes_without_new_model_and_is_idempotent(
     assert resolutions[0].decision == "ACCEPT_RESULT"
     assert resolutions[0].decision_actor_type == "local_user"
     assert resolutions[0].qa_verdict == "PASS_WITH_WARNINGS"
+    assert resolutions[0].safe_review_summary == safe_summary
+
+    async def review_summary_is_immutable() -> None:
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                with pytest.raises(IntegrityError, match="safe human review summary is immutable"):
+                    await session.execute(
+                        update(AgentChallengeResolution)
+                        .where(AgentChallengeResolution.id == resolutions[0].id)
+                        .values(safe_review_summary={"schema_version": 1})
+                    )
+                    await session.commit()
+        finally:
+            await database.dispose()
+
+    asyncio.run(review_summary_is_immutable())
     events = [item for item in state["events"] if item.event_type == "workflow.challenge.resolved"]
     assert len(events) == 1
     resolution_audits = [

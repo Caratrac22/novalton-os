@@ -3,7 +3,7 @@
 import re
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import Field, field_validator, model_validator
 
@@ -274,3 +274,108 @@ class QAWorkerResult(AgentResult):
                 "defects": sorted(self.defects, key=lambda item: item.defect_key),
             }
         )
+
+
+class QAHumanReviewWarning(ContractModel):
+    """One allow-listed warning derived from validated QA-only fields."""
+
+    category: Literal["REGRESSION_RISK", "BLOCKER"]
+    message: ShortText
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, value: str) -> str:
+        return _bounded_qa_text(value)
+
+
+class QAHumanReviewRecommendation(ContractModel):
+    """One categorized recommendation derived from validated QA-only fields."""
+
+    category: Literal["TEST", "SECURITY_REVIEW", "MANUAL_REVIEW"]
+    message: ShortText
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, value: str) -> str:
+        return _bounded_qa_text(value)
+
+
+class QAHumanReviewSummary(ContractModel):
+    """Bounded durable projection of an already validated structured QA result."""
+
+    schema_version: Literal[1] = 1
+    verdict: QAVerdict
+    challenge_level: Literal["HUMAN_REVIEW_RECOMMENDED", "BLOCK_RECOMMENDED"]
+    challenge_reason: str = Field(min_length=1, max_length=2000)
+    challenge_evidence_references: list[str] = Field(default_factory=list, max_length=16)
+    suggested_action: ShortText | None = None
+    validation_summary: str = Field(min_length=1, max_length=3000)
+    warnings: list[QAHumanReviewWarning] = Field(max_length=40)
+    recommendations: list[QAHumanReviewRecommendation] = Field(max_length=72)
+    acceptance_results: list[AcceptanceResult] = Field(
+        min_length=1, max_length=MAX_ACCEPTANCE_RESULTS
+    )
+    concerns: list[DefectDescriptor] = Field(max_length=MAX_DEFECTS)
+
+    @field_validator("challenge_reason", "validation_summary")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        return _bounded_qa_text(value)
+
+    @field_validator("suggested_action")
+    @classmethod
+    def validate_suggested_action(cls, value: str | None) -> str | None:
+        return _bounded_qa_text(value) if value is not None else None
+
+    @field_validator("challenge_evidence_references")
+    @classmethod
+    def normalize_references(cls, values: list[str]) -> list[str]:
+        normalized = [_reference(value) for value in values]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("duplicate challenge evidence reference")
+        return sorted(normalized)
+
+    @model_validator(mode="after")
+    def validate_safe_summary(self) -> Self:
+        _reject_unsafe_content(self.model_dump(mode="json"))
+        return self
+
+
+def human_review_summary(result: QAWorkerResult) -> QAHumanReviewSummary:
+    """Select safe QA fields only; generic result/provider content is never copied."""
+    if result.challenge.level not in {
+        ChallengeLevel.HUMAN_REVIEW_RECOMMENDED,
+        ChallengeLevel.BLOCK_RECOMMENDED,
+    }:
+        raise ValueError("human review summary requires a meaningful QA challenge")
+    assert result.challenge.reason is not None
+    warnings = [
+        QAHumanReviewWarning(category="REGRESSION_RISK", message=value)
+        for value in result.regression_risks
+    ] + [QAHumanReviewWarning(category="BLOCKER", message=value) for value in result.blockers]
+    recommendations = (
+        [
+            QAHumanReviewRecommendation(category="TEST", message=value)
+            for value in result.test_recommendations
+        ]
+        + [
+            QAHumanReviewRecommendation(category="SECURITY_REVIEW", message=value)
+            for value in result.security_review_recommendations
+        ]
+        + [
+            QAHumanReviewRecommendation(category="MANUAL_REVIEW", message=value)
+            for value in result.manual_review_recommendations
+        ]
+    )
+    return QAHumanReviewSummary(
+        verdict=result.verdict,
+        challenge_level=result.challenge.level.value,
+        challenge_reason=result.challenge.reason,
+        challenge_evidence_references=result.challenge.evidence_source_references,
+        suggested_action=result.challenge.suggested_action,
+        validation_summary=result.validation_summary,
+        warnings=warnings,
+        recommendations=recommendations,
+        acceptance_results=result.acceptance_results,
+        concerns=result.defects,
+    )

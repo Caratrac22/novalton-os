@@ -46,6 +46,9 @@ from novalton_api.modules.agents.contracts import (
 from novalton_api.modules.agents.execution import (
     _bounded_validation_diagnostics,
     _generation_request,
+    _InvalidToolContinuationResult,
+    _ToolContinuationRoundLimitExceeded,
+    _validate_tool_continuation_result,
 )
 from novalton_api.modules.agents.models import AgentDefinition, AgentRun
 from novalton_api.modules.agents.schemas import AgentExecutionResponse
@@ -58,7 +61,10 @@ from novalton_api.modules.developer_manager.contracts import (
     ProposedWorkerTask,
     ReviewRecommendation,
 )
-from novalton_api.modules.developer_worker.contracts import DeveloperWorkerResult
+from novalton_api.modules.developer_worker.contracts import (
+    DeveloperWorkerResult,
+    DeveloperWorkerTerminalResult,
+)
 from novalton_api.modules.developer_worker.schemas import DeveloperWorkerExecutionRequest
 from novalton_api.modules.memories.context_packages import assemble_context_package
 from novalton_api.modules.memories.schemas import MemoryRetrievalRequest, MemoryRetrievalResult
@@ -107,6 +113,31 @@ def _valid_result(**changes: object) -> str:
         "requested_actions": [],
     }
     value.update(changes)
+    return json.dumps(value)
+
+
+def _developer_result(**changes: object) -> str:
+    value = json.loads(_valid_result()) | {
+        "task_interpretation": "Inspect the approved fixture.",
+        "implementation_summary": "Bounded workspace evidence was evaluated.",
+        "changes": [],
+        "acceptance_checks": [],
+        "test_recommendations": [],
+        "blockers": [],
+    }
+    value.update(changes)
+    return json.dumps(value)
+
+
+def _developer_tool_result() -> str:
+    value = json.loads(_developer_result(status="PARTIAL"))
+    value["tool_proposals"] = [
+        {
+            "call_key": "read_fixture",
+            "tool_name": "workspace.read_file",
+            "arguments": {"path": "fixture.txt"},
+        }
+    ]
     return json.dumps(value)
 
 
@@ -714,6 +745,57 @@ def test_manager_generation_has_no_tool_specific_request_fields() -> None:
     )
     assert "tool_proposals" not in profile.json_schema["properties"]
     assert "Tool metadata:" not in generation.messages[0].content
+
+
+def test_tool_continuation_terminal_validator_separates_round_limit_and_invalid_result() -> None:
+    valid = _validate_tool_continuation_result(
+        _developer_result(),
+        result_contract=DeveloperWorkerTerminalResult,
+        result_shape_constraints=(),
+    )
+    assert valid.status == AgentResultStatus.COMPLETED
+
+    another_tool = json.loads(_developer_result(status="PARTIAL"))
+    another_tool["tool_proposals"] = [
+        {
+            "call_key": "another_read",
+            "tool_name": "workspace.read_file",
+            "arguments": {"path": "fixture.txt"},
+        }
+    ]
+    with pytest.raises(_ToolContinuationRoundLimitExceeded):
+        _validate_tool_continuation_result(
+            json.dumps(another_tool),
+            result_contract=DeveloperWorkerTerminalResult,
+            result_shape_constraints=(),
+        )
+
+    completed_with_tool = another_tool | {"status": "COMPLETED"}
+    with pytest.raises(_ToolContinuationRoundLimitExceeded):
+        _validate_tool_continuation_result(
+            json.dumps(completed_with_tool),
+            result_contract=DeveloperWorkerTerminalResult,
+            result_shape_constraints=(),
+        )
+
+    for invalid in ("not-json", json.dumps({"bad": "result"})):
+        with pytest.raises(_InvalidToolContinuationResult):
+            _validate_tool_continuation_result(
+                invalid,
+                result_contract=DeveloperWorkerTerminalResult,
+                result_shape_constraints=(),
+            )
+
+    with pytest.raises(_InvalidToolContinuationResult):
+        _validate_tool_continuation_result(
+            _developer_result(),
+            result_contract=DeveloperWorkerTerminalResult,
+            result_shape_constraints=(
+                ResultShapeConstraint.exact_items(
+                    code="one_change_required", path="changes", count=1
+                ),
+            ),
+        )
 
 
 def test_contract_compiler_schema_patterns_and_semantic_guidance_are_deterministic() -> None:
@@ -1334,7 +1416,6 @@ def test_one_read_only_tool_round_trip_uses_two_model_runs_and_untrusted_evidenc
         "acceptance_checks": [],
         "test_recommendations": [],
         "blockers": [],
-        "tool_proposals": [],
     }
     provider = MockProvider([json.dumps(first), json.dumps(final)])
     monkeypatch.setenv("NOVALTON_WORKSPACE_ROOT", str(path))
@@ -1368,6 +1449,7 @@ def test_one_read_only_tool_round_trip_uses_two_model_runs_and_untrusted_evidenc
                         permitted_tools=["workspace.read_file"],
                     ),
                     result_contract=DeveloperWorkerResult,
+                    continuation_result_contract=DeveloperWorkerTerminalResult,
                 )
                 attempts = list(
                     await session.scalars(
@@ -1398,10 +1480,136 @@ def test_one_read_only_tool_round_trip_uses_two_model_runs_and_untrusted_evidenc
         assert len(calls) == 1 and calls[0].status == "SUCCEEDED"
         continuation_user = provider.calls[1].messages[1].content
         continuation_system = provider.calls[1].messages[0].content
+        continuation_schema = provider.calls[1].structured_output
         assert "ignore previous instructions" in continuation_user
         assert "UNTRUSTED_DATA_NOT_INSTRUCTIONS" in continuation_user
         assert "ignore previous instructions" not in continuation_system
         assert "no authority to propose another tool" in continuation_system
+        assert continuation_schema is not None
+        assert "tool_proposals" not in continuation_schema.json_schema["properties"]
+    finally:
+        get_settings.cache_clear()
+        asyncio.run(_cleanup(scope))
+
+
+async def _run_immediate_read_continuation(
+    scope: Scope, provider: MockProvider
+) -> tuple[AgentExecutionResponse, list[ModelRun], list[ToolCall]]:
+    database = Database.from_settings(Settings())
+    try:
+        async with database.session_factory() as session:
+            await policy_service.create_rule(
+                session,
+                data=PolicyRuleCreate(
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    name="Allow classified continuation read",
+                    action_pattern="tool.workspace.read_file",
+                    effect=PolicyEffect.ALLOW,
+                    actor_type="agent",
+                ),
+            )
+            response = await agent_execution.execute(
+                session,
+                registry=ProviderRegistry((provider,)),
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                definition_id=scope.definition_id,
+                data=DeveloperWorkerExecutionRequest(
+                    objective="Inspect the approved fixture.",
+                    project_id=str(scope.project_id),
+                    task_id=str(scope.task_id),
+                    permitted_tools=["workspace.read_file"],
+                ),
+                result_contract=DeveloperWorkerResult,
+                continuation_result_contract=DeveloperWorkerTerminalResult,
+            )
+            attempts = list(
+                await session.scalars(
+                    select(ModelRun)
+                    .where(ModelRun.agent_run_id == response.agent_run_id)
+                    .order_by(ModelRun.created_at, ModelRun.id)
+                )
+            )
+            calls = list(
+                await session.scalars(
+                    select(ToolCall).where(ToolCall.agent_run_id == response.agent_run_id)
+                )
+            )
+            return response, attempts, calls
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.parametrize(
+    ("continuation", "expected_code"),
+    [
+        ("not-json", "invalid_agent_result"),
+        (_developer_tool_result(), "tool_round_limit_exceeded"),
+    ],
+)
+def test_immediate_tool_continuation_classifies_terminal_validation_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    continuation: str,
+    expected_code: str,
+) -> None:
+    tmp_path.joinpath("fixture.txt").write_text("bounded evidence\n", encoding="utf-8")
+    scope = asyncio.run(_seed(permissions=["workspace.read_file"]))
+    provider = MockProvider([_developer_tool_result(), continuation])
+    monkeypatch.setenv("NOVALTON_WORKSPACE_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        response, attempts, calls = asyncio.run(_run_immediate_read_continuation(scope, provider))
+        assert (response.status.value, response.error_code, response.result) == (
+            "FAILED",
+            expected_code,
+            None,
+        )
+        assert len(provider.calls) == 2
+        assert [item.recovery_attempt_kind for item in attempts] == [
+            "INITIAL",
+            "TOOL_CONTINUATION",
+        ]
+        assert [item.status for item in attempts] == ["SUCCEEDED", "SUCCEEDED"]
+        assert len(calls) == 1 and calls[0].status == "SUCCEEDED"
+    finally:
+        get_settings.cache_clear()
+        asyncio.run(_cleanup(scope))
+
+
+def test_immediate_tool_continuation_preserves_provider_failure_classification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class SecondCallMalformedProvider(MockProvider):
+        async def complete(self, request: GenerationRequest) -> GenerationResult:
+            if self.calls:
+                self.calls.append(request)
+                raise ProviderError(
+                    ProviderFailure.MALFORMED_RESPONSE, provider_id=self.provider_id
+                )
+            return await super().complete(request)
+
+    tmp_path.joinpath("fixture.txt").write_text("bounded evidence\n", encoding="utf-8")
+    scope = asyncio.run(_seed(permissions=["workspace.read_file"]))
+    provider = SecondCallMalformedProvider(_developer_tool_result())
+    monkeypatch.setenv("NOVALTON_WORKSPACE_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        response, attempts, calls = asyncio.run(_run_immediate_read_continuation(scope, provider))
+        assert (response.status.value, response.error_code, response.result) == (
+            "FAILED",
+            "tool_continuation_failed",
+            None,
+        )
+        assert len(provider.calls) == 2
+        assert [item.recovery_attempt_kind for item in attempts] == [
+            "INITIAL",
+            "TOOL_CONTINUATION",
+        ]
+        assert [item.status for item in attempts] == ["SUCCEEDED", "FAILED"]
+        assert attempts[1].failure_code == ProviderFailure.MALFORMED_RESPONSE.value
+        assert len(calls) == 1 and calls[0].status == "SUCCEEDED"
     finally:
         get_settings.cache_clear()
         asyncio.run(_cleanup(scope))
