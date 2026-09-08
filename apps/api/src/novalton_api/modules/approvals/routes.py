@@ -16,6 +16,13 @@ from novalton_api.modules.approvals.schemas import (
 )
 from novalton_api.modules.git_changesets import repository as git_repository
 from novalton_api.modules.git_changesets import service as git_service
+from novalton_api.modules.github_publications import repository as publication_repository
+from novalton_api.modules.github_publications import service as publication_service
+from novalton_api.modules.github_publications.config import (
+    resolve_github_credential,
+    trusted_binding,
+)
+from novalton_api.modules.github_publications.http_adapter import GitHubHttpAdapter
 
 router = APIRouter(
     prefix="/tenants/{tenant_id}/workspaces/{workspace_id}/approvals",
@@ -81,6 +88,33 @@ async def approve(
     current = await service.get_approval(
         session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
     )
+    publication = await publication_repository.get_for_approval(
+        session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+    )
+    if publication is not None:
+        adapter = getattr(request.app.state, "github_publication_adapter", None)
+        owned = adapter is None
+        if owned:
+            adapter = GitHubHttpAdapter(trusted_binding(), resolve_github_credential())
+        try:
+            await service.approve(
+                session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+            )
+            approval = await publication_service.publish(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                approval_id=approval_id,
+                adapter=adapter,
+            )
+        finally:
+            if owned:
+                await adapter.aclose()
+        return ApprovalResponse.model_validate(
+            await service.get_approval(
+                session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+            )
+        )
     git_action = await git_repository.get_for_approval(
         session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
     )
@@ -116,6 +150,16 @@ async def reject(
     current = await service.get_approval(
         session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
     )
+    publication = await publication_repository.get_for_approval(
+        session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+    )
+    if publication is not None:
+        approval = await service.reject(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
+        )
+        publication.status = "REJECTED"
+        await session.commit()
+        return ApprovalResponse.model_validate(approval)
     git_action = await git_repository.get_for_approval(
         session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
     )

@@ -100,6 +100,7 @@ async def create_approval(
     tenant_id: UUID,
     workspace_id: UUID,
     data: ApprovalCreate,
+    commit: bool = True,
 ) -> ApprovalRequest:
     """Re-evaluate and persist authority only when policy requires confirmation."""
     request = _evaluation_request(tenant_id=tenant_id, workspace_id=workspace_id, data=data)
@@ -132,8 +133,9 @@ async def create_approval(
         await append_record(
             session, data=_audit_data(approval, action="approval.request"), commit=False
         )
-        await session.commit()
-        await session.refresh(approval)
+        if commit:
+            await session.commit()
+            await session.refresh(approval)
         return approval
     except ApplicationError:
         await session.rollback()

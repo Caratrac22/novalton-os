@@ -96,6 +96,14 @@ class Settings(BaseModel):
     provider_max_response_bytes: int = Field(default=1_048_576, ge=1_024, le=10_485_760)
     model_output_token_safety_ceiling: int = Field(default=65_536, ge=1, le=65_536)
     workspace_root: str | None = None
+    github_owner: str | None = Field(default=None, min_length=1, max_length=39)
+    github_repository: str | None = Field(default=None, min_length=1, max_length=100)
+    github_base_branch: str = Field(default="main", min_length=1, max_length=255)
+    github_binding_version: str = Field(default="v1", min_length=1, max_length=32)
+    github_binding_key: str = Field(default="default", min_length=1, max_length=64)
+    github_publication_pat: SecretStr | None = None
+    github_api_version: str = "2022-11-28"
+    github_max_response_bytes: int = Field(default=1_048_576, ge=1_024, le=10_485_760)
     bootstrap_tenant_id: UUID = UUID("89cfc055-366e-5bcb-b65f-4f367185bf6d")
     bootstrap_tenant_name: str = "Local Tenant"
     bootstrap_tenant_slug: str = "tenant_local"
@@ -126,6 +134,14 @@ class Settings(BaseModel):
         "provider_max_response_bytes": "NOVALTON_PROVIDER_MAX_RESPONSE_BYTES",
         "model_output_token_safety_ceiling": "NOVALTON_MODEL_OUTPUT_TOKEN_SAFETY_CEILING",
         "workspace_root": "NOVALTON_WORKSPACE_ROOT",
+        "github_owner": "NOVALTON_GITHUB_OWNER",
+        "github_repository": "NOVALTON_GITHUB_REPOSITORY",
+        "github_base_branch": "NOVALTON_GITHUB_BASE_BRANCH",
+        "github_binding_version": "NOVALTON_GITHUB_BINDING_VERSION",
+        "github_binding_key": "NOVALTON_GITHUB_BINDING_KEY",
+        "github_publication_pat": "NOVALTON_GITHUB_PUBLICATION_PAT",
+        "github_api_version": "NOVALTON_GITHUB_API_VERSION",
+        "github_max_response_bytes": "NOVALTON_GITHUB_MAX_RESPONSE_BYTES",
         "bootstrap_tenant_id": "NOVALTON_BOOTSTRAP_TENANT_ID",
         "bootstrap_tenant_name": "NOVALTON_BOOTSTRAP_TENANT_NAME",
         "bootstrap_tenant_slug": "NOVALTON_BOOTSTRAP_TENANT_SLUG",

@@ -26,6 +26,7 @@ from novalton_api.modules.approvals.routes import router as approvals_router
 from novalton_api.modules.developer_manager.routes import router as developer_manager_router
 from novalton_api.modules.developer_worker.routes import router as developer_worker_router
 from novalton_api.modules.git_changesets.routes import router as git_changesets_router
+from novalton_api.modules.github_publications.routes import router as github_publications_router
 from novalton_api.modules.memories.routes import router as memories_router
 from novalton_api.modules.model_catalog.routes import router as model_catalog_router
 from novalton_api.modules.model_router.routes import router as model_router_router
@@ -122,6 +123,7 @@ def create_app(
     application.include_router(runtime_events_router, prefix="/api/v1")
     application.include_router(approvals_router, prefix="/api/v1")
     application.include_router(git_changesets_router, prefix="/api/v1")
+    application.include_router(github_publications_router, prefix="/api/v1")
     application.include_router(developer_manager_router, prefix="/api/v1")
     application.include_router(developer_worker_router, prefix="/api/v1")
     application.include_router(qa_worker_router, prefix="/api/v1")

@@ -154,6 +154,22 @@ def _tree_entry(repo: Repo, tree: Tree, parts: list[bytes]) -> tuple[int, bytes]
     raise _error("git_head_path_invalid")
 
 
+def _tree_entries(
+    repo: Repo, tree: Tree, prefix: tuple[bytes, ...] = ()
+) -> dict[str, tuple[int, bytes]]:
+    entries: dict[str, tuple[int, bytes]] = {}
+    for name, mode, sha in tree.iteritems():
+        path = prefix + (name,)
+        if stat.S_ISDIR(mode):
+            child = repo.object_store[sha]
+            if not isinstance(child, Tree):
+                raise _error("git_tree_invalid")
+            entries.update(_tree_entries(repo, child, path))
+        else:
+            entries[b"/".join(path).decode("utf-8")] = (mode, sha)
+    return entries
+
+
 def _index_entry(index: Index, path: bytes) -> IndexEntry | None:
     try:
         value = index[path]
@@ -425,3 +441,147 @@ def expected_commit_sha(
     commit.author_time = commit.commit_time = int(timestamp.timestamp())
     commit.author_timezone = commit.commit_timezone = 0
     return _hex(commit.id)
+
+
+def revalidate_committed_object(
+    root: WorkspaceRoot,
+    *,
+    expected_commit: str,
+    expected_parent: str,
+    branch_ref: str,
+    message: str,
+    author: str,
+    committer: str,
+    timestamp: datetime,
+    paths: list[dict[str, object]],
+    expected_tree: str | None = None,
+) -> dict[str, object]:
+    """Prove the successful I-042 commit from the local object store only."""
+    repo, _, branch, _ = _repo(root)
+    if branch.decode() != branch_ref:
+        raise _error("git_publication_branch_mismatch")
+    try:
+        commit = repo.object_store[expected_commit.encode("ascii")]
+    except (KeyError, ValueError):
+        raise _error("git_publication_commit_missing") from None
+    if (
+        not isinstance(commit, Commit)
+        or len(commit.parents) != 1
+        or _hex(commit.parents[0]) != expected_parent
+    ):
+        raise _error("git_publication_commit_proof_invalid")
+    if _hex(commit.tree) != expected_tree if expected_tree else False:
+        raise _error("git_publication_tree_mismatch")
+    if (
+        commit.message.decode("utf-8") != message
+        or commit.author.decode() != author
+        or commit.committer.decode() != committer
+    ):
+        raise _error("git_publication_metadata_mismatch")
+    if (
+        commit.author_time != int(timestamp.timestamp())
+        or commit.commit_time != int(timestamp.timestamp())
+        or commit.author_timezone != 0
+        or commit.commit_timezone != 0
+    ):
+        raise _error("git_publication_timestamp_mismatch")
+    tree = repo.object_store[commit.tree]
+    if not isinstance(tree, Tree):
+        raise _error("git_publication_tree_invalid")
+    parent = repo.object_store[commit.parents[0]]
+    if not isinstance(parent, Commit):
+        raise _error("git_publication_parent_invalid")
+    parent_tree = repo.object_store[parent.tree]
+    if not isinstance(parent_tree, Tree):
+        raise _error("git_publication_parent_invalid")
+    resulting_entries = _tree_entries(repo, tree)
+    parent_entries = _tree_entries(repo, parent_tree)
+    expected_paths = {str(item["path"]) for item in paths}
+    changed_paths = {
+        path
+        for path in parent_entries.keys() | resulting_entries.keys()
+        if parent_entries.get(path) != resulting_entries.get(path)
+    }
+    if changed_paths != expected_paths:
+        raise _error("git_publication_changeset_mismatch")
+    proof: list[dict[str, object]] = []
+    for item in paths:
+        path = str(item["path"])
+        mode, blob_id = _tree_entry(repo, tree, path.encode().split(b"/"))
+        old_mode, old_blob_id = _tree_entry(repo, parent_tree, path.encode().split(b"/"))
+        blob = repo.object_store[blob_id]
+        old_blob = repo.object_store[old_blob_id]
+        if (
+            not isinstance(blob, Blob)
+            or not isinstance(old_blob, Blob)
+            or mode != int(item["mode"])
+            or _hex(blob_id) != str(item["candidate_blob_id"])
+            or old_mode != int(item["mode"])
+            or _hex(old_blob_id) != str(item["head_blob_id"])
+        ):
+            raise _error("git_publication_changeset_mismatch")
+        if hashlib.sha256(old_blob.data).hexdigest() != str(
+            item["preimage_sha256"]
+        ) or hashlib.sha256(blob.data).hexdigest() != str(item["candidate_sha256"]):
+            raise _error("git_publication_blob_mismatch")
+        proof.append(
+            {
+                "path": path,
+                "mode": mode,
+                "blob_sha": _hex(blob_id),
+                "blob_sha256": hashlib.sha256(blob.data).hexdigest(),
+                "candidate_blob_id": _hex(blob_id),
+                "candidate_sha256": hashlib.sha256(blob.data).hexdigest(),
+            }
+        )
+    return {
+        "parent_sha": expected_parent,
+        "tree_sha": _hex(commit.tree),
+        "commit_sha": expected_commit,
+        "message": message,
+        "author": author,
+        "committer": committer,
+        "timestamp": int(timestamp.timestamp()),
+        "changes": proof,
+    }
+
+
+def read_publication_objects(
+    root: WorkspaceRoot,
+    *,
+    expected_commit: str,
+    expected_parent: str,
+    branch_ref: str,
+    message: str,
+    author: str,
+    committer: str,
+    timestamp: datetime,
+    paths: list[dict[str, object]],
+    expected_tree: str | None = None,
+) -> tuple[dict[str, object], list[tuple[str, int, bytes, str]]]:
+    """Return the proven commit manifest and immutable blob bytes for remote replay."""
+    proof = revalidate_committed_object(
+        root,
+        expected_commit=expected_commit,
+        expected_parent=expected_parent,
+        branch_ref=branch_ref,
+        message=message,
+        author=author,
+        committer=committer,
+        timestamp=timestamp,
+        paths=paths,
+        expected_tree=expected_tree,
+    )
+    repo, _, _, _ = _repo(root)
+    commit = repo.object_store[expected_commit.encode("ascii")]
+    assert isinstance(commit, Commit)
+    tree = repo.object_store[commit.tree]
+    assert isinstance(tree, Tree)
+    objects: list[tuple[str, int, bytes, str]] = []
+    for item in paths:
+        path = str(item["path"])
+        mode, blob_id = _tree_entry(repo, tree, path.encode().split(b"/"))
+        blob = repo.object_store[blob_id]
+        assert isinstance(blob, Blob)
+        objects.append((path, mode, blob.data, _hex(blob_id)))
+    return proof, objects
