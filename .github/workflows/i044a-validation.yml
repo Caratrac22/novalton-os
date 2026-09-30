@@ -65,6 +65,9 @@ jobs:
       - name: Run focused sandbox adapter tests
         run: python -m pytest -q apps/api/tests/test_verification_sandbox.py
 
+      - name: Migrate disposable novalton_test database
+        run: alembic -c apps/api/alembic.ini upgrade head
+
       - name: Run full API suite on novalton_test
         run: python -m pytest -q apps/api/tests
 
