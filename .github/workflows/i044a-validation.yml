@@ -1,0 +1,172 @@
+name: I-044A validation
+
+on:
+  push:
+    branches:
+      - ci/i044a-validation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-and-api:
+    name: Source contracts and disposable API database
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: novalton_test
+          POSTGRES_USER: novalton_ci
+          POSTGRES_PASSWORD: ci-${{ github.run_id }}-${{ github.run_attempt }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U novalton_ci -d novalton_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NOVALTON_ENV: test
+      DATABASE_URL: postgresql://novalton_ci:ci-${{ github.run_id }}-${{ github.run_attempt }}@127.0.0.1:5432/novalton_test
+      NOVALTON_TEST_DATABASE_URL: postgresql://novalton_ci:ci-${{ github.run_id }}-${{ github.run_attempt }}@127.0.0.1:5432/novalton_test
+      PYTHONNOUSERSITE: "1"
+      GITHUB_TOKEN: ""
+      OPENAI_API_KEY: ""
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13.15"
+          cache: pip
+          cache-dependency-path: apps/api/pyproject.toml
+
+      - name: Install API test tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e 'apps/api[dev]'
+
+      - name: Verify disposable database contract
+        run: |
+          test "$NOVALTON_ENV" = test
+          test "${DATABASE_URL##*/}" = novalton_test
+          test "${NOVALTON_TEST_DATABASE_URL##*/}" = novalton_test
+          test ! -e .env.test
+
+      - name: Run focused sandbox adapter tests
+        run: python -m pytest -q apps/api/tests/test_verification_sandbox.py
+
+      - name: Run full API suite on novalton_test
+        run: python -m pytest -q apps/api/tests
+
+      - name: Run I-044A source and staging acceptance
+        run: |
+          python -I -S -B infra/verification/i044a-v2/tests/test_i044a_contract.py
+          python -I -S -B infra/verification/i044a-v2/tests/test_i044a_seccomp_staging.py
+
+      - name: Verify I-044A bundle closure and reviewed runtime pin
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import tarfile
+          from pathlib import Path
+
+          root = Path("infra/verification/i044a-v2")
+          spec = importlib.util.spec_from_file_location("i044a_installer", root / "install.py")
+          installer = importlib.util.module_from_spec(spec)
+          assert spec.loader is not None
+          spec.loader.exec_module(installer)
+          loaded = installer.load_bundle(root / "bundle.tar")
+          with tarfile.open(root / "bundle.tar", "r:") as archive:
+              names = {member.name for member in archive.getmembers()}
+          assert names == {"bundle-manifest.json", *installer.FILES.values(), *installer.AUXILIARY.values()}
+          assert set(loaded) == set(installer.FILES)
+          assert installer.EXPECTED_RELEASE_DIGEST == "935319e8d43272f8e325832c3bc9e382499a6b0f40abb71eedb9410217f273a8"
+          PY
+
+      - name: Lint I-044A and sandbox files
+        run: |
+          ruff check \
+            apps/api/src/novalton_api/infrastructure/verification_sandbox.py \
+            apps/api/tests/test_verification_sandbox.py \
+            infra/verification/i044a-v2/install.py \
+            infra/verification/i044a-v2/tests/accept_i044a_installed.py \
+            infra/verification/i044a-v2/tests/test_i044a_contract.py
+
+      - name: Check shell syntax and patch whitespace
+        run: |
+          sh -n infra/verification/i044a-v2/root-handoff.sh
+          bash -n infra/verification/i044a-v2/root-handoff.sh
+          git diff --check HEAD^ HEAD
+
+  i044b-foundation:
+    name: Exact I-044B foundation prerequisite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require an exact reviewed I-044B foundation artifact
+        run: |
+          set -eu
+          expected=6643fdf075190c785de92ee28e0776915297640208fd091b64045313fe16bd7c
+          base=/opt/novalton-verification/i044b-v1
+          test -d "$base"
+          test ! -L "$base"
+          actual=$(sha256sum "$base/manifest.json" | awk '{print $1}')
+          test "$actual" = "$expected"
+
+  installed-i044a:
+    name: Installed I-044A kernel and acceptance
+    needs:
+      - source-and-api
+      - i044b-foundation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install I-044A through the reviewed handoff
+        run: |
+          set -eu
+          stage=/run/novalton-i044a-v2-reviewed
+          source=/home/alexandre/projects/novalton-os/infra/verification/i044a-v2
+          sudo install -d -o root -g root -m 0755 /home/alexandre/projects/novalton-os/infra/verification
+          sudo install -d -o root -g root -m 0555 "$source"
+          sudo install -o root -g root -m 0400 infra/verification/i044a-v2/install.py "$source/install.py"
+          sudo install -o root -g root -m 0400 infra/verification/i044a-v2/bundle.tar "$source/bundle.tar"
+          test ! -e "$stage"
+          sudo install -d -o root -g root -m 0500 "$stage"
+          sudo install -o root -g root -m 0400 infra/verification/i044a-v2/root-handoff.sh "$stage/root-handoff.sh"
+          sudo sha256sum -c <<'EOF'
+          130324f602c2097b12dcd1e5941cbb2b15b20f3082a28d50247c72f0e497ded0  /run/novalton-i044a-v2-reviewed/root-handoff.sh
+          EOF
+          sudo /bin/sh "$stage/root-handoff.sh"
+
+      - name: Verify exact installed runtime identity
+        run: |
+          sudo /opt/novalton-verification/i044a-v2/rootfs/runtime/bin/python3.13 -I -S -B - <<'PY'
+          import hashlib
+          from pathlib import Path
+          manifest = Path("/opt/novalton-verification/i044a-v2/manifest.json").read_bytes()
+          assert hashlib.sha256(manifest).hexdigest() == "935319e8d43272f8e325832c3bc9e382499a6b0f40abb71eedb9410217f273a8"
+          PY
+
+      - name: Run installed kernel seccomp acceptance
+        run: sudo /opt/novalton-verification/i044a-v2/rootfs/runtime/bin/python3.13 -I -S -B /run/novalton-i044a-v2-reviewed/tests/test_i044a_seccomp_kernel.py
+
+      - name: Run installed I-044A acceptance
+        run: sudo /opt/novalton-verification/i044a-v2/rootfs/runtime/bin/python3.13 -I -S -B /run/novalton-i044a-v2-reviewed/tests/accept_i044a_installed.py
