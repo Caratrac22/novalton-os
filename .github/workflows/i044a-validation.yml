@@ -43,6 +43,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+          fetch-depth: 2
 
       - uses: actions/setup-python@v6
         with:
@@ -72,6 +73,11 @@ jobs:
         run: |
           set -eu
           for test_file in $(find apps/api/tests -maxdepth 1 -type f -name 'test_*.py' | sort); do
+            if test "$test_file" = apps/api/tests/test_health.py; then
+              env -u DATABASE_URL -u NOVALTON_TEST_DATABASE_URL NOVALTON_ENV=development \
+                python -m pytest -q --noconftest "$test_file"
+              continue
+            fi
             test "$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc 'SELECT current_database()')" = novalton_test
             psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
             alembic -c apps/api/alembic.ini upgrade head
