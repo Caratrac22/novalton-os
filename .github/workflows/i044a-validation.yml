@@ -69,14 +69,23 @@ jobs:
         run: alembic -c apps/api/alembic.ini upgrade head
 
       - name: Run full API suite on novalton_test
-        run: python -m pytest -q apps/api/tests
+        run: |
+          set -eu
+          for test_file in $(find apps/api/tests -maxdepth 1 -type f -name 'test_*.py' | sort); do
+            test "$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc 'SELECT current_database()')" = novalton_test
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+            alembic -c apps/api/alembic.ini upgrade head
+            python -m pytest -q "$test_file"
+          done
 
       - name: Run I-044A source and staging acceptance
+        if: ${{ always() }}
         run: |
           python -I -S -B infra/verification/i044a-v2/tests/test_i044a_contract.py
           python -I -S -B infra/verification/i044a-v2/tests/test_i044a_seccomp_staging.py
 
       - name: Verify I-044A bundle closure and reviewed runtime pin
+        if: ${{ always() }}
         run: |
           python - <<'PY'
           import importlib.util
@@ -97,6 +106,7 @@ jobs:
           PY
 
       - name: Lint I-044A and sandbox files
+        if: ${{ always() }}
         run: |
           ruff check \
             apps/api/src/novalton_api/infrastructure/verification_sandbox.py \
@@ -106,6 +116,7 @@ jobs:
             infra/verification/i044a-v2/tests/test_i044a_contract.py
 
       - name: Check shell syntax and patch whitespace
+        if: ${{ always() }}
         run: |
           sh -n infra/verification/i044a-v2/root-handoff.sh
           bash -n infra/verification/i044a-v2/root-handoff.sh
