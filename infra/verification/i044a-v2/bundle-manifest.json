@@ -4,7 +4,7 @@
   "rootfs/runtime/i044a_probe.py": "90d14af30df277b7fce483ee689bbf1dd13f98b26854b05a36157dcd65f9dad3",
   "tests/accept_i044a_installed.py": "aecaf39ab8dcd85a5686ff3f53e400a9581d5153ce5049534b0379b5efc1b181",
   "tests/fixtures/i044b_worker_contract_shim.py": "237d250106200329435666689f1f8990fcdff4d74da2393004acf937e68f8cae",
-  "tests/test_i044a_contract.py": "a5349f171e95ac60a58bb73019254a4e79a824a1d3bc500a614b8dd89dddade4",
+  "tests/test_i044a_contract.py": "2090a0dd2b9c7c86d95724f98c5d005766159cc877e0e71e947bc000850d145d",
   "tests/test_i044a_seccomp_kernel.py": "65571f6eae8a20d5004537aee83735f5c4552b1ce5f663f8c2dd3f6985b74006",
   "tests/test_i044a_seccomp_staging.py": "e378e6c9472c4c1510d318e04c68977719bb448b1b36270276693f0e0ba1c144",
   "worker/i044a.py": "fc93ef71f1dc04ab4184ce3e297f099050dffcf95388f0a975aa073597e67d53",

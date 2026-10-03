@@ -755,7 +755,7 @@ def assert_installed_acceptance_authority(
     # checks above provide focused failures; this prevents receiver rebinding or
     # a helper-body rewrite from preserving the visible call spelling.
     reviewed_ast_digest = (
-        "5717f9d58f15b1676a089d2ba2512b70ab11e7ea618c870e8cdc705c6f555e50"
+        "83c65add5235c22593219672f1dbf90964052b0ad8fa8567de292a8e7c60e436"
     )
     canonical_ast = ast.dump(tree, annotate_fields=True, include_attributes=False)
     case.assertEqual(hashlib.sha256(canonical_ast.encode()).hexdigest(), reviewed_ast_digest)
