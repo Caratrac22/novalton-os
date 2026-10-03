@@ -198,7 +198,7 @@ def prepare_userns(group: Path) -> tuple[int, socket.socket, subprocess.Popen[by
         "import importlib.util,socket;"
         f"s=importlib.util.spec_from_file_location('i044b_helper',{helper_source!r});"
         "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
-        "m._userns_helper(socket.socket(fileno=3))"
+        f"m._userns_helper(socket.socket(fileno={child.fileno()}))"
     )
     process = subprocess.Popen(
         [str(RELEASE / "runtime/bin/python3.13"), "-I", "-S", "-B", "-c", helper_code],

@@ -9,7 +9,7 @@
     "runtime.lock.json": "0e43622f895e34b29f933743a508698bc7e38fb4d2519bbe38e6d8c8255235c9",
     "tests/accept_i044b_installed.py": "db8c8ccb40d817cad7a16cd094321c22c282ac7fe1649bf08a0b0cdbc6701e45",
     "var-lib-novalton\\x2dverification.mount": "24b1d592f2b21cef4dd319484375c4aa660135f565aae0604beca2c7c545a438",
-    "worker/worker.py": "4c0a0e367c6b18d8823836cdda17db713859fcb5a7cd7227dc662190254621ca"
+    "worker/worker.py": "9c270bd9e774a91e92ed091f9ff90663ca63e69fe79e8dc5b48738e43d5373ca"
   },
   "runtime_version": "3.13.15"
 }

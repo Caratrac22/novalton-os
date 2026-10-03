@@ -2,8 +2,10 @@
 
 import ast
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 UNIT = (ROOT / "novalton-verification.service").read_text()
@@ -60,4 +62,30 @@ for required in (
 ):
     assert required in provision_source
     assert required in worker_source
+
+# pass_fds preserves descriptor numbers; it does not remap the socket to fd 3.
+# Exercise the launcher contract without pretending to test kernel isolation.
+spec = importlib.util.spec_from_file_location("i044b_contract_worker", ROOT / "worker/worker.py")
+assert spec is not None and spec.loader is not None
+worker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(worker)
+parent, child, process = Mock(), Mock(), Mock()
+child.fileno.return_value = 37
+parent.recvmsg.return_value = (b"", [], 0, None)
+process.poll.return_value = 0
+with patch.object(worker.socket, "socketpair", return_value=(parent, child)), patch.object(
+    worker.subprocess, "Popen", return_value=process
+) as launch:
+    try:
+        worker.prepare_userns(Path("/unused-contract-cgroup"))
+    except worker.WorkerFailure as error:
+        assert error.code == "userns_protocol"
+    else:
+        raise AssertionError("missing namespace handoff must fail closed")
+assert launch.call_args.kwargs["pass_fds"] == (37,)
+assert "socket.socket(fileno=37)" in launch.call_args.args[0][-1]
+assert launch.call_args.kwargs["env"] == {}
+assert launch.call_args.kwargs["close_fds"] is True
+parent.close.assert_called_once()
+child.close.assert_called_once()
 print(json.dumps({"foundation_input_sha256": foundation_input_sha256, "i044b_source_contract": "PASS"}, sort_keys=True))

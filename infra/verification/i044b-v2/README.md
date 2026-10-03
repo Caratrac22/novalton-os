@@ -5,7 +5,7 @@ foundation.  It deliberately does **not** claim equivalence with the historical
 host-only `6643fdf075190c785de92ee28e0776915297640208fd091b64045313fe16bd7c`
 release. That digest is historical evidence only. A fresh installation uses
 `foundation_input_sha256`
-`e687edcdf0e1bd8ea8fe1f1fb5111a3956fbe086bdd4baaf48835454455d38e5`
+`ca6d193c19291ab61e5233e55d51bd099e04356387db146646ce4615e213ae06`
 and generates a separate `installed_manifest_sha256` for its concrete bytes.
 
 `provision.py` accepts no arguments, runs only as root, downloads the exact
