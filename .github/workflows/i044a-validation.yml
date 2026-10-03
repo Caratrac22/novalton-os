@@ -265,6 +265,8 @@ jobs:
         run: |
           sudo /usr/bin/python3 -I -S -B - <<'PY'
           import json
+          import re
+          import subprocess
           from pathlib import Path
 
           value = json.loads(Path("/var/lib/novalton-verification/recent.json").read_bytes())
@@ -283,4 +285,31 @@ jobs:
               "termination": value.get("termination"),
           }
           print(json.dumps(safe, sort_keys=True))
+          # Read-only, bounded host-policy evidence. Never print raw audit logs.
+          policy = {}
+          for name in (
+              "apparmor_restrict_unprivileged_userns",
+              "unprivileged_userns_clone",
+          ):
+              path = Path("/proc/sys/kernel") / name
+              if path.is_file():
+                  data = path.read_text().strip()
+                  policy[name] = int(data) if data.isdigit() else "invalid"
+          audit = subprocess.run(
+              ["/usr/bin/dmesg", "--since", "10 minutes ago"],
+              check=False, capture_output=True, text=True,
+              env={"PATH": "/usr/bin:/bin"}, timeout=5,
+          )
+          denials = []
+          for line in audit.stdout.splitlines():
+              if 'apparmor="DENIED"' not in line or 'comm="python3.13"' not in line:
+                  continue
+              fields = {}
+              for name in ("operation", "profile", "capname"):
+                  found = re.search(r'\b' + name + r'="([a-zA-Z0-9_ .:/()-]{1,120})"', line)
+                  if found:
+                      fields[name] = found.group(1)
+              if fields and fields not in denials:
+                  denials.append(fields)
+          print(json.dumps({"host_userns_policy": policy, "python_apparmor_denials": denials[:8]}, sort_keys=True))
           PY
