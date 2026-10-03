@@ -16,6 +16,9 @@ TREE = ast.parse((ROOT / "provision.py").read_text())
 assert LOCK["format"] == 1
 assert LOCK["cpython"]["version"] == "3.13.15"
 assert len(LOCK["cpython"]["sha256"]) == 64
+assert LOCK["bubblewrap"]["version"] == "0.9.0-1ubuntu0.3"
+assert len(LOCK["bubblewrap"]["sha256"]) == 64
+assert LOCK["bubblewrap"]["binary_sha256"] == FOUNDATION_INPUT["bubblewrap_sha256"]
 for required in (
     "User=novalton-verify",
     "NoNewPrivileges=yes",

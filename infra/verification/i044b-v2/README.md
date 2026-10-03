@@ -5,12 +5,14 @@ foundation.  It deliberately does **not** claim equivalence with the historical
 host-only `6643fdf075190c785de92ee28e0776915297640208fd091b64045313fe16bd7c`
 release. That digest is historical evidence only. A fresh installation uses
 `foundation_input_sha256`
-`1d225bcbcfdb12d7c93295fbb5115e764b9843c76fc09edf04f9ca9a8fa18c69`
+`ff6e291f4eccac450fd72c5ed40ecbfff06b6704f922e9ba764811045ca07660`
 and generates a separate `installed_manifest_sha256` for its concrete bytes.
 
 `provision.py` accepts no arguments, runs only as root, downloads the exact
-CPython source named in `runtime.lock.json`, checks its SHA-256 before unpacking,
-builds the runtime outside the checkout, and materializes a root-owned immutable
+CPython source and Ubuntu bubblewrap package named in `runtime.lock.json`, and
+checks both package SHA-256 values before unpacking. The extracted bubblewrap
+binary has a second, independent SHA-256 pin. The provisioner builds CPython
+outside the checkout and materializes a root-owned immutable
 release below `/opt/novalton-verification/i044b-v2`. The CPython source inputs
 are reproducible; compiler-dependent installed bytes are not claimed to be
 byte-reproducible. `installed-manifest.json` binds paths, types, ownership,

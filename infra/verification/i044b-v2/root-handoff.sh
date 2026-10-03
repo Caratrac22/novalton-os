@@ -16,9 +16,9 @@ for relative in provision.py foundation-input.json runtime.lock.json \
 done
 cd "$stage"
 /usr/bin/sha256sum -c <<'EOF'
-47c373e25679f584edd44553007a87dfe996e59a6df3916cd9e920dd27dcc2d0  provision.py
-1d225bcbcfdb12d7c93295fbb5115e764b9843c76fc09edf04f9ca9a8fa18c69  foundation-input.json
-477521ee64eff7e06534d96a99ff9a28a71034b7db4d03c5a6f2b06755fe1c05  runtime.lock.json
+b5de20dc86b829c8e17cf1ddb2b8061fe174aaf7cbe64e2a3d10dc3fb5d1460e  provision.py
+ff6e291f4eccac450fd72c5ed40ecbfff06b6704f922e9ba764811045ca07660  foundation-input.json
+0e43622f895e34b29f933743a508698bc7e38fb4d2519bbe38e6d8c8255235c9  runtime.lock.json
 3e1c6243f805b1f792154d57d7fd40bf953a232630262695bc414a75fee857df  novalton-verification.service
 cbc9d63980ff88465a41f69bc90623f87a4d2a0f3528a737003e82f6d3597eef  worker/worker.py
 439773325ea683d8e98c0143174b2950df88955e049060aed6c3a081310a5fdc  client/i044b_client.py

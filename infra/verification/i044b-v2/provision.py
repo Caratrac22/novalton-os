@@ -104,18 +104,33 @@ def load_lock() -> dict[str, object]:
     lock = json.loads(LOCK.read_bytes())
     if (
         not isinstance(lock, dict)
+        or set(lock) != {"format", "bubblewrap", "cpython"}
         or lock.get("format") != 1
+        or not isinstance(lock.get("bubblewrap"), dict)
         or not isinstance(lock.get("cpython"), dict)
     ):
         raise RuntimeError("runtime_lock_shape")
-    source = lock["cpython"]
+    cpython = lock["cpython"]
     if (
-        set(source) != {"url", "sha256", "version"}
-        or not isinstance(source["url"], str)
-        or not source["url"].startswith("https://www.python.org/ftp/python/")
-        or not isinstance(source["sha256"], str)
-        or len(source["sha256"]) != 64
-        or not isinstance(source["version"], str)
+        set(cpython) != {"url", "sha256", "version"}
+        or not isinstance(cpython["url"], str)
+        or not cpython["url"].startswith("https://www.python.org/ftp/python/")
+        or not isinstance(cpython["sha256"], str)
+        or len(cpython["sha256"]) != 64
+        or not isinstance(cpython["version"], str)
+    ):
+        raise RuntimeError("runtime_lock_shape")
+    bubblewrap = lock["bubblewrap"]
+    if (
+        set(bubblewrap) != {"url", "sha256", "binary_sha256", "version"}
+        or bubblewrap["url"]
+        != "https://security.ubuntu.com/ubuntu/pool/main/b/bubblewrap/"
+        "bubblewrap_0.9.0-1ubuntu0.3_amd64.deb"
+        or bubblewrap["version"] != "0.9.0-1ubuntu0.3"
+        or any(
+            not isinstance(bubblewrap[field], str) or len(bubblewrap[field]) != 64
+            for field in ("sha256", "binary_sha256")
+        )
     ):
         raise RuntimeError("runtime_lock_shape")
     return lock
@@ -133,8 +148,9 @@ def verify_foundation_input(lock: dict[str, object]) -> str:
         or identity.get("schema") != "novalton.i044b.foundation-input.v1"
         or identity.get("runtime_version") != lock["cpython"]["version"]  # type: ignore[index]
         or identity.get("cpython_source_sha256") != lock["cpython"]["sha256"]  # type: ignore[index]
+        or identity.get("bubblewrap_sha256")
+        != lock["bubblewrap"]["binary_sha256"]  # type: ignore[index]
         or not isinstance(identity.get("source"), dict)
-        or not isinstance(identity.get("bubblewrap_sha256"), str)
     ):
         raise RuntimeError("foundation_identity_shape")
     if set(identity["source"]) != {path for path in COPY_FILES if path != "foundation-input.json"}:
@@ -142,8 +158,6 @@ def verify_foundation_input(lock: dict[str, object]) -> str:
     for relative, expected in identity["source"].items():
         if not isinstance(relative, str) or not isinstance(expected, str) or digest((SOURCE / relative).read_bytes()) != expected:
             raise RuntimeError("foundation_identity_content")
-    if digest(Path("/usr/bin/bwrap").read_bytes()) != identity["bubblewrap_sha256"]:
-        raise RuntimeError("bubblewrap_digest_mismatch")
     return digest(input_data)
 
 
@@ -168,16 +182,25 @@ def ensure_accounts() -> None:
     checked(["/usr/sbin/usermod", "--append", "--groups", "novalton-verify-ipc", "novalton-verify"])
 
 
-def download_runtime(lock: dict[str, object], work: Path) -> Path:
-    source = lock["cpython"]
+def download_pinned(source: object, destination: Path) -> Path:
     assert isinstance(source, dict)
-    archive = work / "Python.tgz"
     request = urllib.request.Request(str(source["url"]), headers={"User-Agent": "Novalton-I044B/2"})
-    with urllib.request.urlopen(request, timeout=60) as response, archive.open("xb") as output:
+    with urllib.request.urlopen(request, timeout=60) as response, destination.open("xb") as output:
         shutil.copyfileobj(response, output, 64 * 1024)
-    if digest(archive.read_bytes()) != source["sha256"]:
+    if digest(destination.read_bytes()) != source["sha256"]:
         raise RuntimeError("runtime_download_digest_mismatch")
-    return archive
+    return destination
+
+
+def extract_bubblewrap(archive: Path, work: Path, expected_sha256: str) -> Path:
+    destination = work / "bubblewrap-package"
+    destination.mkdir(mode=0o700)
+    checked(["/usr/bin/dpkg-deb", "--extract", str(archive), str(destination)])
+    binary = destination / "usr/bin/bwrap"
+    info = no_link(binary)
+    if not stat.S_ISREG(info.st_mode) or digest(binary.read_bytes()) != expected_sha256:
+        raise RuntimeError("bubblewrap_digest_mismatch")
+    return binary
 
 
 def extract_runtime(archive: Path, work: Path, version: str) -> Path:
@@ -338,7 +361,13 @@ def install() -> str:
         raise RuntimeError("target_parent_untrusted")
     with tempfile.TemporaryDirectory(prefix="novalton-i044b-build-", dir="/var/tmp") as temporary:
         work = Path(temporary)
-        archive = download_runtime(lock, work)
+        archive = download_pinned(lock["cpython"], work / "Python.tgz")
+        bubblewrap_archive = download_pinned(lock["bubblewrap"], work / "bubblewrap.deb")
+        bubblewrap_lock = lock["bubblewrap"]
+        assert isinstance(bubblewrap_lock, dict)
+        bubblewrap = extract_bubblewrap(
+            bubblewrap_archive, work, str(bubblewrap_lock["binary_sha256"])
+        )
         source = extract_runtime(archive, work, str(lock["cpython"]["version"]))  # type: ignore[index]
         prefix = work / "runtime"
         checked([str(source / "configure"), f"--prefix={prefix}", "--without-ensurepip", "--disable-test-modules"], cwd=source)
@@ -350,7 +379,7 @@ def install() -> str:
                 destination = candidate / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(SOURCE / relative, destination)
-            shutil.copy2("/usr/bin/bwrap", candidate / "bwrap")
+            shutil.copy2(bubblewrap, candidate / "bwrap")
             runtime_rootfs(prefix, candidate / "rootfs")
             shutil.copytree(prefix, candidate / "runtime", symlinks=False)
             (candidate / "policy.json").write_text(json.dumps({"client_gid": __import__("grp").getgrnam("novalton-verify-ipc").gr_gid, "client_uid": __import__("pwd").getpwnam("novalton-verify-client").pw_uid}, sort_keys=True) + "\n")
