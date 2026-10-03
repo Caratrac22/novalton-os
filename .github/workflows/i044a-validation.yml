@@ -259,3 +259,28 @@ jobs:
 
       - name: Run installed I-044A acceptance
         run: sudo /opt/novalton-verification/i044a-v2/rootfs/runtime/bin/python3.13 -I -S -B /run/novalton-i044a-v2-reviewed/tests/accept_i044a_installed.py
+
+      - name: Report bounded installed acceptance diagnostics
+        if: ${{ failure() }}
+        run: |
+          sudo /usr/bin/python3 -I -S -B - <<'PY'
+          import json
+          from pathlib import Path
+
+          value = json.loads(Path("/var/lib/novalton-verification/recent.json").read_bytes())
+          checks = value.get("checks")
+          safe = {
+              "failure_code": value.get("failure_code"),
+              "failed_checks": sorted(
+                  name for name, passed in checks.items() if passed is not True
+              ) if isinstance(checks, dict) else ["checks_unavailable"],
+              "output_truncated": value.get("output_truncated"),
+              "population_empty": value.get("population_empty"),
+              "scratch_destroyed": value.get("scratch_destroyed"),
+              "snapshot_destroyed": value.get("snapshot_destroyed"),
+              "state": value.get("state"),
+              "stderr_truncated": value.get("stderr_truncated"),
+              "termination": value.get("termination"),
+          }
+          print(json.dumps(safe, sort_keys=True))
+          PY
