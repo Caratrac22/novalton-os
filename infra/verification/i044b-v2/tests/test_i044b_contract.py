@@ -88,4 +88,20 @@ assert launch.call_args.kwargs["env"] == {}
 assert launch.call_args.kwargs["close_fds"] is True
 parent.close.assert_called_once()
 child.close.assert_called_once()
+parent.settimeout.assert_called_once_with(worker.TIMEOUT)
+for message, expected in (
+    (b"E:unshare:1", "userns_unshare_errno_1"),
+    (b"E:namespace_limit:30", "userns_namespace_limit_errno_30"),
+    (b"E:attacker_path:1", "userns_protocol"),
+):
+    parent.recvmsg.return_value = (message, [], 0, None)
+    with patch.object(worker.socket, "socketpair", return_value=(parent, child)), patch.object(
+        worker.subprocess, "Popen", return_value=process
+    ):
+        try:
+            worker.prepare_userns(Path("/unused-contract-cgroup"))
+        except worker.WorkerFailure as error:
+            assert error.code == expected
+        else:
+            raise AssertionError("helper failure must not authorize execution")
 print(json.dumps({"foundation_input_sha256": foundation_input_sha256, "i044b_source_contract": "PASS"}, sort_keys=True))

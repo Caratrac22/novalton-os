@@ -176,14 +176,24 @@ def _write_map(name: str, uid: int) -> None:
 def _userns_helper(channel: socket.socket) -> None:
     parent_uid = os.getuid()
     parent_gid = os.getgid()
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.unshare(CLONE_NEWUSER) != 0:
-        raise OSError(ctypes.get_errno(), "unshare_user")
-    _write_map("uid_map", parent_uid)
-    _write_map("gid_map", parent_gid)
-    libc.prctl(PR_SET_DUMPABLE, 1, 0, 0, 0)
-    Path("/proc/sys/user/max_user_namespaces").write_text("1\n")
-    descriptor = os.open("/proc/self/ns/user", os.O_RDONLY | os.O_CLOEXEC)
+    stage = "unshare"
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.unshare(CLONE_NEWUSER) != 0:
+            raise OSError(ctypes.get_errno(), "unshare_user")
+        stage = "uid_map"
+        _write_map("uid_map", parent_uid)
+        stage = "gid_map"
+        _write_map("gid_map", parent_gid)
+        libc.prctl(PR_SET_DUMPABLE, 1, 0, 0, 0)
+        stage = "namespace_limit"
+        Path("/proc/sys/user/max_user_namespaces").write_text("1\n")
+        stage = "namespace_open"
+        descriptor = os.open("/proc/self/ns/user", os.O_RDONLY | os.O_CLOEXEC)
+    except OSError as error:
+        # Fixed stage and errno only: no paths, exception text, or environment.
+        channel.send(f"E:{stage}:{error.errno}".encode("ascii"))
+        return
     try:
         channel.sendmsg([b"R"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, descriptor.to_bytes(4, "little", signed=True))])
     finally:
@@ -207,7 +217,12 @@ def prepare_userns(group: Path) -> tuple[int, socket.socket, subprocess.Popen[by
     )
     child.close()
     try:
-        message, ancillary, flags, _ = parent.recvmsg(1, socket.CMSG_SPACE(4))
+        parent.settimeout(TIMEOUT)
+        message, ancillary, flags, _ = parent.recvmsg(128, socket.CMSG_SPACE(4))
+        if not flags and not ancillary and re.fullmatch(
+            rb"E:(unshare|uid_map|gid_map|namespace_limit|namespace_open):[0-9]{1,4}", message
+        ):
+            raise WorkerFailure("userns_" + message[2:].decode("ascii").replace(":", "_errno_"))
         if message != b"R" or flags or len(ancillary) != 1:
             raise WorkerFailure("userns_protocol")
         control = ancillary[0]
