@@ -49,6 +49,8 @@ assert foundation_input_sha256 in (ROOT / "root-handoff.sh").read_text()
 provision_source = (ROOT / "provision.py").read_text()
 worker_source = (ROOT / "worker/worker.py").read_text()
 assert 'os.chown(ENDPOINT, -1, policy["client_gid"])' in worker_source
+assert "spec_from_file_location('i044b_helper'" in worker_source
+assert "from worker import _userns_helper" not in worker_source
 for required in (
     "foundation_input_sha256", "installed_manifest_sha256",
     "novalton.i044b.foundation-metadata.v1", "novalton.i044b.installed-manifest.v1",

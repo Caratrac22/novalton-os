@@ -191,8 +191,15 @@ def _userns_helper(channel: socket.socket) -> None:
 
 def prepare_userns(group: Path) -> tuple[int, socket.socket, subprocess.Popen[bytes]]:
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    helper_source = str(RELEASE / "worker/worker.py")
+    helper_code = (
+        "import importlib.util,socket;"
+        f"s=importlib.util.spec_from_file_location('i044b_helper',{helper_source!r});"
+        "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
+        "m._userns_helper(socket.socket(fileno=3))"
+    )
     process = subprocess.Popen(
-        [str(RELEASE / "runtime/bin/python3.13"), "-I", "-S", "-B", "-c", "from worker import _userns_helper; import socket; _userns_helper(socket.socket(fileno=3))"],
+        [str(RELEASE / "runtime/bin/python3.13"), "-I", "-S", "-B", "-c", helper_code],
         pass_fds=(child.fileno(),), close_fds=True, env={}, stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True,
     )
