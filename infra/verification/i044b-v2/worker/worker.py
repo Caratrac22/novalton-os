@@ -174,11 +174,13 @@ def _write_map(name: str, uid: int) -> None:
 
 
 def _userns_helper(channel: socket.socket) -> None:
+    parent_uid = os.getuid()
+    parent_gid = os.getgid()
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.unshare(CLONE_NEWUSER) != 0:
         raise OSError(ctypes.get_errno(), "unshare_user")
-    _write_map("uid_map", os.getuid())
-    _write_map("gid_map", os.getgid())
+    _write_map("uid_map", parent_uid)
+    _write_map("gid_map", parent_gid)
     libc.prctl(PR_SET_DUMPABLE, 1, 0, 0, 0)
     Path("/proc/sys/user/max_user_namespaces").write_text("1\n")
     descriptor = os.open("/proc/self/ns/user", os.O_RDONLY | os.O_CLOEXEC)

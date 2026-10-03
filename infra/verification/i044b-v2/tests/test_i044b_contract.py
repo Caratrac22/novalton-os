@@ -51,6 +51,9 @@ worker_source = (ROOT / "worker/worker.py").read_text()
 assert 'os.chown(ENDPOINT, -1, policy["client_gid"])' in worker_source
 assert "spec_from_file_location('i044b_helper'" in worker_source
 assert "from worker import _userns_helper" not in worker_source
+assert worker_source.index("parent_uid = os.getuid()") < worker_source.index(
+    "libc.unshare(CLONE_NEWUSER)"
+)
 for required in (
     "foundation_input_sha256", "installed_manifest_sha256",
     "novalton.i044b.foundation-metadata.v1", "novalton.i044b.installed-manifest.v1",
