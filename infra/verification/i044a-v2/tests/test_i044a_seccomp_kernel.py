@@ -12,9 +12,6 @@ import unittest
 from pathlib import Path
 
 RELEASE = Path("/opt/novalton-verification/i044a-v2")
-EXPECTED_RELEASE_DIGEST = (
-    "935319e8d43272f8e325832c3bc9e382499a6b0f40abb71eedb9410217f273a8"
-)
 SYS_CLONE = 56
 SYS_SECCOMP = 317
 SYS_CLONE3 = 435
@@ -94,7 +91,7 @@ def verify_regular_root_file(path: Path, mode: int) -> os.stat_result:
     return info
 
 
-def installed_policy() -> tuple[bytes, str]:
+def installed_policy() -> tuple[bytes, str, str]:
     release_info = RELEASE.lstat()
     if (
         not stat.S_ISDIR(release_info.st_mode)
@@ -115,7 +112,10 @@ def installed_policy() -> tuple[bytes, str]:
 
     manifest_data = manifest_path.read_bytes()
     manifest_digest = hashlib.sha256(manifest_data).hexdigest()
-    if manifest_digest != EXPECTED_RELEASE_DIGEST:
+    metadata = json.loads((RELEASE / "release-metadata.json").read_bytes())
+    if (not isinstance(metadata, dict)
+            or metadata.get("schema") != "novalton.i044a.release-metadata.v1"
+            or metadata.get("installed_manifest_sha256") != manifest_digest):
         raise AssertionError("installed release manifest identity mismatch")
     manifest = json.loads(manifest_data)
     if not isinstance(manifest, dict) or not isinstance(
@@ -129,7 +129,7 @@ def installed_policy() -> tuple[bytes, str]:
         raise AssertionError(
             "installed seccomp.bpf digest does not match installed manifest"
         )
-    return policy, policy_digest
+    return policy, policy_digest, manifest_digest
 
 
 def reap_exact_child(pid: int) -> None:
@@ -206,7 +206,7 @@ def load_exact_policy(policy: bytes) -> None:
 class I044AInstalledSeccompKernelTests(unittest.TestCase):
     def test_installed_policy_same_process_clone3_attribution(self):
         self.assertEqual(platform.machine(), "x86_64", "I-044A policy requires x86_64")
-        policy, policy_digest = installed_policy()
+        policy, policy_digest, manifest_digest = installed_policy()
         mode_before, filters_before = proc_status()
         state_before = stable_process_state()
 
@@ -264,7 +264,7 @@ class I044AInstalledSeccompKernelTests(unittest.TestCase):
                     "mode_after": mode_after,
                     "mode_before": mode_before,
                     "policy_sha256": policy_digest,
-                    "release_manifest_sha256": EXPECTED_RELEASE_DIGEST,
+                    "installed_manifest_sha256": manifest_digest,
                     "stable_process_state_sha256": hashlib.sha256(
                         json.dumps(state_before, sort_keys=True).encode()
                     ).hexdigest(),

@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 artifacts = Path(__file__).resolve().parent.parent
 installed = Path("/opt/novalton-verification/i044a-v2")
-foundation = Path("/opt/novalton-verification/i044b-v1")
+foundation = Path("/opt/novalton-verification/i044b-v2")
 overlay = None
 if installed.is_dir():
     release = installed
@@ -50,6 +50,30 @@ i044a_acceptance = load(
 installer = load("i044a_installer", artifacts / "install.py")
 
 
+def finalize_test_release(root: Path) -> tuple[bytes, str]:
+    foundation_metadata = {
+        "schema": "novalton.i044b.foundation-metadata.v1",
+        "foundation_input_sha256": installer.FOUNDATION_INPUT_SHA256,
+        "installed_manifest_sha256": "f" * 64,
+        "runtime_version": "3.13.15",
+    }
+    (root / "foundation-metadata.json").write_text(
+        json.dumps(foundation_metadata, sort_keys=True) + "\n"
+    )
+    hashes = {
+        path.relative_to(root).as_posix(): installer.digest(path.read_bytes())
+        for path in root.rglob("*") if path.is_file()
+    }
+    manifest = installer.make_manifest_from_hashes(hashes)
+    (root / "manifest.json").write_bytes(manifest)
+    (root / "release-metadata.json").write_bytes(
+        installer.release_metadata(manifest, foundation_metadata)
+    )
+    for path in [root, *root.rglob("*")]:
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    return manifest, installer.digest(manifest)
+
+
 def assert_installed_acceptance_authority(
     case: unittest.TestCase, source: str
 ) -> None:
@@ -66,6 +90,7 @@ def assert_installed_acceptance_authority(
     # acquire authority merely because its API has not appeared on a blacklist.
     reviewed_call_targets = {
         "(RELEASE / 'manifest.json').read_bytes",
+        "(RELEASE / 'release-metadata.json').read_bytes",
         '(base / name).relative_to',
         '(base / name).relative_to(root).as_posix',
         "(run_group / 'cgroup.procs').read_text",
@@ -362,10 +387,7 @@ def assert_installed_acceptance_authority(
     )
     case.assertEqual(len(bindings("RELEASE")), 1)
 
-    for name, expected in (
-        ("EXPECTED_RELEASE_DIGEST", "935319e8d43272f8e325832c3bc9e382499a6b0f40abb71eedb9410217f273a8"),
-        ("UNIT", "novalton-verification.service"),
-    ):
+    for name, expected in (("UNIT", "novalton-verification.service"),):
         values = assigned_values(name)
         case.assertEqual(len(values), 1)
         case.assertIsInstance(values[0], ast.Constant)
@@ -493,7 +515,7 @@ def assert_installed_acceptance_authority(
         (ast.Constant, "-S"),
         (ast.Constant, "-B"),
         (ast.Name, "CLIENT"),
-        (ast.Name, "EXPECTED_RELEASE_DIGEST"),
+        (ast.Name, "INSTALLED_MANIFEST_SHA256"),
         (ast.Name, "action"),
         (ast.Starred, None),
     )
@@ -733,7 +755,7 @@ def assert_installed_acceptance_authority(
     # checks above provide focused failures; this prevents receiver rebinding or
     # a helper-body rewrite from preserving the visible call spelling.
     reviewed_ast_digest = (
-        "18e1df312fd3b4f18eae53417a94b11a2548194aa131d07260c63c8733d81603"
+        "5717f9d58f15b1676a089d2ba2512b70ab11e7ea618c870e8cdc705c6f555e50"
     )
     canonical_ast = ast.dump(tree, annotate_fields=True, include_attributes=False)
     case.assertEqual(hashlib.sha256(canonical_ast.encode()).hexdigest(), reviewed_ast_digest)
@@ -773,7 +795,7 @@ class I044AContractTests(unittest.TestCase):
         """Exercise installer.main with a real sibling filesystem and fake systemd."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            base = root / "i044b-v1"
+            base = root / "i044b-v2"
             base.mkdir()
             base_unit = b"base unit"
             (base / "novalton-verification.service").write_bytes(base_unit)
@@ -843,10 +865,9 @@ class I044AContractTests(unittest.TestCase):
                 stack.enter_context(patch.object(installer.sys, "argv", ["install.py"]))
                 stack.enter_context(patch.object(installer, "verify_staged_installer", side_effect=lambda: events.append("stage")))
                 stack.enter_context(patch.object(installer, "verify_target_parent", side_effect=lambda: events.append("parent")))
-                stack.enter_context(patch.object(installer, "verify_foundation", side_effect=lambda: events.append("foundation") or {}))
+                stack.enter_context(patch.object(installer, "verify_foundation", side_effect=lambda: events.append("foundation") or ({}, {"installed_manifest_sha256": "f" * 64})))
                 stack.enter_context(patch.object(installer, "load_bundle", side_effect=lambda: events.append("bundle") or {"novalton-verification.service": b"candidate unit"}))
                 stack.enter_context(patch.object(installer, "expected_release_manifest", side_effect=lambda *_: events.append("manifest") or b"candidate manifest"))
-                stack.enter_context(patch.object(installer, "enforce_release_digest", side_effect=lambda _: events.append("release")))
                 def trusted_unit(expected: bytes) -> bytes:
                     events.append("unit")
                     if unit.read_bytes() != expected:
@@ -856,7 +877,7 @@ class I044AContractTests(unittest.TestCase):
                 stack.enter_context(patch.object(installer, "trusted_unit", side_effect=trusted_unit))
                 stack.enter_context(patch.object(installer, "materialize_candidate", side_effect=lambda *_: events.append("materialize") or candidate))
                 stack.enter_context(patch.object(installer, "target_state", side_effect=target_state))
-                stack.enter_context(patch.object(installer, "verify_release", side_effect=lambda *_: events.append("verify_release")))
+                stack.enter_context(patch.object(installer, "verify_release", side_effect=lambda *_: events.append("verify_release") or {"installed_manifest_sha256": installer.digest(b"candidate manifest")}))
                 stack.enter_context(patch.object(installer, "verify_unit_bytes", side_effect=lambda _: events.append("verify_unit")))
                 stack.enter_context(patch.object(installer, "reserve_sibling", side_effect=reserve))
                 stack.enter_context(patch.object(installer, "move_sibling", side_effect=move))
@@ -885,8 +906,10 @@ class I044AContractTests(unittest.TestCase):
             "state": "ready",
             "active": False,
             "definition": "repository-probe-v1",
-            "foundation_digest": i044a_client.FOUNDATION_DIGEST,
-            "release_digest": expected,
+            "foundation_input_sha256": i044a_client.FOUNDATION_INPUT_SHA256,
+            "foundation_installed_manifest_sha256": "b" * 64,
+            "i044a_input_sha256": "c" * 64,
+            "installed_manifest_sha256": expected,
             "db_mode": False,
         }
         with patch.object(i044a_client, "request", return_value=response) as request:
@@ -959,8 +982,10 @@ class I044AContractTests(unittest.TestCase):
             {
                 "state": "ready",
                 "definition": "repository-probe-v1",
-                "foundation_digest": i044a_client.FOUNDATION_DIGEST,
-                "release_digest": expected,
+                "foundation_input_sha256": i044a_client.FOUNDATION_INPUT_SHA256,
+                "foundation_installed_manifest_sha256": "f" * 64,
+                "i044a_input_sha256": "e" * 64,
+                "installed_manifest_sha256": expected,
                 "db_mode": False,
             },
             {"state": "prepared", "capability": "c" * 64, "source_digest": "d" * 64},
@@ -1064,6 +1089,13 @@ class I044AContractTests(unittest.TestCase):
             manifest = b"trusted test manifest\n"
             manifest_path = release / "manifest.json"
             manifest_path.write_bytes(manifest)
+            (release / "release-metadata.json").write_text(json.dumps({
+                "schema": "novalton.i044a.release-metadata.v1",
+                "i044a_input_sha256": "a" * 64,
+                "foundation_input_sha256": "b" * 64,
+                "foundation_installed_manifest_sha256": "c" * 64,
+                "installed_manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+            }))
             before = {p.relative_to(checkout): (p.is_symlink(), p.readlink() if p.is_symlink() else p.read_bytes() if p.is_file() else None) for p in checkout.rglob("*")}
             original_read_bytes = Path.read_bytes
             original_read_text = Path.read_text
@@ -1095,7 +1127,7 @@ class I044AContractTests(unittest.TestCase):
                     patch.object(i044a_acceptance.os, "geteuid", return_value=0),
                     patch.object(i044a_acceptance.sys, "argv", ["accept_i044a_installed.py"]),
                     patch.object(i044a_acceptance, "RELEASE", release),
-                    patch.object(i044a_acceptance, "EXPECTED_RELEASE_DIGEST", hashlib.sha256(manifest).hexdigest()),
+                    patch.object(i044a_acceptance, "INSTALLED_MANIFEST_SHA256", hashlib.sha256(manifest).hexdigest()),
                     patch.object(i044a_acceptance, "ctl", side_effect=control),
                     patch.object(i044a_acceptance, "create_host_marker", return_value=marker),
                     patch.object(i044a_acceptance, "remove_host_marker") as remove_marker,
@@ -1112,13 +1144,15 @@ class I044AContractTests(unittest.TestCase):
             self.assertEqual(after, before)
             self.assertEqual(sentinel.read_bytes(), b"unchanged")
 
-    def test_wrong_release_digest_fails_before_non_health_operation(self):
+    def test_wrong_installed_manifest_fails_before_non_health_operation(self):
         expected = "a" * 64
         response = {
             "state": "ready",
             "definition": "repository-probe-v1",
-            "foundation_digest": i044a_client.FOUNDATION_DIGEST,
-            "release_digest": "b" * 64,
+            "foundation_input_sha256": i044a_client.FOUNDATION_INPUT_SHA256,
+            "foundation_installed_manifest_sha256": "c" * 64,
+            "i044a_input_sha256": "d" * 64,
+            "installed_manifest_sha256": "b" * 64,
             "db_mode": False,
         }
         with (
@@ -1324,6 +1358,12 @@ class I044AContractTests(unittest.TestCase):
         worker.active = None
         worker.recent = None
         worker.digest = "release"
+        worker.evidence = {
+            "i044a_input_sha256": "a" * 64,
+            "installed_manifest_sha256": "b" * 64,
+            "foundation_input_sha256": "c" * 64,
+            "foundation_installed_manifest_sha256": "d" * 64,
+        }
         worker.reconciled = 0
         worker.pending = {"expires": time.monotonic() - 1, "snapshot": Path("/expired")}
         with patch.object(i044a, "destroy_snapshot", return_value=True) as destroy:
@@ -1350,13 +1390,15 @@ class I044AContractTests(unittest.TestCase):
                 self.assertEqual(evaluate_filter(policy, 56, flag | 17), denied)
         self.assertEqual(evaluate_filter(policy, 435), denied)
 
-    def test_bundle_and_release_digests_are_fixed_and_fail_closed(self):
+    def test_bundle_input_is_fixed_and_installed_identity_is_derived(self):
         loaded = installer.load_bundle(artifacts / "bundle.tar")
         if not installer.BASE.is_dir():
             self.skipTest("pinned I-044B foundation unavailable; release derivation is install-only")
-        foundation = installer.verify_foundation(ownership=False)
-        manifest = installer.expected_release_manifest(foundation, loaded)
-        self.assertEqual(installer.digest(manifest), installer.EXPECTED_RELEASE_DIGEST)
+        foundation_files, foundation_metadata = installer.verify_foundation(ownership=False)
+        manifest = installer.expected_release_manifest(foundation_files, loaded)
+        metadata = json.loads(installer.release_metadata(manifest, foundation_metadata))
+        self.assertEqual(metadata["i044a_input_sha256"], installer.I044A_INPUT_SHA256)
+        self.assertEqual(metadata["installed_manifest_sha256"], installer.digest(manifest))
         altered = bytearray((artifacts / "bundle.tar").read_bytes())
         altered[-1] ^= 1
         with tempfile.NamedTemporaryFile() as candidate:
@@ -1364,11 +1406,6 @@ class I044AContractTests(unittest.TestCase):
             candidate.flush()
             with self.assertRaisesRegex(RuntimeError, "bundle_digest_mismatch"):
                 installer.load_bundle(Path(candidate.name))
-        with (
-            patch.object(installer, "EXPECTED_RELEASE_DIGEST", "0" * 64),
-            self.assertRaisesRegex(RuntimeError, "release_digest_mismatch"),
-        ):
-            installer.enforce_release_digest(manifest)
 
     def test_release_closure_validation_rejects_extra_files_and_symlinks(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1376,13 +1413,7 @@ class I044AContractTests(unittest.TestCase):
             (release / "client").mkdir(parents=True)
             client = release / "client/i044a_client.py"
             client.write_bytes(b"reviewed client\n")
-            manifest = installer.make_manifest_from_hashes(
-                {"client/i044a_client.py": installer.digest(client.read_bytes())}
-            )
-            (release / "manifest.json").write_bytes(manifest)
-            for path in [release, *release.rglob("*")]:
-                path.chmod(0o555 if path.is_dir() else 0o444)
-            expected = installer.digest(manifest)
+            manifest, expected = finalize_test_release(release)
             installer.verify_release(release, expected, ownership=False)
             release.chmod(0o755)
             (release / "extra").write_bytes(b"unexpected")
@@ -1392,6 +1423,12 @@ class I044AContractTests(unittest.TestCase):
                 installer.verify_release(release, expected, ownership=False)
             release.chmod(0o755)
             (release / "extra").unlink()
+            (release / "unexpected-empty-directory").mkdir(mode=0o555)
+            release.chmod(0o555)
+            with self.assertRaisesRegex(RuntimeError, "release_shape_invalid"):
+                installer.verify_release(release, expected, ownership=False)
+            release.chmod(0o755)
+            (release / "unexpected-empty-directory").rmdir()
             (release / "link").symlink_to("client/i044a_client.py")
             release.chmod(0o555)
             with self.assertRaisesRegex(RuntimeError, "release_trust_failed"):
@@ -1401,45 +1438,24 @@ class I044AContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             release = Path(directory) / "release"
             release.mkdir()
-            manifest = installer.make_manifest_from_hashes({})
-            (release / "manifest.json").write_bytes(manifest)
-            for path in [release, *release.rglob("*")]:
-                path.chmod(0o555 if path.is_dir() else 0o444)
-            identity = installer.digest(manifest)
-            verify_without_root_ownership = installer.verify_release
-
-            def verify_release_for_test(path, expected_digest):
-                verify_without_root_ownership(
-                    path, expected_digest, ownership=False
-                )
-
-            with (
-                patch.object(installer, "TARGET", release),
-                patch.object(installer, "EXPECTED_RELEASE_DIGEST", "a" * 64),
-                patch.object(installer, "ALLOWED_PREDECESSOR_RELEASE_DIGEST", identity),
-                patch.object(
-                    installer, "verify_release", side_effect=verify_release_for_test
-                ),
-            ):
-                self.assertEqual(installer.target_state(), "predecessor")
-            with (
-                patch.object(installer, "TARGET", release),
-                patch.object(installer, "EXPECTED_RELEASE_DIGEST", identity),
-                patch.object(installer, "ALLOWED_PREDECESSOR_RELEASE_DIGEST", "b" * 64),
-                patch.object(
-                    installer, "verify_release", side_effect=verify_release_for_test
-                ),
+            with patch.object(installer, "TARGET", release), patch.object(
+                installer, "verify_release", return_value={"installed_manifest_sha256": "a" * 64}
             ):
                 self.assertEqual(installer.target_state(), "candidate")
-            with (
-                patch.object(installer, "TARGET", release),
-                patch.object(installer, "EXPECTED_RELEASE_DIGEST", "a" * 64),
-                patch.object(installer, "ALLOWED_PREDECESSOR_RELEASE_DIGEST", "b" * 64),
-                patch.object(
-                    installer, "verify_release", side_effect=verify_release_for_test
-                ),
-                self.assertRaisesRegex(RuntimeError, "target_release_untrusted"),
+
+            def predecessor_only(_path, expected_digest=None):
+                if expected_digest is None:
+                    raise RuntimeError("not candidate")
+                return {"installed_manifest_sha256": expected_digest}
+
+            with patch.object(installer, "TARGET", release), patch.object(
+                installer, "verify_release", side_effect=predecessor_only
             ):
+                self.assertEqual(installer.target_state(), "predecessor")
+
+            with patch.object(installer, "TARGET", release), patch.object(
+                installer, "verify_release", side_effect=RuntimeError("untrusted")
+            ), self.assertRaisesRegex(RuntimeError, "target_release_untrusted"):
                 installer.target_state()
 
     def test_target_validation_rejects_symlinks_modes_ownership_and_tampering(self):
@@ -1449,14 +1465,8 @@ class I044AContractTests(unittest.TestCase):
             release.mkdir()
             payload = release / "payload"
             payload.write_bytes(b"reviewed")
-            manifest = installer.make_manifest_from_hashes(
-                {"payload": installer.digest(payload.read_bytes())}
-            )
-            (release / "manifest.json").write_bytes(manifest)
-            for path in [release, *release.rglob("*")]:
-                path.chmod(0o555 if path.is_dir() else 0o444)
+            manifest, expected = finalize_test_release(release)
             release.chmod(0o755)
-            expected = installer.digest(manifest)
             with self.assertRaisesRegex(RuntimeError, "release_metadata_mismatch"):
                 installer.verify_release(release, expected)
             release.chmod(0o555)
@@ -1545,7 +1555,7 @@ class I044AContractTests(unittest.TestCase):
         self.assertEqual(outcome["result"], 0)
         self.assertEqual(outcome["target"], "candidate")
         self.assertEqual(outcome["unit"], b"candidate unit")
-        self.assertLess(outcome["events"].index("release"), outcome["events"].index("target"))
+        self.assertLess(outcome["events"].index("manifest"), outcome["events"].index("target"))
         self.assertLess(outcome["events"].index("target"), outcome["events"].index("materialize"))
         self.assertEqual(outcome["calls"][0][1], "stop")
         self.assertEqual(len(outcome["moves"]), 2)
@@ -1567,7 +1577,7 @@ class I044AContractTests(unittest.TestCase):
         if not foundation.is_dir():
             self.skipTest("pinned I-044B foundation unavailable; installer integration is install-only")
         loaded = installer.load_bundle(artifacts / "bundle.tar")
-        foundation_manifest = installer.verify_foundation(ownership=False)
+        foundation_manifest, foundation_metadata = installer.verify_foundation(ownership=False)
         real_verify_foundation = installer.verify_foundation
         release_manifest = installer.expected_release_manifest(
             foundation_manifest, loaded
@@ -1576,11 +1586,11 @@ class I044AContractTests(unittest.TestCase):
         base_unit = (foundation / "novalton-verification.service").read_bytes()
         self.assertEqual(
             installer.digest(candidate_unit),
-            "5f0f6063d3f8de227ab9dea61a15fcf014ff849ff94caa0337fefb49545b4ac8",
+            "cdb346c91e686bf07b0e9699fb1f8f6c46f478b3a36cf53ef00a407a5ba695ab",
         )
         self.assertEqual(
             installer.digest(base_unit),
-            "d4b8fa40a9c51307812a28c952a243bf4edd1432fcbb5cfd57d4deb6abc2b1e0",
+            "3e1c6243f805b1f792154d57d7fd40bf953a232630262695bc414a75fee857df",
         )
         self.assertNotEqual(candidate_unit, base_unit)
 
@@ -1599,6 +1609,9 @@ class I044AContractTests(unittest.TestCase):
                 destination.write_bytes(data)
             (target / "seccomp.bpf").write_bytes(installer.seccomp_policy())
             (target / "manifest.json").write_bytes(release_manifest)
+            (target / "release-metadata.json").write_bytes(
+                installer.release_metadata(release_manifest, foundation_metadata)
+            )
             for path in [target, *target.rglob("*")]:
                 path.chmod(0o555 if path.is_dir() or path.stat().st_mode & 0o111 else 0o444)
 
@@ -1611,9 +1624,9 @@ class I044AContractTests(unittest.TestCase):
             original_write_bytes = Path.write_bytes
             real_verify_release = installer.verify_release
 
-            def verify_release(path: Path, expected: str) -> None:
+            def verify_release(path: Path, expected: str | None = None) -> dict[str, str]:
                 release_checks.append((path, expected))
-                real_verify_release(path, expected, ownership=False)
+                return real_verify_release(path, expected, ownership=False)
 
             def trusted_unit(expected: bytes) -> bytes:
                 self.assertEqual(expected, candidate_unit)
@@ -1672,7 +1685,8 @@ class I044AContractTests(unittest.TestCase):
                 output = io.StringIO()
                 with redirect_stdout(output):
                     self.assertEqual(installer.main(), 0)
-            self.assertEqual(output.getvalue(), installer.EXPECTED_RELEASE_DIGEST + "\n")
+            installed_identity = installer.digest(release_manifest)
+            self.assertEqual(output.getvalue(), installed_identity + "\n")
             self.assertEqual(unit_writes, [])
             self.assertEqual(reserve_calls, [])
             self.assertEqual(
@@ -1682,8 +1696,8 @@ class I044AContractTests(unittest.TestCase):
             self.assertEqual(
                 release_checks,
                 [
-                    (target, installer.EXPECTED_RELEASE_DIGEST),
-                    (target, installer.EXPECTED_RELEASE_DIGEST),
+                    (target, None),
+                    (target, installed_identity),
                 ],
             )
 
@@ -1701,7 +1715,7 @@ class I044AContractTests(unittest.TestCase):
         base_unit = (foundation / "novalton-verification.service").read_bytes()
         real_verify_foundation = installer.verify_foundation
         loaded = installer.load_bundle(artifacts / "bundle.tar")
-        foundation_manifest = installer.verify_foundation(ownership=False)
+        foundation_manifest, _ = installer.verify_foundation(ownership=False)
         release_manifest = installer.expected_release_manifest(
             foundation_manifest, loaded
         )
@@ -1887,7 +1901,7 @@ class I044AContractTests(unittest.TestCase):
         acceptance_tree = ast.parse(acceptance)
         assert_installed_acceptance_authority(self, acceptance)
         try:
-            installer.verify_release(installed, installer.EXPECTED_RELEASE_DIGEST)
+            evidence = installer.verify_release(installed)
         except (FileNotFoundError, RuntimeError):
             self.skipTest("candidate release is not installed yet")
         manifest_data = (installed / "manifest.json").read_bytes()
@@ -1895,7 +1909,7 @@ class I044AContractTests(unittest.TestCase):
         client_path = installed / "client/i044a_client.py"
         client_info = client_path.lstat()
         client_data = client_path.read_bytes()
-        self.assertEqual(installer.digest(manifest_data), installer.EXPECTED_RELEASE_DIGEST)
+        self.assertEqual(installer.digest(manifest_data), evidence["installed_manifest_sha256"])
         self.assertFalse(client_path.is_symlink())
         self.assertTrue(client_path.is_file())
         self.assertEqual((client_info.st_uid, client_info.st_gid), (0, 0))
@@ -2264,8 +2278,8 @@ class I044AContractTests(unittest.TestCase):
         proof = (artifacts / "tests/test_i044a_seccomp_kernel.py").read_text()
         self.assertIn('RELEASE / "seccomp.bpf"', proof)
         self.assertIn('RELEASE / "manifest.json"', proof)
-        self.assertIn("EXPECTED_RELEASE_DIGEST", proof)
-        self.assertIn(installer.EXPECTED_RELEASE_DIGEST, proof)
+        self.assertIn('RELEASE / "release-metadata.json"', proof)
+        self.assertIn('metadata.get("installed_manifest_sha256")', proof)
         self.assertIn("filters_before + 1", proof)
         self.assertIn("ordinary_arguments", proof)
         self.assertIn("clone3_once(ordinary_arguments)", proof)

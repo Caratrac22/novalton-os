@@ -12,8 +12,8 @@ The x86_64 seccomp program allows ordinary `clone` child creation but returns
 `EPERM` when any known `CLONE_NEW*` bit is present. `clone3` is denied outright,
 and an unexpected architecture is killed. The installed kernel acceptance reads
 only the root-owned mode-0444 installed `seccomp.bpf`, verifies its digest against
-the installed manifest, and verifies that manifest against the reviewed release
-identity. In one unchanged test process it reuses the same ordinary `clone3`
+the installed manifest, and verifies that manifest against the root-owned
+release metadata. In one unchanged test process it reuses the same ordinary `clone3`
 argument object: the call succeeds and its child is completely reaped immediately
 before the exact installed filter is loaded, then returns `EPERM` immediately
 afterward. The observed `Seccomp_filters` count increases by exactly one. This
@@ -41,8 +41,8 @@ The CLI is structurally split between actions with no additional identity and
 actions bound to one run identity:
 
 ```text
-i044a_client.py <release-digest> <health|security|start|verify>
-i044a_client.py <release-digest> <cancel|cleanup|result> <run-id>
+i044a_client.py <installed-manifest-sha256> <health|security|start|verify>
+i044a_client.py <installed-manifest-sha256> <cancel|cleanup|result> <run-id>
 ```
 
 Raw JSON, workspace paths, directory descriptors, mount selectors, and snapshot
@@ -72,26 +72,30 @@ server-owned and the restricted client never gains repository traversal.
 ## Reviewed identities
 
 ```text
-root handoff SHA-256:       130324f602c2097b12dcd1e5941cbb2b15b20f3082a28d50247c72f0e497ded0
-immutable installer SHA-256: 635d87c5ee108486f99be6c3fb615b79d9105d47211931fd10507738d7ab514f
-bundle SHA-256:             f804c28ff27cbff40e6a9ae8448633262c61421e87c5e9dd1444aed1e30fd137
-bundle manifest SHA-256:    2eeecda08e4d7b2ba34657112ff7825bbc02c9312660810f282d7af6dc536e31
-installed client SHA-256:   e74703d97d6ef2f556554ef9b7275422e41f9254808eabdc833d4a2c210fdfb1
-installed release SHA-256:  935319e8d43272f8e325832c3bc9e382499a6b0f40abb71eedb9410217f273a8
+root handoff SHA-256:       36ade31bc69abfd9a85b54bf14614c17c40e568d3710d669b307444f387e5f4f
+immutable installer SHA-256: 5db930447b64774385f6c551b1dbf7e6f373cc3322155f4ce134e133fe71103a
+bundle SHA-256:             c1fc5a847564c26fee048652cb54bb82caa1e9ba9c45e61c2b81899a8026fb99
+I-044A input SHA-256:       ea21f176bad681d07eb2a1af94a7e064828c5fcf1a43aa5a3db7fe040e132436
+foundation input SHA-256:   1d225bcbcfdb12d7c93295fbb5115e764b9843c76fc09edf04f9ca9a8fa18c69
 ```
 
-The installer hardcodes the bundle, bundle-manifest, foundation, final release,
-and only permitted predecessor release identities. It accepts no arguments. It
-computes the complete release manifest before installation and aborts unless its
-SHA-256 is the reviewed release identity. It repeats that assertion after
-materialization and before reporting success.
+The two generations and the two installed proofs are deliberately distinct.
+`foundation_input_sha256` and `i044a_input_sha256` identify reviewed inputs.
+`foundation_installed_manifest_sha256` and `installed_manifest_sha256` identify
+the actual root-owned installed bytes. The latter values may vary when the
+compiler/toolchain changes; `release-metadata.json` binds all four values and
+the worker validates the complete installed closure before serving IPC. The
+historical I-044A installed digest
+`935319e8d43272f8e325832c3bc9e382499a6b0f40abb71eedb9410217f273a8`
+is retained only as evidence of the pre-migration host release.
 
 The target update is a closed-set, sibling-directory promotion. Before touching
 an existing target, the installer requires a real root-owned directory with a
 complete root-owned mode-locked manifest closure whose digest is exactly either
 the approved predecessor or this candidate. Any other pre-existing target,
 including a symlink, drifted release, or unknown release, fails closed. It
-first verifies the deterministic candidate release identity, then classifies
+first verifies the deterministic input generations and the concrete candidate
+installed identity, then classifies
 the installed target before selecting one exact authoritative unit: the bundled
 candidate unit for an exact candidate target, the unit inside the verified
 predecessor closure for an exact predecessor target, or the verified I-044B
@@ -119,9 +123,9 @@ From the repository root, verify the three handoff inputs without privilege:
 
 ```bash
 sha256sum -c <<'EOF'
-130324f602c2097b12dcd1e5941cbb2b15b20f3082a28d50247c72f0e497ded0  infra/verification/i044a-v2/root-handoff.sh
-635d87c5ee108486f99be6c3fb615b79d9105d47211931fd10507738d7ab514f  infra/verification/i044a-v2/install.py
-f804c28ff27cbff40e6a9ae8448633262c61421e87c5e9dd1444aed1e30fd137  infra/verification/i044a-v2/bundle.tar
+36ade31bc69abfd9a85b54bf14614c17c40e568d3710d669b307444f387e5f4f  infra/verification/i044a-v2/root-handoff.sh
+5db930447b64774385f6c551b1dbf7e6f373cc3322155f4ce134e133fe71103a  infra/verification/i044a-v2/install.py
+c1fc5a847564c26fee048652cb54bb82caa1e9ba9c45e61c2b81899a8026fb99  infra/verification/i044a-v2/bundle.tar
 EOF
 ```
 
@@ -136,16 +140,10 @@ python3 infra/verification/i044a-v2/tests/test_i044a_contract.py -v
 python3 infra/verification/i044a-v2/tests/test_i044a_seccomp_staging.py -v
 ```
 
-Do not run the next command until the next independent security review
-approves these exact identities. The root bootstrap contains only fixed system
-utilities: it copies the reviewed handoff into a new root-owned mode-0500 `/run`
-directory, independently checks its exact SHA-256, and only then interprets it.
-That immutable handoff copies and verifies the installer and bundle before the
-installed Python interprets the installer.
-
-```bash
-sudo /bin/sh -ceu 'stage=/run/novalton-i044a-v2-reviewed; test ! -e "$stage"; test ! -L "$stage"; /usr/bin/install -d -o root -g root -m 0500 "$stage"; test ! -L "$stage"; test -d "$stage"; test "$(/usr/bin/stat -c "%u:%g:%a:%F" "$stage")" = "0:0:500:directory"; /usr/bin/install -o root -g root -m 0400 /home/alexandre/projects/novalton-os/infra/verification/i044a-v2/root-handoff.sh "$stage/root-handoff.sh"; printf "%s  %s\n" 130324f602c2097b12dcd1e5941cbb2b15b20f3082a28d50247c72f0e497ded0 "$stage/root-handoff.sh" | /usr/bin/sha256sum -c -; exec /bin/sh "$stage/root-handoff.sh"'
-```
+The GitHub Actions validation workflow constructs new root-owned `/run` input
+and reviewed stages, independently pins the handoff, installer, and bundle, and
+only then interprets the copied stage. It never executes checkout-local Python
+as root.
 
 The checkout-local `install.py`, handoff, tests, and probe are never executed as
 root. Only independently hash-verified root-owned `/run` copies are interpreted.

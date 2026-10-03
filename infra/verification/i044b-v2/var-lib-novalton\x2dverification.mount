@@ -1,0 +1,12 @@
+[Unit]
+Description=Novalton private bounded verification storage
+Before=novalton-verification.service
+
+[Mount]
+What=tmpfs
+Where=/var/lib/novalton-verification
+Type=tmpfs
+Options=size=64M,nosuid,nodev,noexec,mode=0700
+
+[Install]
+WantedBy=multi-user.target

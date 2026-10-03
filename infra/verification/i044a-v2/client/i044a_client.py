@@ -11,7 +11,7 @@ import sys
 import time
 
 ENDPOINT = "/run/novalton-verification/control.sock"
-FOUNDATION_DIGEST = "6643fdf075190c785de92ee28e0776915297640208fd091b64045313fe16bd7c"
+FOUNDATION_INPUT_SHA256 = "1d225bcbcfdb12d7c93295fbb5115e764b9843c76fc09edf04f9ca9a8fa18c69"
 MAX_REQUEST_BYTES = 1024
 MAX_RESPONSE_BYTES = 8192
 RUN_ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -49,13 +49,18 @@ def request(value: dict[str, str], descriptors: tuple[int, ...] = ()) -> dict[st
     return decoded
 
 
-def health(expected_release: str) -> dict[str, object]:
+def health(expected_release: str, expected_i044a_input: str | None = None) -> dict[str, object]:
     value = request({"op": "health"})
     if (
         value.get("state") != "ready"
         or value.get("definition") != "repository-probe-v1"
-        or value.get("foundation_digest") != FOUNDATION_DIGEST
-        or value.get("release_digest") != expected_release
+        or value.get("foundation_input_sha256") != FOUNDATION_INPUT_SHA256
+        or value.get("installed_manifest_sha256") != expected_release
+        or not isinstance(value.get("foundation_installed_manifest_sha256"), str)
+        or RELEASE_DIGEST.fullmatch(value["foundation_installed_manifest_sha256"]) is None
+        or not isinstance(value.get("i044a_input_sha256"), str)
+        or RELEASE_DIGEST.fullmatch(value["i044a_input_sha256"]) is None
+        or (expected_i044a_input is not None and value["i044a_input_sha256"] != expected_i044a_input)
         or value.get("db_mode") is not False
     ):
         raise RuntimeError("sandbox_definition_mismatch")

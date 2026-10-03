@@ -23,7 +23,6 @@ import uuid
 from pathlib import Path, PurePosixPath
 
 RELEASE = Path(__file__).resolve().parent.parent
-FOUNDATION_DIGEST = "6643fdf075190c785de92ee28e0776915297640208fd091b64045313fe16bd7c"
 CAPABILITY = re.compile(r"[0-9a-f]{64}\Z")
 SNAPSHOT_SOURCE = Path("/run/novalton-verification/source")
 CAPABILITY_LIFETIME = 2.0
@@ -89,6 +88,62 @@ spec = importlib.util.spec_from_file_location(
 foundation = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(foundation)
+
+
+def trust_release(foundation_metadata: dict[str, str]) -> dict[str, str]:
+    root = RELEASE.lstat()
+    if RELEASE.is_symlink() or root.st_uid != 0 or root.st_gid != 0 or stat.S_IMODE(root.st_mode) != 0o555:
+        raise foundation.WorkerFailure("release_untrusted")
+    manifest_path = RELEASE / "manifest.json"
+    metadata_path = RELEASE / "release-metadata.json"
+    manifest_data = manifest_path.read_bytes()
+    manifest = json.loads(manifest_data)
+    metadata = json.loads(metadata_path.read_bytes())
+    installed_manifest_sha256 = hashlib.sha256(manifest_data).hexdigest()
+    if (not isinstance(metadata, dict) or set(metadata) != {
+        "schema", "i044a_input_sha256", "foundation_input_sha256",
+        "foundation_installed_manifest_sha256", "installed_manifest_sha256",
+    } or metadata.get("schema") != "novalton.i044a.release-metadata.v1"
+        or not isinstance(metadata.get("i044a_input_sha256"), str)
+        or len(metadata["i044a_input_sha256"]) != 64
+        or metadata.get("foundation_input_sha256") != foundation_metadata["foundation_input_sha256"]
+        or metadata.get("foundation_installed_manifest_sha256") != foundation_metadata["installed_manifest_sha256"]
+        or metadata.get("installed_manifest_sha256") != installed_manifest_sha256):
+        raise foundation.WorkerFailure("release_metadata_shape")
+    if not isinstance(manifest, dict):
+        raise foundation.WorkerFailure("manifest_shape")
+    actual: set[str] = set()
+    actual_directories: set[str] = set()
+    for path in [RELEASE, *RELEASE.rglob("*")]:
+        info = path.lstat()
+        if path.is_symlink() or info.st_uid != 0 or info.st_gid != 0:
+            raise foundation.WorkerFailure("release_untrusted")
+        mode = stat.S_IMODE(info.st_mode)
+        if path.is_dir():
+            if mode != 0o555:
+                raise foundation.WorkerFailure("release_untrusted")
+            if path != RELEASE:
+                actual_directories.add(path.relative_to(RELEASE).as_posix())
+        elif path.is_file():
+            if mode not in {0o444, 0o555}:
+                raise foundation.WorkerFailure("release_untrusted")
+            if path not in {manifest_path, metadata_path}:
+                actual.add(path.relative_to(RELEASE).as_posix())
+        else:
+            raise foundation.WorkerFailure("release_untrusted")
+    expected_directories = {
+        parent.as_posix()
+        for relative in manifest
+        for parent in Path(relative).parents
+        if parent.as_posix() != "."
+    }
+    if actual != set(manifest) or actual_directories != expected_directories:
+        raise foundation.WorkerFailure("manifest_shape")
+    for relative, expected in manifest.items():
+        if (not isinstance(relative, str) or not isinstance(expected, str)
+                or hashlib.sha256((RELEASE / relative).read_bytes()).hexdigest() != expected):
+            raise foundation.WorkerFailure("manifest_content")
+    return metadata
 
 
 def decode(data: bytes, descriptor_count: int) -> dict[str, str]:
@@ -254,8 +309,9 @@ def stage_snapshot(identity: str) -> tuple[Path, str]:
 
 
 class Worker(foundation.Worker):
-    def __init__(self, cgroup: Path, digest: str):
-        super().__init__(cgroup, digest)
+    def __init__(self, cgroup: Path, evidence: dict[str, str]):
+        super().__init__(cgroup, evidence["installed_manifest_sha256"])
+        self.evidence = evidence
         self.pending: dict[str, object] | None = None
         snapshots_ok = True
         for path in foundation.STORAGE.glob("snapshot-*"):
@@ -280,8 +336,10 @@ class Worker(foundation.Worker):
                     "state": "blocked" if self.blocked else "ready",
                     "active": self.active is not None or self.pending is not None,
                     "definition": "repository-probe-v1",
-                    "release_digest": self.digest,
-                    "foundation_digest": FOUNDATION_DIGEST,
+                    "i044a_input_sha256": self.evidence["i044a_input_sha256"],
+                    "installed_manifest_sha256": self.evidence["installed_manifest_sha256"],
+                    "foundation_input_sha256": self.evidence["foundation_input_sha256"],
+                    "foundation_installed_manifest_sha256": self.evidence["foundation_installed_manifest_sha256"],
                     "reconciled": self.reconciled,
                     "db_mode": False,
                 }
@@ -586,7 +644,8 @@ def main() -> None:
         raise RuntimeError("dedicated_unprivileged_identity_required")
     os.environ.clear()
     os.umask(0o077)
-    digest = foundation.trust_check()
+    foundation_metadata = foundation.trust_check()
+    evidence = trust_release(foundation_metadata)
     policy_info = foundation.POLICY.stat()
     if policy_info.st_uid != 0 or policy_info.st_mode & 0o022:
         raise RuntimeError("untrusted_policy")
@@ -595,7 +654,7 @@ def main() -> None:
     if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
         raise RuntimeError("private_storage_required")
     with foundation.acquire_worker_lock():
-        serve(Worker(foundation.own_cgroup(), digest), policy["client_uid"])
+        serve(Worker(foundation.own_cgroup(), evidence), policy["client_uid"])
 
 
 if __name__ == "__main__":

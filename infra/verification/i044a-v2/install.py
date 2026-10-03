@@ -1,6 +1,7 @@
 """Root-only offline installer for one independently pinned I-044A bundle."""
 
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -15,13 +16,13 @@ import tempfile
 from pathlib import Path
 
 SOURCE = Path("/run/novalton-i044a-v2-reviewed")
-BASE = Path("/opt/novalton-verification/i044b-v1")
+BASE = Path("/opt/novalton-verification/i044b-v2")
 TARGET = Path("/opt/novalton-verification/i044a-v2")
 UNIT = Path("/etc/systemd/system/novalton-verification.service")
-FOUNDATION_DIGEST = "6643fdf075190c785de92ee28e0776915297640208fd091b64045313fe16bd7c"
-EXPECTED_BUNDLE_DIGEST = "f804c28ff27cbff40e6a9ae8448633262c61421e87c5e9dd1444aed1e30fd137"
-EXPECTED_BUNDLE_MANIFEST_DIGEST = "2eeecda08e4d7b2ba34657112ff7825bbc02c9312660810f282d7af6dc536e31"
-EXPECTED_RELEASE_DIGEST = "935319e8d43272f8e325832c3bc9e382499a6b0f40abb71eedb9410217f273a8"
+FOUNDATION_INPUT_SHA256 = "1d225bcbcfdb12d7c93295fbb5115e764b9843c76fc09edf04f9ca9a8fa18c69"
+EXPECTED_BUNDLE_DIGEST = "c1fc5a847564c26fee048652cb54bb82caa1e9ba9c45e61c2b81899a8026fb99"
+EXPECTED_BUNDLE_MANIFEST_DIGEST = "ea21f176bad681d07eb2a1af94a7e064828c5fcf1a43aa5a3db7fe040e132436"
+I044A_INPUT_SHA256 = EXPECTED_BUNDLE_MANIFEST_DIGEST
 ALLOWED_PREDECESSOR_RELEASE_DIGEST = "71fa6df9100246b5b37a541e808936f87b05b9084b2446200648b256f867fdd2"
 FILES = {
     "client/i044a_client.py": "client/i044a_client.py",
@@ -73,26 +74,32 @@ def seccomp_policy() -> bytes:
     return b"".join(struct.pack("HBBI", *instruction) for instruction in instructions)
 
 
-def verify_foundation(*, ownership: bool = True) -> dict[str, str]:
-    manifest_data = (BASE / "manifest.json").read_bytes()
-    if digest(manifest_data) != FOUNDATION_DIGEST:
-        raise RuntimeError("foundation_manifest_mismatch")
-    manifest = json.loads(manifest_data)
-    actual_files = {
-        path.relative_to(BASE).as_posix()
-        for path in BASE.rglob("*")
-        if path.is_file() and path.name != "manifest.json"
+def verify_foundation(*, ownership: bool = True) -> tuple[dict[str, str], dict[str, str]]:
+    identity_data = (BASE / "foundation-input.json").read_bytes()
+    if digest(identity_data) != FOUNDATION_INPUT_SHA256:
+        raise RuntimeError("foundation_identity_mismatch")
+    identity = json.loads(identity_data)
+    if (not isinstance(identity, dict) or set(identity) != {
+        "schema", "runtime_version", "cpython_source_sha256", "bubblewrap_sha256", "source"
+    } or identity.get("schema") != "novalton.i044b.foundation-input.v1"
+        or not isinstance(identity.get("source"), dict)
+        or identity["source"].get("provision.py") != digest((BASE / "provision.py").read_bytes())):
+        raise RuntimeError("foundation_identity_shape")
+    spec = importlib.util.spec_from_file_location("i044b_installed_verifier", BASE / "provision.py")
+    verifier = importlib.util.module_from_spec(spec)
+    if spec.loader is None:
+        raise RuntimeError("foundation_verifier_unavailable")
+    spec.loader.exec_module(verifier)
+    metadata = verifier.verify_release(
+        BASE, FOUNDATION_INPUT_SHA256 if ownership else None
+    )
+    if metadata.get("foundation_input_sha256") != FOUNDATION_INPUT_SHA256:
+        raise RuntimeError("foundation_identity_mismatch")
+    files = {
+        path.relative_to(BASE).as_posix(): digest(path.read_bytes())
+        for path in BASE.rglob("*") if path.is_file()
     }
-    if actual_files != set(manifest):
-        raise RuntimeError("foundation_shape_invalid")
-    for path in [BASE, *BASE.rglob("*")]:
-        info = path.lstat()
-        if path.is_symlink() or (ownership and (info.st_uid != 0 or info.st_mode & 0o022)):
-            raise RuntimeError("foundation_trust_failed")
-    for relative, expected in manifest.items():
-        if digest((BASE / relative).read_bytes()) != expected:
-            raise RuntimeError("foundation_content_mismatch")
-    return manifest
+    return files, metadata
 
 
 def verify_staged_installer() -> None:
@@ -150,9 +157,15 @@ def expected_release_manifest(
     return make_manifest_from_hashes(hashes)
 
 
-def enforce_release_digest(release_manifest: bytes) -> None:
-    if digest(release_manifest) != EXPECTED_RELEASE_DIGEST:
-        raise RuntimeError("release_digest_mismatch")
+def release_metadata(release_manifest: bytes, foundation_metadata: dict[str, str]) -> bytes:
+    value = {
+        "schema": "novalton.i044a.release-metadata.v1",
+        "i044a_input_sha256": I044A_INPUT_SHA256,
+        "foundation_input_sha256": FOUNDATION_INPUT_SHA256,
+        "foundation_installed_manifest_sha256": foundation_metadata["installed_manifest_sha256"],
+        "installed_manifest_sha256": digest(release_manifest),
+    }
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
 
 
 def exists(path: Path) -> bool:
@@ -164,8 +177,8 @@ def exists(path: Path) -> bool:
 
 
 def verify_release(
-    release: Path, expected_digest: str, *, ownership: bool = True
-) -> None:
+    release: Path, expected_digest: str | None = None, *, ownership: bool = True
+) -> dict[str, str]:
     info = release.lstat()
     if (
         release.is_symlink()
@@ -175,6 +188,7 @@ def verify_release(
     ):
         raise RuntimeError("release_metadata_mismatch")
     manifest_path = release / "manifest.json"
+    metadata_path = release / "release-metadata.json"
     manifest_info = manifest_path.lstat()
     if (
         manifest_path.is_symlink()
@@ -184,8 +198,27 @@ def verify_release(
     ):
         raise RuntimeError("release_manifest_metadata_mismatch")
     manifest_data = manifest_path.read_bytes()
-    if digest(manifest_data) != expected_digest:
-        raise RuntimeError("release_digest_mismatch")
+    installed_manifest_sha256 = digest(manifest_data)
+    if expected_digest is not None and installed_manifest_sha256 != expected_digest:
+        raise RuntimeError("installed_manifest_mismatch")
+    if (not exists(metadata_path) and expected_digest == ALLOWED_PREDECESSOR_RELEASE_DIGEST):
+        return verify_predecessor_release(release, manifest_data, ownership=ownership)
+    metadata_info = metadata_path.lstat()
+    if (metadata_path.is_symlink() or not stat.S_ISREG(metadata_info.st_mode)
+            or stat.S_IMODE(metadata_info.st_mode) != 0o444
+            or (ownership and (metadata_info.st_uid != 0 or metadata_info.st_gid != 0))):
+        raise RuntimeError("release_metadata_mismatch")
+    metadata = json.loads(metadata_path.read_bytes())
+    if (not isinstance(metadata, dict) or set(metadata) != {
+        "schema", "i044a_input_sha256", "foundation_input_sha256",
+        "foundation_installed_manifest_sha256", "installed_manifest_sha256",
+    } or metadata.get("schema") != "novalton.i044a.release-metadata.v1"
+        or metadata.get("i044a_input_sha256") != I044A_INPUT_SHA256
+        or metadata.get("foundation_input_sha256") != FOUNDATION_INPUT_SHA256
+        or not isinstance(metadata.get("foundation_installed_manifest_sha256"), str)
+        or len(metadata["foundation_installed_manifest_sha256"]) != 64
+        or metadata.get("installed_manifest_sha256") != installed_manifest_sha256):
+        raise RuntimeError("release_metadata_mismatch")
     manifest = json.loads(manifest_data)
     if (
         not isinstance(manifest, dict)
@@ -198,6 +231,7 @@ def verify_release(
     ):
         raise RuntimeError("release_manifest_shape_invalid")
     actual_files = set()
+    actual_directories = set()
     for path in [release, *release.rglob("*")]:
         current = path.lstat()
         if path.is_symlink() or (ownership and (current.st_uid != 0 or current.st_gid != 0)):
@@ -206,19 +240,64 @@ def verify_release(
         if stat.S_ISDIR(current.st_mode):
             if mode != 0o555:
                 raise RuntimeError("release_metadata_mismatch")
+            if path != release:
+                actual_directories.add(path.relative_to(release).as_posix())
         elif stat.S_ISREG(current.st_mode):
-            if path == manifest_path:
+            if path in {manifest_path, metadata_path}:
                 continue
             if mode not in {0o444, 0o555}:
                 raise RuntimeError("release_metadata_mismatch")
             actual_files.add(path.relative_to(release).as_posix())
         else:
             raise RuntimeError("release_shape_invalid")
-    if actual_files != set(manifest):
+    expected_directories = {
+        parent.as_posix()
+        for relative in manifest
+        for parent in Path(relative).parents
+        if parent.as_posix() != "."
+    }
+    if actual_files != set(manifest) or actual_directories != expected_directories:
         raise RuntimeError("release_shape_invalid")
     for relative, expected in manifest.items():
         if digest((release / relative).read_bytes()) != expected:
             raise RuntimeError("release_content_mismatch")
+    foundation_copy = json.loads((release / "foundation-metadata.json").read_bytes())
+    if (not isinstance(foundation_copy, dict)
+            or foundation_copy.get("foundation_input_sha256") != metadata["foundation_input_sha256"]
+            or foundation_copy.get("installed_manifest_sha256") != metadata["foundation_installed_manifest_sha256"]):
+        raise RuntimeError("release_metadata_mismatch")
+    return metadata
+
+
+def verify_predecessor_release(
+    release: Path, manifest_data: bytes, *, ownership: bool = True
+) -> dict[str, str]:
+    """Verify the one exact pre-migration release solely for atomic rollback."""
+    manifest = json.loads(manifest_data)
+    if not isinstance(manifest, dict):
+        raise RuntimeError("release_manifest_shape_invalid")
+    actual_files: set[str] = set()
+    actual_directories: set[str] = set()
+    for path in [release, *release.rglob("*")]:
+        current = path.lstat()
+        if path.is_symlink() or (ownership and (current.st_uid != 0 or current.st_gid != 0)):
+            raise RuntimeError("release_trust_failed")
+        if path.is_dir() and path != release:
+            actual_directories.add(path.relative_to(release).as_posix())
+        if path.is_file() and path.name != "manifest.json":
+            actual_files.add(path.relative_to(release).as_posix())
+    expected_directories = {
+        parent.as_posix()
+        for relative in manifest
+        for parent in Path(relative).parents
+        if parent.as_posix() != "."
+    }
+    if actual_files != set(manifest) or actual_directories != expected_directories:
+        raise RuntimeError("release_shape_invalid")
+    for relative, expected in manifest.items():
+        if not isinstance(relative, str) or not isinstance(expected, str) or digest((release / relative).read_bytes()) != expected:
+            raise RuntimeError("release_content_mismatch")
+    return {"installed_manifest_sha256": ALLOWED_PREDECESSOR_RELEASE_DIGEST}
 
 
 def verify_target_parent() -> None:
@@ -244,7 +323,9 @@ def move_sibling(source: Path, destination: Path) -> None:
     source.rename(destination)
 
 
-def materialize_candidate(loaded: dict[str, bytes], release_manifest: bytes) -> Path:
+def materialize_candidate(
+    loaded: dict[str, bytes], release_manifest: bytes, foundation_metadata: dict[str, str]
+) -> Path:
     temporary = Path(tempfile.mkdtemp(prefix=".i044a-v2-candidate-", dir=TARGET.parent))
     try:
         shutil.copytree(BASE, temporary, dirs_exist_ok=True, symlinks=False)
@@ -254,10 +335,13 @@ def materialize_candidate(loaded: dict[str, bytes], release_manifest: bytes) -> 
             destination.write_bytes(data)
         (temporary / "seccomp.bpf").write_bytes(seccomp_policy())
         (temporary / "manifest.json").write_bytes(release_manifest)
+        (temporary / "release-metadata.json").write_bytes(
+            release_metadata(release_manifest, foundation_metadata)
+        )
         for path in [temporary, *temporary.rglob("*")]:
             os.chown(path, 0, 0, follow_symlinks=False)
             path.chmod(0o555 if path.is_dir() or path.stat().st_mode & 0o111 else 0o444)
-        verify_release(temporary, EXPECTED_RELEASE_DIGEST)
+        verify_release(temporary, digest(release_manifest))
         return temporary
     except Exception:
         shutil.rmtree(temporary)
@@ -297,7 +381,7 @@ def target_state() -> str:
     if not exists(TARGET):
         return "absent"
     try:
-        verify_release(TARGET, EXPECTED_RELEASE_DIGEST)
+        verify_release(TARGET)
     except RuntimeError as candidate_error:
         try:
             verify_release(TARGET, ALLOWED_PREDECESSOR_RELEASE_DIGEST)
@@ -351,10 +435,10 @@ def main() -> int:
         raise SystemExit("run the reviewed immutable /run installer as root with no arguments")
     verify_staged_installer()
     verify_target_parent()
-    foundation_manifest = verify_foundation()
+    foundation_manifest, foundation_metadata = verify_foundation()
     loaded = load_bundle()
     release_manifest = expected_release_manifest(foundation_manifest, loaded)
-    enforce_release_digest(release_manifest)
+    installed_manifest_sha256 = digest(release_manifest)
     candidate_unit = loaded["novalton-verification.service"]
     state = target_state()
     if state == "candidate":
@@ -369,11 +453,11 @@ def main() -> int:
         )
     if state == "candidate":
         checked(["/usr/bin/systemctl", "is-active", "novalton-verification.service"])
-        verify_release(TARGET, EXPECTED_RELEASE_DIGEST)
-        print(EXPECTED_RELEASE_DIGEST)
+        evidence = verify_release(TARGET, installed_manifest_sha256)
+        print(evidence["installed_manifest_sha256"])
         return 0
 
-    temporary = materialize_candidate(loaded, release_manifest)
+    temporary = materialize_candidate(loaded, release_manifest, foundation_metadata)
 
     backup = None
     stop_attempted = False
@@ -395,8 +479,8 @@ def main() -> int:
         checked(["/usr/bin/systemctl", "daemon-reload"])
         checked(["/usr/bin/systemctl", "start", "novalton-verification.service"])
         checked(["/usr/bin/systemctl", "is-active", "novalton-verification.service"])
-        verify_release(TARGET, EXPECTED_RELEASE_DIGEST)
-        print(EXPECTED_RELEASE_DIGEST)
+        evidence = verify_release(TARGET, installed_manifest_sha256)
+        print(evidence["installed_manifest_sha256"])
         return 0
     except Exception as error:
         if predecessor_moved:

@@ -1,16 +1,13 @@
 [Unit]
-Description=Novalton fixed repository verification worker (I-044A)
-Requires=var-lib-novalton\x2dverification.mount
-After=var-lib-novalton\x2dverification.mount
-StartLimitIntervalSec=30
-StartLimitBurst=3
+Description=Novalton fixed verification foundation (I-044B v2)
+After=network.target
 
 [Service]
 Type=exec
 User=novalton-verify
 Group=novalton-verify
 SupplementaryGroups=novalton-verify-ipc
-ExecStart=/usr/bin/env -i /opt/novalton-verification/i044a-v2/rootfs/lib64/ld-linux-x86-64.so.2 --library-path /opt/novalton-verification/i044a-v2/rootfs/usr/lib/x86_64-linux-gnu /opt/novalton-verification/i044a-v2/rootfs/runtime/bin/python3.13 -I -S -B /opt/novalton-verification/i044a-v2/worker/i044a.py
+ExecStart=/opt/novalton-verification/i044b-v2/runtime/bin/python3.13 -I -S -B /opt/novalton-verification/i044b-v2/worker/worker.py
 WorkingDirectory=/
 UMask=0077
 RuntimeDirectory=novalton-verification
@@ -44,7 +41,6 @@ RestrictRealtime=yes
 LockPersonality=yes
 SystemCallArchitectures=native
 ReadWritePaths=/var/lib/novalton-verification
-BindReadOnlyPaths=/var/lib/novalton-verification/source:/run/novalton-verification/source
 InaccessiblePaths=-/run/docker.sock -/run/containerd -/run/dbus -/run/user
 KillMode=control-group
 TimeoutStopSec=3s

@@ -15,8 +15,8 @@ from typing import Any, Final
 
 _ENDPOINT: Final = "/run/novalton-verification/control.sock"
 _DEFINITION: Final = "repository-probe-v1"
-_RUNTIME_DIGEST: Final = "6643fdf075190c785de92ee28e0776915297640208fd091b64045313fe16bd7c"
-_RELEASE_DIGEST: Final = "935319e8d43272f8e325832c3bc9e382499a6b0f40abb71eedb9410217f273a8"
+_FOUNDATION_INPUT_SHA256: Final = "1d225bcbcfdb12d7c93295fbb5115e764b9843c76fc09edf04f9ca9a8fa18c69"
+_I044A_INPUT_SHA256: Final = "ea21f176bad681d07eb2a1af94a7e064828c5fcf1a43aa5a3db7fe040e132436"
 _MAX_REQUEST_BYTES: Final = 1024
 _MAX_RESPONSE_BYTES: Final = 8192
 _MAX_FILES: Final = 4096
@@ -226,8 +226,12 @@ class VerificationSandboxAdapter:
         if (
             value.get("state") != "ready"
             or value.get("definition") != _DEFINITION
-            or value.get("foundation_digest") != _RUNTIME_DIGEST
-            or value.get("release_digest") != _RELEASE_DIGEST
+            or value.get("foundation_input_sha256") != _FOUNDATION_INPUT_SHA256
+            or value.get("i044a_input_sha256") != _I044A_INPUT_SHA256
+            or not isinstance(value.get("foundation_installed_manifest_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", value["foundation_installed_manifest_sha256"]) is None
+            or not isinstance(value.get("installed_manifest_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", value["installed_manifest_sha256"]) is None
             or value.get("db_mode") is not False
         ):
             raise VerificationSandboxError("sandbox_definition_mismatch")

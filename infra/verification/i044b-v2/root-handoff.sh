@@ -1,0 +1,28 @@
+#!/bin/sh
+# Root-owned stage only; hashes below are the reviewed source closure.
+set -efu
+
+stage=/run/novalton-i044b-v2-reviewed
+source=/run/novalton-i044b-v2-input
+test "$(/usr/bin/id -u)" = 0
+test "$(/usr/bin/stat -c '%u:%g:%a' "$stage/root-handoff.sh")" = 0:0:400
+/usr/bin/install -d -o root -g root -m 0500 "$stage/worker" "$stage/client" "$stage/tests"
+for relative in provision.py foundation-input.json runtime.lock.json \
+    novalton-verification.service worker/worker.py client/i044b_client.py \
+    'var-lib-novalton\x2dverification.mount' tests/accept_i044b_installed.py; do
+    test ! -L "$source/$relative"
+    test -f "$source/$relative"
+    /usr/bin/install -o root -g root -m 0400 "$source/$relative" "$stage/$relative"
+done
+cd "$stage"
+/usr/bin/sha256sum -c <<'EOF'
+47c373e25679f584edd44553007a87dfe996e59a6df3916cd9e920dd27dcc2d0  provision.py
+1d225bcbcfdb12d7c93295fbb5115e764b9843c76fc09edf04f9ca9a8fa18c69  foundation-input.json
+477521ee64eff7e06534d96a99ff9a28a71034b7db4d03c5a6f2b06755fe1c05  runtime.lock.json
+3e1c6243f805b1f792154d57d7fd40bf953a232630262695bc414a75fee857df  novalton-verification.service
+cbc9d63980ff88465a41f69bc90623f87a4d2a0f3528a737003e82f6d3597eef  worker/worker.py
+439773325ea683d8e98c0143174b2950df88955e049060aed6c3a081310a5fdc  client/i044b_client.py
+24b1d592f2b21cef4dd319484375c4aa660135f565aae0604beca2c7c545a438  var-lib-novalton\x2dverification.mount
+db8c8ccb40d817cad7a16cd094321c22c282ac7fe1649bf08a0b0cdbc6701e45  tests/accept_i044b_installed.py
+EOF
+exec /usr/bin/python3 -I -S -B "$stage/provision.py"

@@ -117,8 +117,10 @@ def test_health_pins_definition_foundation_release_and_db_mode(tmp_path: Path) -
     adapter._request = lambda request: {  # type: ignore[method-assign]
         "state": "ready",
         "definition": "wrong",
-        "foundation_digest": sandbox._RUNTIME_DIGEST,
-        "release_digest": sandbox._RELEASE_DIGEST,
+        "foundation_input_sha256": sandbox._FOUNDATION_INPUT_SHA256,
+        "foundation_installed_manifest_sha256": "a" * 64,
+        "i044a_input_sha256": sandbox._I044A_INPUT_SHA256,
+        "installed_manifest_sha256": "b" * 64,
         "db_mode": False,
     }
     with pytest.raises(sandbox.VerificationSandboxError, match="sandbox_definition_mismatch"):

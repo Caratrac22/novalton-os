@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Self
 
 RELEASE = Path("/opt/novalton-verification/i044a-v2")
-EXPECTED_RELEASE_DIGEST = "935319e8d43272f8e325832c3bc9e382499a6b0f40abb71eedb9410217f273a8"
+INSTALLED_MANIFEST_SHA256 = ""
 PYTHON = str(RELEASE / "rootfs/runtime/bin/python3.13")
 UNIT = "novalton-verification.service"
 CLIENT = str(RELEASE / "client/i044a_client.py")
@@ -183,7 +183,7 @@ def client(action: str, run_id: str | None = None, timeout: float = 20) -> dict:
             "-S",
             "-B",
             CLIENT,
-            EXPECTED_RELEASE_DIGEST,
+            INSTALLED_MANIFEST_SHA256,
             action,
             *([] if run_id is None else [run_id]),
         ],
@@ -326,10 +326,18 @@ def assert_exited(tracked: list[int]) -> None:
 
 
 def main() -> None:
+    global INSTALLED_MANIFEST_SHA256
     if os.geteuid() != 0 or len(sys.argv) != 1:
         raise SystemExit("usage: accept_i044a_installed.py (as root)")
     manifest_data = (RELEASE / "manifest.json").read_bytes()
-    assert hashlib.sha256(manifest_data).hexdigest() == EXPECTED_RELEASE_DIGEST
+    metadata = json.loads((RELEASE / "release-metadata.json").read_bytes())
+    assert isinstance(metadata, dict) and set(metadata) == {
+        "schema", "i044a_input_sha256", "foundation_input_sha256",
+        "foundation_installed_manifest_sha256", "installed_manifest_sha256",
+    }
+    assert metadata["schema"] == "novalton.i044a.release-metadata.v1"
+    INSTALLED_MANIFEST_SHA256 = hashlib.sha256(manifest_data).hexdigest()
+    assert metadata["installed_manifest_sha256"] == INSTALLED_MANIFEST_SHA256
     assert ctl("is-active", UNIT) == "active"
     main_pid = ctl("show", UNIT, "-p", "MainPID", "--value")
     assert Path("/proc", main_pid, "environ").read_bytes() == b""
@@ -340,8 +348,10 @@ def main() -> None:
     try:
         health = wait_ready()
         assert health["definition"] == "repository-probe-v1"
-        assert health["release_digest"] == EXPECTED_RELEASE_DIGEST
-        assert health["foundation_digest"] == "6643fdf075190c785de92ee28e0776915297640208fd091b64045313fe16bd7c"
+        assert health["installed_manifest_sha256"] == INSTALLED_MANIFEST_SHA256
+        assert health["i044a_input_sha256"] == metadata["i044a_input_sha256"]
+        assert health["foundation_input_sha256"] == metadata["foundation_input_sha256"]
+        assert health["foundation_installed_manifest_sha256"] == metadata["foundation_installed_manifest_sha256"]
         assert health["db_mode"] is False
 
         security = security_response()
@@ -388,7 +398,7 @@ def main() -> None:
         remove_host_marker(host_marker)
     logs = subprocess.check_output(["/usr/bin/journalctl", "-u", UNIT, "--since", "-3min", "--no-pager", "-o", "cat"], text=True)
     assert all(marker not in logs for marker in ("I044A_FAKE_ONLY", "GITHUB_TOKEN", "OPENAI_API_KEY"))
-    print(json.dumps({"installed_acceptance": "PASS", "release_digest": EXPECTED_RELEASE_DIGEST, "db_mode": False}, sort_keys=True))
+    print(json.dumps({"installed_acceptance": "PASS", "installed_manifest_sha256": INSTALLED_MANIFEST_SHA256, "db_mode": False}, sort_keys=True))
 
 
 if __name__ == "__main__":

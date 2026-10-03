@@ -1,0 +1,15 @@
+{
+  "bubblewrap_sha256": "52231e1caf55bcbc667b269f49c63599a6f7db4767ae6a039580d0ff853db712",
+  "cpython_source_sha256": "c28d9d213c09b5b5ab2c29812950e12f746999e099b82894231be954b26baed9",
+  "schema": "novalton.i044b.foundation-input.v1",
+  "source": {
+    "client/i044b_client.py": "439773325ea683d8e98c0143174b2950df88955e049060aed6c3a081310a5fdc",
+    "novalton-verification.service": "3e1c6243f805b1f792154d57d7fd40bf953a232630262695bc414a75fee857df",
+    "provision.py": "47c373e25679f584edd44553007a87dfe996e59a6df3916cd9e920dd27dcc2d0",
+    "runtime.lock.json": "477521ee64eff7e06534d96a99ff9a28a71034b7db4d03c5a6f2b06755fe1c05",
+    "tests/accept_i044b_installed.py": "db8c8ccb40d817cad7a16cd094321c22c282ac7fe1649bf08a0b0cdbc6701e45",
+    "var-lib-novalton\\x2dverification.mount": "24b1d592f2b21cef4dd319484375c4aa660135f565aae0604beca2c7c545a438",
+    "worker/worker.py": "cbc9d63980ff88465a41f69bc90623f87a4d2a0f3528a737003e82f6d3597eef"
+  },
+  "runtime_version": "3.13.15"
+}

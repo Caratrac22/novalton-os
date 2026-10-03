@@ -1,10 +1,10 @@
 #!/bin/sh
 set -efu
 
-source=/home/alexandre/projects/novalton-os/infra/verification/i044a-v2
+source=/run/novalton-i044a-v2-input
 stage=/run/novalton-i044a-v2-reviewed
-installer_sha256=635d87c5ee108486f99be6c3fb615b79d9105d47211931fd10507738d7ab514f
-bundle_sha256=f804c28ff27cbff40e6a9ae8448633262c61421e87c5e9dd1444aed1e30fd137
+installer_sha256=5db930447b64774385f6c551b1dbf7e6f373cc3322155f4ce134e133fe71103a
+bundle_sha256=c1fc5a847564c26fee048652cb54bb82caa1e9ba9c45e61c2b81899a8026fb99
 
 test "$(/usr/bin/id -u)" = 0
 test "$(/usr/bin/stat -c '%u:%g:%a' "$stage/root-handoff.sh")" = 0:0:400
@@ -22,7 +22,7 @@ printf '%s  %s\n' "$bundle_sha256" "$stage/bundle.tar" | /usr/bin/sha256sum -c -
     "$stage/tests/test_i044a_contract.py" "$stage/tests/test_i044a_seccomp_kernel.py" \
     "$stage/tests/test_i044a_seccomp_staging.py"
 /usr/bin/chmod 0400 "$stage/tests/fixtures/i044b_worker_contract_shim.py"
-exec /opt/novalton-verification/i044b-v1/rootfs/lib64/ld-linux-x86-64.so.2 \
-    --library-path /opt/novalton-verification/i044b-v1/rootfs/usr/lib/x86_64-linux-gnu \
-    /opt/novalton-verification/i044b-v1/rootfs/runtime/bin/python3.13 \
+exec /opt/novalton-verification/i044b-v2/rootfs/lib64/ld-linux-x86-64.so.2 \
+    --library-path /opt/novalton-verification/i044b-v2/rootfs/usr/lib/x86_64-linux-gnu \
+    /opt/novalton-verification/i044b-v2/rootfs/runtime/bin/python3.13 \
     -I -S -B "$stage/install.py"
