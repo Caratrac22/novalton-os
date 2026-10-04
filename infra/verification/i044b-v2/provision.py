@@ -250,17 +250,20 @@ def copy_dependency(path: Path, rootfs: Path) -> None:
     shutil.copy2(path, destination, follow_symlinks=True)
 
 
-def runtime_rootfs(runtime: Path, rootfs: Path) -> None:
+def runtime_rootfs(runtime: Path, rootfs: Path, bubblewrap: Path) -> None:
     shutil.copytree(runtime, rootfs / "runtime", symlinks=False)
     libraries: set[Path] = set()
-    candidates = [rootfs / "runtime/bin/python3.13", *sorted((rootfs / "runtime/lib/python3.13/lib-dynload").glob("*.so"))]
+    candidates = [bubblewrap, rootfs / "runtime/bin/python3.13", *sorted((rootfs / "runtime/lib/python3.13/lib-dynload").glob("*.so"))]
     for candidate in candidates:
         output = subprocess.check_output(["/usr/bin/ldd", str(candidate)], text=True, env={"PATH": "/usr/bin:/bin"})
         for line in output.splitlines():
             for token in line.replace("=>", " ").split():
                 value = Path(token)
                 if value.is_absolute() and value.exists() and value.is_file():
-                    libraries.add(value.resolve())
+                    # Keep the requested SONAME basename, materialize its
+                    # bytes as a regular file under the canonical directory.
+                    # Resolving the final symlink loses libfoo.so.N aliases.
+                    libraries.add(value.parent.resolve() / value.name)
     loader = Path("/lib64/ld-linux-x86-64.so.2").resolve()
     libraries.add(loader)
     for library in sorted(libraries):
@@ -406,7 +409,7 @@ def install() -> str:
                 str(SOURCE / "worker/userns-helper.c"),
             ])
             shutil.copy2(Path("/lib64/ld-linux-x86-64.so.2").resolve(), candidate / "bwrap-loader")
-            runtime_rootfs(prefix, candidate / "rootfs")
+            runtime_rootfs(prefix, candidate / "rootfs", bubblewrap)
             shutil.copytree(prefix, candidate / "runtime", symlinks=False)
             (candidate / "policy.json").write_text(json.dumps({"client_gid": __import__("grp").getgrnam("novalton-verify-ipc").gr_gid, "client_uid": __import__("pwd").getpwnam("novalton-verify-client").pw_uid}, sort_keys=True) + "\n")
             harden(candidate)

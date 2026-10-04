@@ -38,6 +38,16 @@ def main() -> None:
     anchor = Path("/run/novalton-verification-proc").lstat()
     assert stat.S_ISDIR(anchor.st_mode)
     assert (anchor.st_uid, anchor.st_gid, stat.S_IMODE(anchor.st_mode)) == (0, 0, 0o700)
+    # No loader-cache or host-library fallback in the actual bwrap trust chain.
+    dependencies = checked([
+        str(RELEASE / "bwrap-loader"), "--inhibit-cache", "--library-path",
+        str(RELEASE / "rootfs/usr/lib/x86_64-linux-gnu"), "--list", str(RELEASE / "bwrap"),
+    ])
+    for line in dependencies.splitlines():
+        if "=>" in line:
+            target = Path(line.split("=>", 1)[1].strip().split()[0])
+            assert target.is_relative_to(RELEASE / "rootfs")
+            assert target.is_file()
     assert evidence["foundation_input_sha256"] == foundation_input_sha256
     assert UNIT.read_bytes() == (RELEASE / "novalton-verification.service").read_bytes()
     unit_info = UNIT.lstat()

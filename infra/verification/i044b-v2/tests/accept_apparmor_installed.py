@@ -39,6 +39,15 @@ def main() -> None:
     spec.loader.exec_module(provision)
     provision.verify_release(BASE)
     provision.verify_apparmor(BASE)
+    main_pid = int(checked([
+        "/usr/bin/systemctl", "show", "novalton-verification.service",
+        "--property=MainPID", "--value",
+    ]))
+    assert main_pid > 1
+    status = dict(line.split(":", 1) for line in Path(f"/proc/{main_pid}/status").read_text().splitlines())
+    assert status["NoNewPrivs"].strip() == "1"
+    for name in ("CapEff", "CapPrm", "CapInh", "CapAmb", "CapBnd"):
+        assert int(status[name].strip(), 16) == 0
     host_policy = Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns").read_bytes()
     assert host_policy.strip() == b"1"
     host_mount = Path("/proc/1/ns/mnt").readlink()
@@ -62,12 +71,21 @@ def main() -> None:
     result = verify()
     assert result["state"] == "passed", result.get("failure_code")
     assert all(result["checks"].values())
+    for name in (
+        "clone_namespaces_denied", "clone3_namespaces_denied", "mount_escape_absent",
+        "user_namespace_private", "fds_clean", "seccomp_active", "caps_empty",
+    ):
+        assert result["checks"][name] is True
     for name in ("population_empty", "scratch_destroyed", "snapshot_destroyed"):
         assert result[name] is True
     assert Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns").read_bytes() == host_policy
     assert Path("/proc/1/ns/mnt").readlink() == host_mount
     assert Path("/proc/sys/user/max_user_namespaces").read_bytes() == host_limit
-    print(json.dumps({"apparmor_negative": "PASS", "apparmor_positive": "PASS", "cleanup": "PASS"}))
+    print(json.dumps({
+        "apparmor_negative": "PASS", "apparmor_positive": "PASS", "cleanup": "PASS",
+        "worker_host_caps_empty": "PASS", "namespace_escape_denied": "PASS",
+        "host_sysctl_unchanged": "PASS", "host_mount_namespace_unchanged": "PASS",
+    }))
 
 
 if __name__ == "__main__":

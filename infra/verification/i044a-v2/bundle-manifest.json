@@ -1,5 +1,5 @@
 {
-  "client/i044a_client.py": "64b75ac149df9a0b3fd3e3d9acfd259b0d6ab5f2ecc9b4eb5a8b09a01b708e78",
+  "client/i044a_client.py": "090cd1f04c53eb45ca8bfbbe6f4a23acdd66376482836267437fc8aff1d1f4cd",
   "novalton-verification.service": "bc0b23ad459c8c4eda6633c2af2207ab8224c870b4683d33154dce4b2c5f4e56",
   "rootfs/runtime/i044a_probe.py": "e3fb62bd98cec233ce84201fb5634127bc55023555a86b6361d77e8dd2d896ee",
   "tests/accept_i044a_installed.py": "aecaf39ab8dcd85a5686ff3f53e400a9581d5153ce5049534b0379b5efc1b181",
@@ -8,5 +8,5 @@
   "tests/test_i044a_seccomp_kernel.py": "65571f6eae8a20d5004537aee83735f5c4552b1ce5f663f8c2dd3f6985b74006",
   "tests/test_i044a_seccomp_staging.py": "e378e6c9472c4c1510d318e04c68977719bb448b1b36270276693f0e0ba1c144",
   "worker/i044a.py": "fc93ef71f1dc04ab4184ce3e297f099050dffcf95388f0a975aa073597e67d53",
-  "worker/i044a_launch.py": "bff410f42ba51774df70858369437cf624dc20567411445c67e853ba3ea6efa4"
+  "worker/i044a_launch.py": "e582678a18f48846f8b922a8d466d13b6c7384c898ae6922cda42c25f2c626fe"
 }

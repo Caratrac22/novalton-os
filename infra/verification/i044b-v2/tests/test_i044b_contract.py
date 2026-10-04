@@ -61,6 +61,7 @@ assert '"/run/novalton-verification-proc/full/self/status"' in helper_source
 assert "anchor_as_host" in helper_source and "anchor_as_namespace" in helper_source
 assert "BindPaths=/proc/1/root/proc:/run/novalton-verification-proc/full" in UNIT
 assert "proc_anchor_untrusted" in worker_source
+assert "runtime_rootfs(prefix, candidate / \"rootfs\", bubblewrap)" in provision_source
 assert '"novalton-i044b-userns (enforce)\\n"' in helper_source
 policy = (ROOT / "novalton-userns.apparmor").read_text()
 assert "userns create," in policy and "capability sys_admin," in policy
