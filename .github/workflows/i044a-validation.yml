@@ -232,6 +232,8 @@ jobs:
           dd24bb47e9ce00c470f2bd7662fb48998d7cbbddd7f3378249e26c4cf0403060  /run/novalton-i044b-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$bstage/root-handoff.sh"
+          # Verify this runner's actual foundation before applying the overlay.
+          sudo /opt/novalton-verification/i044b-v2/runtime/bin/python3.13 -I -S -B /opt/novalton-verification/i044b-v2/tests/accept_i044b_installed.py
           # This root-owned static source is the only path admitted by the
           # installed I-044A unit.  It is not the checkout and contains no
           # provider credentials, VCS data, or caller-controlled symlinks.
