@@ -64,10 +64,8 @@ profile novalton-i044a-bwrap /opt/novalton-verification/i044b-v2/bwrap-loader fl
   mount options=(rw,silent,rbind) /oldroot/dev/{null,zero,full,random,urandom,tty} -> /newroot/dev/{null,zero,full,random,urandom,tty},
   mount options=(rw,silent,rbind) /oldroot/opt/novalton-verification/i044a-v2/rootfs/ -> /newroot/,
   mount options=(rw,silent,rbind) /oldroot/var/lib/novalton-verification/snapshot-[0-9a-f]*/ -> /newroot/source/,
-  # bind-mount.c preserves existing noexec/relatime while adding these flags.
-  remount options=(ro,bind,remount,silent,nosuid,nodev) /newroot{,/**},
+  # Exact installed bind-mount.c flags: relatime, plus noexec for snapshots.
   remount options=(ro,bind,remount,silent,nosuid,nodev,relatime) /newroot{,/**},
-  remount options=(ro,bind,remount,silent,nosuid,nodev,noexec) /newroot{,/**},
   remount options=(ro,bind,remount,silent,nosuid,nodev,noexec,relatime) /newroot{,/**},
   pivot_root oldroot=/tmp/oldroot/ /tmp/,
   pivot_root oldroot=/newroot/ /newroot/,

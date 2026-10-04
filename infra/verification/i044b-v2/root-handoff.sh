@@ -18,11 +18,11 @@ for relative in provision.py foundation-input.json runtime.lock.json \
 done
 cd "$stage"
 /usr/bin/sha256sum -c <<'EOF'
-0fbdcd09ba415769899a546a166e2a9e642acf115ac50268a03bb0cf1424756c  foundation-input.json
+0c4be7938e1c1d0284fccb1d2440b5e3298a5bf3ca0c9bb0f84af4db27c3863c  foundation-input.json
 f8d19c9cbcc14604062391bc68cac5247e9633244adb27a8399d821c4f481a16  provision.py
 9a17aae1cbab4135efa4f48c2e21d6e9ef7387a21c3a4a4338356a514e8401a2  worker/worker.py
 6dc64477906b4d2c5a626c3aa940a1f9490630fe1c6daf8b9cf4b3ed923a504e  worker/userns-helper.c
-e9db782b67eab87b11a378e343e68e9a6f3d4bdd550a6072b4a2f4a37a171a90  novalton-userns.apparmor
+27fab15c33859118c88219db9e1751a4b497d6f66b22480258d00338c92b533e  novalton-userns.apparmor
 439773325ea683d8e98c0143174b2950df88955e049060aed6c3a081310a5fdc  client/i044b_client.py
 069690d522aec58683b64e7597a851ee0a5694bd7cfdfb4a978aebdfd3cd5a98  novalton-verification.service
 24b1d592f2b21cef4dd319484375c4aa660135f565aae0604beca2c7c545a438  var-lib-novalton\x2dverification.mount

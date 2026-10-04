@@ -5,7 +5,7 @@
   "schema": "novalton.i044b.foundation-input.v1",
   "source": {
     "client/i044b_client.py": "439773325ea683d8e98c0143174b2950df88955e049060aed6c3a081310a5fdc",
-    "novalton-userns.apparmor": "e9db782b67eab87b11a378e343e68e9a6f3d4bdd550a6072b4a2f4a37a171a90",
+    "novalton-userns.apparmor": "27fab15c33859118c88219db9e1751a4b497d6f66b22480258d00338c92b533e",
     "novalton-verification.service": "069690d522aec58683b64e7597a851ee0a5694bd7cfdfb4a978aebdfd3cd5a98",
     "provision.py": "f8d19c9cbcc14604062391bc68cac5247e9633244adb27a8399d821c4f481a16",
     "runtime.lock.json": "0e43622f895e34b29f933743a508698bc7e38fb4d2519bbe38e6d8c8255235c9",

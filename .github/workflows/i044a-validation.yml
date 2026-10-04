@@ -115,8 +115,8 @@ jobs:
           manifest = json.loads((root / "bundle-manifest.json").read_bytes())
           for destination, source in (installer.FILES | installer.AUXILIARY).items():
               assert hashlib.sha256((root / source).read_bytes()).hexdigest() == manifest[destination]
-          assert installer.FOUNDATION_INPUT_SHA256 == "0fbdcd09ba415769899a546a166e2a9e642acf115ac50268a03bb0cf1424756c"
-          assert installer.I044A_INPUT_SHA256 == "05f8173d0598ed39a9032910229be70004baca85452d6b188f267969579db4db"
+          assert installer.FOUNDATION_INPUT_SHA256 == "0c4be7938e1c1d0284fccb1d2440b5e3298a5bf3ca0c9bb0f84af4db27c3863c"
+          assert installer.I044A_INPUT_SHA256 == "fe647dab45f0f5a562fac37073d0b9cda64f3c7f735fff9f4482763b8a9bcd05"
           PY
 
       - name: Lint I-044A and sandbox files
@@ -182,14 +182,14 @@ jobs:
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/tests/accept_apparmor_installed.py "$input/tests/accept_apparmor_installed.py"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/root-handoff.sh "$stage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          12ea2b794c9427bc215c3ca2b24cad9aad8191f489f84ca1cedc0fd351877a9d  /run/novalton-i044b-v2-reviewed/root-handoff.sh
+          963c96f56b0df716a3edec3dbb40f31e59644ab24c46210a5139d186a38eb6b0  /run/novalton-i044b-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$stage/root-handoff.sh"
 
       - name: Verify exact I-044B v2 identity
         run: |
           set -eu
-          expected=0fbdcd09ba415769899a546a166e2a9e642acf115ac50268a03bb0cf1424756c
+          expected=0c4be7938e1c1d0284fccb1d2440b5e3298a5bf3ca0c9bb0f84af4db27c3863c
           base=/opt/novalton-verification/i044b-v2
           test -d "$base"
           test ! -L "$base"
@@ -211,7 +211,7 @@ jobs:
         run: |
           set -eu
           sudo apt-get update
-          sudo apt-get install --yes build-essential curl libffi-dev pkg-config apparmor bpftrace
+          sudo apt-get install --yes build-essential curl libffi-dev pkg-config apparmor
           apparmor_parser --skip-kernel-load --skip-cache infra/verification/i044b-v2/novalton-userns.apparmor
           bstage=/run/novalton-i044b-v2-reviewed
           binput=/run/novalton-i044b-v2-input
@@ -229,7 +229,7 @@ jobs:
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/tests/accept_apparmor_installed.py "$binput/tests/accept_apparmor_installed.py"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/root-handoff.sh "$bstage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          12ea2b794c9427bc215c3ca2b24cad9aad8191f489f84ca1cedc0fd351877a9d  /run/novalton-i044b-v2-reviewed/root-handoff.sh
+          963c96f56b0df716a3edec3dbb40f31e59644ab24c46210a5139d186a38eb6b0  /run/novalton-i044b-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$bstage/root-handoff.sh"
           # This root-owned static source is the only path admitted by the
@@ -246,7 +246,7 @@ jobs:
           sudo install -d -o root -g root -m 0500 "$stage"
           sudo install -o root -g root -m 0400 infra/verification/i044a-v2/root-handoff.sh "$stage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          90d8de5316b05af45569d91abda950adc7cb5b49e3b7d200e0f429312497776d  /run/novalton-i044a-v2-reviewed/root-handoff.sh
+          2926273560f650ee469aba157c50ddce2fde86f748cd5579904240b20c01f057  /run/novalton-i044a-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$stage/root-handoff.sh"
 
@@ -260,9 +260,9 @@ jobs:
           release = Path("/opt/novalton-verification/i044a-v2")
           foundation = json.loads((base / "foundation-metadata.json").read_bytes())
           metadata = json.loads((release / "release-metadata.json").read_bytes())
-          assert foundation["foundation_input_sha256"] == "0fbdcd09ba415769899a546a166e2a9e642acf115ac50268a03bb0cf1424756c"
+          assert foundation["foundation_input_sha256"] == "0c4be7938e1c1d0284fccb1d2440b5e3298a5bf3ca0c9bb0f84af4db27c3863c"
           assert foundation["installed_manifest_sha256"] == hashlib.sha256((base / "installed-manifest.json").read_bytes()).hexdigest()
-          assert metadata["i044a_input_sha256"] == "05f8173d0598ed39a9032910229be70004baca85452d6b188f267969579db4db"
+          assert metadata["i044a_input_sha256"] == "fe647dab45f0f5a562fac37073d0b9cda64f3c7f735fff9f4482763b8a9bcd05"
           assert metadata["foundation_input_sha256"] == foundation["foundation_input_sha256"]
           assert metadata["foundation_installed_manifest_sha256"] == foundation["installed_manifest_sha256"]
           assert metadata["installed_manifest_sha256"] == hashlib.sha256((release / "manifest.json").read_bytes()).hexdigest()
@@ -273,39 +273,7 @@ jobs:
 
       - name: Run installed I-044A acceptance
         timeout-minutes: 2
-        run: |
-          set -eu
-          # CI-only read-only kernel observer; never injected into the product.
-          # Numeric syscall outcomes and fixed mount paths only, no environment.
-          service_uid=$(id -u novalton-verify)
-          trace="$RUNNER_TEMP/i044a-namespace-trace.txt"
-          sudo /usr/bin/timeout --signal=TERM --kill-after=3s 60s /usr/bin/bpftrace -q -e '
-          BEGIN { printf("observer-ready\n"); }
-          tracepoint:syscalls:sys_enter_mount
-          /uid == '"$service_uid"' && comm == "bwrap-loader"/
-          { printf("mount target=%s flags=%lu\n", str(args->dir_name), args->flags); }
-          tracepoint:syscalls:sys_exit_mount,
-          tracepoint:syscalls:sys_exit_unshare,
-          tracepoint:syscalls:sys_exit_setns,
-          tracepoint:syscalls:sys_exit_pivot_root,
-          tracepoint:syscalls:sys_exit_execve
-          /uid == '"$service_uid"' && comm == "bwrap-loader"/
-          { printf("%s result=%ld\n", probe, args->ret); }
-          ' > "$trace" 2>&1 &
-          observer=$!
-          finish() {
-            sudo kill -TERM "$observer" 2>/dev/null || true
-            wait "$observer" || true
-            tail -80 "$trace"
-          }
-          trap finish EXIT
-          ready=0
-          for attempt in $(seq 1 30); do
-            if grep -q '^observer-ready$' "$trace"; then ready=1; break; fi
-            sleep 1
-          done
-          test "$ready" = 1
-          sudo /opt/novalton-verification/i044a-v2/rootfs/runtime/bin/python3.13 -I -S -B /run/novalton-i044a-v2-reviewed/tests/accept_i044a_installed.py
+        run: sudo /opt/novalton-verification/i044a-v2/rootfs/runtime/bin/python3.13 -I -S -B /run/novalton-i044a-v2-reviewed/tests/accept_i044a_installed.py
 
       - name: Run targeted AppArmor negative and positive acceptance
         run: sudo /opt/novalton-verification/i044b-v2/runtime/bin/python3.13 -I -S -B /opt/novalton-verification/i044b-v2/tests/accept_apparmor_installed.py
