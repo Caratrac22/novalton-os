@@ -1,6 +1,6 @@
 {
-  "client/i044a_client.py": "c4c255335815ff1f364b575cd2cc2421e74071f2e94104e9d911e39d4ea1a676",
-  "novalton-verification.service": "cdb346c91e686bf07b0e9699fb1f8f6c46f478b3a36cf53ef00a407a5ba695ab",
+  "client/i044a_client.py": "048df35a654fc316640087785474e4ec3eddc6d1873b1fbed846c0c5aea63157",
+  "novalton-verification.service": "bc0b23ad459c8c4eda6633c2af2207ab8224c870b4683d33154dce4b2c5f4e56",
   "rootfs/runtime/i044a_probe.py": "e3fb62bd98cec233ce84201fb5634127bc55023555a86b6361d77e8dd2d896ee",
   "tests/accept_i044a_installed.py": "aecaf39ab8dcd85a5686ff3f53e400a9581d5153ce5049534b0379b5efc1b181",
   "tests/fixtures/i044b_worker_contract_shim.py": "237d250106200329435666689f1f8990fcdff4d74da2393004acf937e68f8cae",

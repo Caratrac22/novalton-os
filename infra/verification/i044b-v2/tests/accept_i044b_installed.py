@@ -35,6 +35,9 @@ def main() -> None:
     foundation_input_sha256 = hashlib.sha256((RELEASE / "foundation-input.json").read_bytes()).hexdigest()
     evidence = provision.verify_release(RELEASE, foundation_input_sha256)
     provision.verify_apparmor(RELEASE)
+    anchor = Path("/run/novalton-verification-proc").lstat()
+    assert stat.S_ISDIR(anchor.st_mode)
+    assert (anchor.st_uid, anchor.st_gid, stat.S_IMODE(anchor.st_mode)) == (0, 0, 0o700)
     assert evidence["foundation_input_sha256"] == foundation_input_sha256
     assert UNIT.read_bytes() == (RELEASE / "novalton-verification.service").read_bytes()
     unit_info = UNIT.lstat()

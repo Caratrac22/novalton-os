@@ -11,7 +11,7 @@ import sys
 import time
 
 ENDPOINT = "/run/novalton-verification/control.sock"
-FOUNDATION_INPUT_SHA256 = "ed5fc88315005d2928340d9ecb4a4bb168a31405040941cacfd2e2ac30516297"
+FOUNDATION_INPUT_SHA256 = "a0969ea18ac2e52f8aafb21c9b02286d25f3375703e41253e1cbcc102a943eb5"
 MAX_REQUEST_BYTES = 1024
 MAX_RESPONSE_BYTES = 8192
 RUN_ID = re.compile(r"[0-9a-f]{32}\Z")

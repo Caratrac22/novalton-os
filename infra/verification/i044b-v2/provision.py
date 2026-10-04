@@ -32,6 +32,7 @@ FOUNDATION_INPUT = SOURCE / "foundation-input.json"
 INSTALLED_MANIFEST = "installed-manifest.json"
 FOUNDATION_METADATA = "foundation-metadata.json"
 APPARMOR_POLICY = Path("/etc/apparmor.d/novalton-verification-userns")
+PROC_ANCHOR = Path("/run/novalton-verification-proc")
 COPY_FILES = (
     "foundation-input.json",
     "provision.py",
@@ -437,6 +438,19 @@ def install() -> str:
             install_control_file(TARGET / "novalton-userns.apparmor", APPARMOR_POLICY)
             checked(["/usr/sbin/apparmor_parser", "--replace", "--skip-cache", str(APPARMOR_POLICY)])
             verify_apparmor()
+            # A full proc bind hidden behind a root-only directory satisfies
+            # Linux's mount visibility check without exposing host proc to the
+            # service. The bind itself exists only in the service mount namespace.
+            PROC_ANCHOR.mkdir(mode=0o700, exist_ok=True)
+            anchor_info = no_link(PROC_ANCHOR)
+            if (not stat.S_ISDIR(anchor_info.st_mode) or anchor_info.st_uid != 0
+                    or anchor_info.st_gid != 0 or stat.S_IMODE(anchor_info.st_mode) != 0o700):
+                raise RuntimeError("proc_anchor_untrusted")
+            (PROC_ANCHOR / "full").mkdir(mode=0o500, exist_ok=True)
+            anchor_child = no_link(PROC_ANCHOR / "full")
+            if (not stat.S_ISDIR(anchor_child.st_mode) or anchor_child.st_uid != 0
+                    or anchor_child.st_gid != 0 or stat.S_IMODE(anchor_child.st_mode) != 0o500):
+                raise RuntimeError("proc_anchor_untrusted")
             checked(["/usr/bin/systemctl", "daemon-reload"])
             checked(["/usr/bin/systemctl", "enable", "--now", "var-lib-novalton\\x2dverification.mount"])
             service = __import__("pwd").getpwnam("novalton-verify")

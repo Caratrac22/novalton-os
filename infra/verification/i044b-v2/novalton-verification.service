@@ -29,6 +29,9 @@ PrivateDevices=yes
 ProtectHome=yes
 ProtectSystem=strict
 ProtectKernelTunables=yes
+# Full proc visibility for new PID-namespace proc mounts. The root-only parent
+# is not traversable by this UID, including after entering a child user namespace.
+BindPaths=/proc/1/root/proc:/run/novalton-verification-proc/full
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectClock=yes

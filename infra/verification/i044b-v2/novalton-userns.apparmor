@@ -4,6 +4,7 @@
 profile novalton-i044b-userns /opt/novalton-verification/i044b-v2/userns-helper flags=(attach_disconnected,mediate_deleted) {
   userns create,
   capability sys_admin,
+  capability sys_resource,
   /opt/novalton-verification/i044b-v2/userns-helper mr,
   /proc/@{pid}/cgroup r,
   /proc/@{pid}/attr/current r,

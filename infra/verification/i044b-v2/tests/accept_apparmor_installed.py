@@ -42,6 +42,7 @@ def main() -> None:
     host_policy = Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns").read_bytes()
     assert host_policy.strip() == b"1"
     host_mount = Path("/proc/1/ns/mnt").readlink()
+    host_limit = Path("/proc/sys/user/max_user_namespaces").read_bytes()
     try:
         checked(["/usr/sbin/apparmor_parser", "--remove", str(POLICY)])
         try:
@@ -65,6 +66,7 @@ def main() -> None:
         assert result[name] is True
     assert Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns").read_bytes() == host_policy
     assert Path("/proc/1/ns/mnt").readlink() == host_mount
+    assert Path("/proc/sys/user/max_user_namespaces").read_bytes() == host_limit
     print(json.dumps({"apparmor_negative": "PASS", "apparmor_positive": "PASS", "cleanup": "PASS"}))
 
 

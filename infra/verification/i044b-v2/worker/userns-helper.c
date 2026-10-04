@@ -39,6 +39,12 @@ static void write_fixed(const char *path, const char *value) {
     if (close(fd)) fail();
 }
 
+static void anchor_denied(void) {
+    int fd = open("/run/novalton-verification-proc/full/self/status", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) { close(fd); errno = EPERM; fail(); }
+    if (errno != EACCES) fail();
+}
+
 int main(int argc, char **argv) {
     char *end;
     if (argc != 3) return 2;
@@ -67,6 +73,8 @@ int main(int argc, char **argv) {
     char profile[128];
     if (!profile_stream || !fgets(profile, sizeof profile, profile_stream)
         || fclose(profile_stream) || strcmp(profile, "novalton-i044b-userns (enforce)\n")) fail();
+    stage = "anchor_as_host";
+    anchor_denied();
     /* LSM allows this operation, kernel initial-namespace capabilities do not.
      * A successful host mount operation is a hard failure, never accepted. */
     errno = 0;
@@ -97,6 +105,8 @@ int main(int argc, char **argv) {
      * host proc/sys read-only. Only the new user namespace's limit is changed. */
     stage = "namespaced_caps";
     if (syscall(SYS_capget, &header, caps) || !(caps[0].effective & (1U << CAP_SYS_ADMIN))) fail();
+    stage = "anchor_as_namespace";
+    anchor_denied();
     stage = "private_unshare";
     if (unshare(CLONE_NEWNS | CLONE_NEWPID)) fail();
     stage = "private_fork";
@@ -113,7 +123,7 @@ int main(int argc, char **argv) {
     stage = "private_proc";
     if (mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL)) fail();
     stage = "namespace_limit";
-    write_fixed("/proc/sys/user/max_user_namespaces", "1\n");
+    write_fixed("/proc/sys/user/max_user_namespaces", "0\n");
     stage = "namespace_open";
     if (prctl(PR_SET_DUMPABLE, 1, 0, 0, 0)) fail();
     int fd = open("/proc/self/ns/user", O_RDONLY | O_CLOEXEC);

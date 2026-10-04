@@ -5,7 +5,7 @@ foundation.  It deliberately does **not** claim equivalence with the historical
 host-only `6643fdf075190c785de92ee28e0776915297640208fd091b64045313fe16bd7c`
 release. That digest is historical evidence only. A fresh installation uses
 `foundation_input_sha256`
-`ed5fc88315005d2928340d9ecb4a4bb168a31405040941cacfd2e2ac30516297`
+`a0969ea18ac2e52f8aafb21c9b02286d25f3375703e41253e1cbcc102a943eb5`
 and generates a separate `installed_manifest_sha256` for its concrete bytes.
 
 Ubuntu's restricted user namespaces are handled by two confined, explicit
@@ -17,7 +17,8 @@ namespaces and sets only its new user namespace's nesting limit. It never accept
 a command, environment or filesystem path. The profile requires enforcement.
 The second profile attaches to the immutable `bwrap-loader`, permits only the
 fixed bubblewrap construction paths and inherits into the seccomp-filtered probe.
-Neither profile adds Linux capabilities to the worker; its unit is unchanged.
+Neither profile adds Linux capabilities to the worker. Its capability bounding
+set, NoNewPrivileges, host protections and address-family limits are unchanged.
 The helper also asserts that a mount operation before unshare is denied by the
 kernel, even though its LSM rule permits the operation in a new user namespace.
 
@@ -27,6 +28,19 @@ Policy bytes and helper source belong to `foundation-input.json`; the compiled
 helper and dedicated loader also belong to the installed manifest. The installer
 and installed verifier reject missing, changed or non-enforced policy. No sysctl,
 global AppArmor mode, stock profile or systemd capability grant is changed.
+
+The sole unit addition is a service-private bind of the host's full proc view at
+`/run/novalton-verification-proc/full`. Its parent is validated root:root `0700`;
+the service cannot traverse it before or after unshare. This is necessary for
+Linux's `mount_too_revealing` check: inherited locked child mounts from systemd's
+ProtectKernelTunables/PrivateDevices otherwise prevent mounting proc even in a
+new PID namespace. The hidden anchor supplies kernel visibility, not a path or
+descriptor to the worker. ProtectKernelTunables and the original masked proc
+view remain in force. The helper proves anchor reads denied in both namespaces,
+then mounts fresh proc for its new PID namespace and sets its own namespace's
+`max_user_namespaces` to zero. `CAP_SYS_RESOURCE` is an LSM permission solely for
+this namespaced limit; initial capabilities remain empty. Installed acceptance
+also proves that the host namespace limit and host mount namespace are unchanged.
 `tests/accept_apparmor_installed.py` removes only these profiles, proves that
 execution and the installed verifier fail closed, and always reloads them before
 the positive acceptance. Run it only on the disposable CI runner.
