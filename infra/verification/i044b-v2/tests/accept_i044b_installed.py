@@ -34,6 +34,7 @@ def main() -> None:
     spec.loader.exec_module(provision)
     foundation_input_sha256 = hashlib.sha256((RELEASE / "foundation-input.json").read_bytes()).hexdigest()
     evidence = provision.verify_release(RELEASE, foundation_input_sha256)
+    provision.verify_apparmor(RELEASE)
     assert evidence["foundation_input_sha256"] == foundation_input_sha256
     assert UNIT.read_bytes() == (RELEASE / "novalton-verification.service").read_bytes()
     unit_info = UNIT.lstat()

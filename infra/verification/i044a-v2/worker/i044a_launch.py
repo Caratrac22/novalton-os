@@ -71,6 +71,6 @@ argv = [
     "-B",
     "/runtime/i044a_probe.py",
 ]
-loader = str(root / "lib64/ld-linux-x86-64.so.2")
+loader = "/opt/novalton-verification/i044b-v2/bwrap-loader"
 argv = [loader, "--library-path", str(root / "usr/lib/x86_64-linux-gnu"), *argv]
 os.execve(loader, argv, {})

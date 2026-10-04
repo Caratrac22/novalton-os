@@ -19,9 +19,9 @@ SOURCE = Path("/run/novalton-i044a-v2-reviewed")
 BASE = Path("/opt/novalton-verification/i044b-v2")
 TARGET = Path("/opt/novalton-verification/i044a-v2")
 UNIT = Path("/etc/systemd/system/novalton-verification.service")
-FOUNDATION_INPUT_SHA256 = "e71384ecc08842c6f6b65148463d6096d25cda24371c53877f35cd69f681c562"
-EXPECTED_BUNDLE_DIGEST = "762a34443398a5447ad27c3c4086569bad4a53c71bbec3983b7c6f267252e0a1"
-EXPECTED_BUNDLE_MANIFEST_DIGEST = "4753f65945be395b12ad2580862480b64e3cdf6945b40794b7b9679c06199d4c"
+FOUNDATION_INPUT_SHA256 = "9d84b28f44f3cc19587b30382e737ced3c1df8fb91722177306335ca223249d0"
+EXPECTED_BUNDLE_DIGEST = "ec2c4dae16e9cbd9432c22e4e3a484c06a5761a27bb22cca950204fcceb4637e"
+EXPECTED_BUNDLE_MANIFEST_DIGEST = "6e874425fa353e80cc2768860357bb5271f836c989238c6d8732a076d4c93173"
 I044A_INPUT_SHA256 = EXPECTED_BUNDLE_MANIFEST_DIGEST
 ALLOWED_PREDECESSOR_RELEASE_DIGEST = "71fa6df9100246b5b37a541e808936f87b05b9084b2446200648b256f867fdd2"
 FILES = {
@@ -93,6 +93,8 @@ def verify_foundation(*, ownership: bool = True) -> tuple[dict[str, str], dict[s
     metadata = verifier.verify_release(
         BASE, FOUNDATION_INPUT_SHA256 if ownership else None
     )
+    if ownership:
+        verifier.verify_apparmor(BASE)
     if metadata.get("foundation_input_sha256") != FOUNDATION_INPUT_SHA256:
         raise RuntimeError("foundation_identity_mismatch")
     files = {

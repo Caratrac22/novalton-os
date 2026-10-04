@@ -31,15 +31,19 @@ LOCK = SOURCE / "runtime.lock.json"
 FOUNDATION_INPUT = SOURCE / "foundation-input.json"
 INSTALLED_MANIFEST = "installed-manifest.json"
 FOUNDATION_METADATA = "foundation-metadata.json"
+APPARMOR_POLICY = Path("/etc/apparmor.d/novalton-verification-userns")
 COPY_FILES = (
     "foundation-input.json",
     "provision.py",
     "worker/worker.py",
+    "worker/userns-helper.c",
+    "novalton-userns.apparmor",
     "client/i044b_client.py",
     "novalton-verification.service",
     "var-lib-novalton\\x2dverification.mount",
     "runtime.lock.json",
     "tests/accept_i044b_installed.py",
+    "tests/accept_apparmor_installed.py",
 )
 
 
@@ -98,6 +102,21 @@ def trusted_source() -> None:
     lock_info = no_link(LOCK)
     if lock_info.st_mode & 0o022:
         raise RuntimeError("source_writable")
+
+
+def verify_apparmor(root: Path = TARGET) -> None:
+    """Require exact disk policy and enforced kernel profiles, never fallback."""
+    info = no_link(APPARMOR_POLICY)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+            or stat.S_IMODE(info.st_mode) != 0o644
+            or APPARMOR_POLICY.read_bytes() != (root / "novalton-userns.apparmor").read_bytes()):
+        raise RuntimeError("apparmor_policy_drift")
+    if Path("/sys/module/apparmor/parameters/enabled").read_text().strip() != "Y":
+        raise RuntimeError("apparmor_required")
+    profiles = Path("/sys/kernel/security/apparmor/profiles").read_text().splitlines()
+    for name in ("novalton-i044b-userns", "novalton-i044a-bwrap"):
+        if name + " (enforce)" not in profiles:
+            raise RuntimeError("apparmor_profile_not_enforced")
 
 
 def load_lock() -> dict[str, object]:
@@ -380,6 +399,12 @@ def install() -> str:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(SOURCE / relative, destination)
             shutil.copy2(bubblewrap, candidate / "bwrap")
+            checked([
+                "/usr/bin/cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror",
+                "-o", str(candidate / "userns-helper"),
+                str(SOURCE / "worker/userns-helper.c"),
+            ])
+            shutil.copy2(Path("/lib64/ld-linux-x86-64.so.2").resolve(), candidate / "bwrap-loader")
             runtime_rootfs(prefix, candidate / "rootfs")
             shutil.copytree(prefix, candidate / "runtime", symlinks=False)
             (candidate / "policy.json").write_text(json.dumps({"client_gid": __import__("grp").getgrnam("novalton-verify-ipc").gr_gid, "client_uid": __import__("pwd").getpwnam("novalton-verify-client").pw_uid}, sort_keys=True) + "\n")
@@ -409,6 +434,9 @@ def install() -> str:
             install_control_file(
                 TARGET / "var-lib-novalton\\x2dverification.mount", MOUNT_UNIT
             )
+            install_control_file(TARGET / "novalton-userns.apparmor", APPARMOR_POLICY)
+            checked(["/usr/sbin/apparmor_parser", "--replace", "--skip-cache", str(APPARMOR_POLICY)])
+            verify_apparmor()
             checked(["/usr/bin/systemctl", "daemon-reload"])
             checked(["/usr/bin/systemctl", "enable", "--now", "var-lib-novalton\\x2dverification.mount"])
             service = __import__("pwd").getpwnam("novalton-verify")

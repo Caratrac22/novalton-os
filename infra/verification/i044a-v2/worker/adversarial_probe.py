@@ -78,6 +78,8 @@ def clone3_errno(flag: int = 0) -> int:
 
 
 status = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines())
+if Path("/proc/self/attr/current").read_text().strip() != "novalton-i044a-bwrap (enforce)":
+    raise SystemExit("apparmor_profile_required")
 filesystem = os.statvfs("/scratch")
 Path("/scratch/write-probe").write_text("ok")
 interfaces = Path("/proc/net/dev").read_text().splitlines()[2:]

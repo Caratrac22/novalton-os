@@ -51,11 +51,18 @@ assert foundation_input_sha256 in (ROOT / "root-handoff.sh").read_text()
 provision_source = (ROOT / "provision.py").read_text()
 worker_source = (ROOT / "worker/worker.py").read_text()
 assert 'os.chown(ENDPOINT, -1, policy["client_gid"])' in worker_source
-assert "spec_from_file_location('i044b_helper'" in worker_source
-assert "from worker import _userns_helper" not in worker_source
-assert worker_source.index("parent_uid = os.getuid()") < worker_source.index(
-    "libc.unshare(CLONE_NEWUSER)"
-)
+helper_source = (ROOT / "worker/userns-helper.c").read_text()
+assert "-c" not in worker_source
+assert helper_source.index("uid_t uid = getuid()") < helper_source.index("unshare(CLONE_NEWUSER)")
+assert "PR_GET_NO_NEW_PRIVS" in helper_source and "SYS_capget" in helper_source
+assert "peer.pid != getppid()" in helper_source
+assert '"novalton-i044b-userns (enforce)\\n"' in helper_source
+policy = (ROOT / "novalton-userns.apparmor").read_text()
+assert "userns create," in policy and "capability sys_admin," in policy
+assert "profile novalton-i044b-userns /opt/novalton-verification/i044b-v2/userns-helper" in policy
+assert "profile novalton-i044a-bwrap /opt/novalton-verification/i044b-v2/bwrap-loader" in policy
+for forbidden in ("flags=(unconfined", "default_allow", "complain", " ux,", "change_profile", "\n  /** rw,", "\n  mount,", "\n  capability,", "\n  network,"):
+    assert forbidden not in policy
 for required in (
     "foundation_input_sha256", "installed_manifest_sha256",
     "novalton.i044b.foundation-metadata.v1", "novalton.i044b.installed-manifest.v1",
@@ -77,13 +84,13 @@ with patch.object(worker.socket, "socketpair", return_value=(parent, child)), pa
     worker.subprocess, "Popen", return_value=process
 ) as launch:
     try:
-        worker.prepare_userns(Path("/unused-contract-cgroup"))
+        worker.prepare_userns(Path("/unused-contract-cgroup/run-" + "a" * 32))
     except worker.WorkerFailure as error:
         assert error.code == "userns_protocol"
     else:
         raise AssertionError("missing namespace handoff must fail closed")
 assert launch.call_args.kwargs["pass_fds"] == (37,)
-assert "socket.socket(fileno=37)" in launch.call_args.args[0][-1]
+assert launch.call_args.args[0] == [str(worker.RELEASE / "userns-helper"), "37", "a" * 32]
 assert launch.call_args.kwargs["env"] == {}
 assert launch.call_args.kwargs["close_fds"] is True
 parent.close.assert_called_once()
@@ -99,7 +106,7 @@ for message, expected in (
         worker.subprocess, "Popen", return_value=process
     ):
         try:
-            worker.prepare_userns(Path("/unused-contract-cgroup"))
+            worker.prepare_userns(Path("/unused-contract-cgroup/run-" + "a" * 32))
         except worker.WorkerFailure as error:
             assert error.code == expected
         else:

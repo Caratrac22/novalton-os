@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import fcntl
 import hashlib
 import json
@@ -24,8 +23,6 @@ STORAGE = Path("/var/lib/novalton-verification")
 RUN_ID = re.compile(r"[0-9a-f]{32}\Z")
 LIMITS = {"cpu.max": "200000 100000", "memory.max": "1073741824", "memory.swap.max": "0", "pids.max": "32"}
 TIMEOUT = 8.0
-CLONE_NEWUSER = 0x10000000
-PR_SET_DUMPABLE = 4
 
 
 class WorkerFailure(RuntimeError):
@@ -110,6 +107,12 @@ def trust_check() -> dict[str, str]:
         or metadata.get("installed_manifest_sha256") != hashlib.sha256(manifest_data).hexdigest()
         or metadata.get("runtime_version") != "3.13.15"):
         raise WorkerFailure("foundation_metadata_shape")
+    apparmor = Path("/etc/apparmor.d/novalton-verification-userns")
+    info = apparmor.lstat()
+    if (not stat.S_ISREG(info.st_mode) or apparmor.is_symlink()
+            or info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != 0o644
+            or apparmor.read_bytes() != (RELEASE / "novalton-userns.apparmor").read_bytes()):
+        raise WorkerFailure("apparmor_policy_drift")
     return metadata
 
 
@@ -164,54 +167,12 @@ def stop_process(process: subprocess.Popen[bytes] | None) -> None:
     process.wait(timeout=3)
 
 
-def _write_map(name: str, uid: int) -> None:
-    if name == "gid_map":
-        try:
-            Path("/proc/self/setgroups").write_text("deny")
-        except FileNotFoundError:
-            pass
-    Path("/proc/self/" + name).write_text(f"0 {uid} 1\n")
-
-
-def _userns_helper(channel: socket.socket) -> None:
-    parent_uid = os.getuid()
-    parent_gid = os.getgid()
-    stage = "unshare"
-    try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        if libc.unshare(CLONE_NEWUSER) != 0:
-            raise OSError(ctypes.get_errno(), "unshare_user")
-        stage = "uid_map"
-        _write_map("uid_map", parent_uid)
-        stage = "gid_map"
-        _write_map("gid_map", parent_gid)
-        libc.prctl(PR_SET_DUMPABLE, 1, 0, 0, 0)
-        stage = "namespace_limit"
-        Path("/proc/sys/user/max_user_namespaces").write_text("1\n")
-        stage = "namespace_open"
-        descriptor = os.open("/proc/self/ns/user", os.O_RDONLY | os.O_CLOEXEC)
-    except OSError as error:
-        # Fixed stage and errno only: no paths, exception text, or environment.
-        channel.send(f"E:{stage}:{error.errno}".encode("ascii"))
-        return
-    try:
-        channel.sendmsg([b"R"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, descriptor.to_bytes(4, "little", signed=True))])
-    finally:
-        os.close(descriptor)
-    channel.recv(1)
-
-
 def prepare_userns(group: Path) -> tuple[int, socket.socket, subprocess.Popen[bytes]]:
+    if not re.fullmatch(r"run-[0-9a-f]{32}", group.name):
+        raise WorkerFailure("userns_protocol")
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-    helper_source = str(RELEASE / "worker/worker.py")
-    helper_code = (
-        "import importlib.util,socket;"
-        f"s=importlib.util.spec_from_file_location('i044b_helper',{helper_source!r});"
-        "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
-        f"m._userns_helper(socket.socket(fileno={child.fileno()}))"
-    )
     process = subprocess.Popen(
-        [str(RELEASE / "runtime/bin/python3.13"), "-I", "-S", "-B", "-c", helper_code],
+        [str(RELEASE / "userns-helper"), str(child.fileno()), group.name[4:]],
         pass_fds=(child.fileno(),), close_fds=True, env={}, stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True,
     )
@@ -220,7 +181,7 @@ def prepare_userns(group: Path) -> tuple[int, socket.socket, subprocess.Popen[by
         parent.settimeout(TIMEOUT)
         message, ancillary, flags, _ = parent.recvmsg(128, socket.CMSG_SPACE(4))
         if not flags and not ancillary and re.fullmatch(
-            rb"E:(unshare|uid_map|gid_map|namespace_limit|namespace_open):[0-9]{1,4}", message
+            rb"E:(precondition|unshare|uid_map|gid_map|private_proc|namespace_limit|namespace_open):[0-9]{1,4}", message
         ):
             raise WorkerFailure("userns_" + message[2:].decode("ascii").replace(":", "_errno_"))
         if message != b"R" or flags or len(ancillary) != 1:
