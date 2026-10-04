@@ -13,6 +13,7 @@ from pathlib import Path
 
 RELEASE = Path("/opt/novalton-verification/i044a-v2")
 SYS_CLONE = 56
+SYS_SETNS = 308
 SYS_SECCOMP = 317
 SYS_CLONE3 = 435
 PR_SET_NO_NEW_PRIVS = 38
@@ -148,6 +149,15 @@ def reap_exact_child(pid: int) -> None:
     raise AssertionError(f"child {pid} was not completely reaped")
 
 
+def setns_invalid_fd_errno() -> int:
+    libc = ctypes.CDLL(None, use_errno=True)
+    ctypes.set_errno(0)
+    result = libc.syscall(SYS_SETNS, ctypes.c_int(-1), ctypes.c_int(0))
+    if result != -1:
+        raise AssertionError("invalid namespace FD unexpectedly accepted")
+    return ctypes.get_errno()
+
+
 def clone3_once(arguments: CloneArgs) -> int:
     libc = ctypes.CDLL(None, use_errno=True)
     ctypes.set_errno(0)
@@ -220,7 +230,11 @@ class I044AInstalledSeccompKernelTests(unittest.TestCase):
         )
         self.assertEqual(bytes(ordinary_arguments), argument_identity)
 
+        setns_before = setns_invalid_fd_errno()
+        self.assertEqual(setns_before, errno.EBADF)
         load_exact_policy(policy)
+        setns_after = setns_invalid_fd_errno()
+        self.assertEqual(setns_after, errno.EPERM)
         mode_after, filters_after = proc_status()
         self.assertEqual(mode_after, 2, "seccomp filter mode must be active")
         self.assertEqual(
@@ -259,6 +273,8 @@ class I044AInstalledSeccompKernelTests(unittest.TestCase):
                     ).hexdigest(),
                     "clone3_post_filter_errno": post_filter_errno,
                     "clone3_pre_filter_errno": pre_filter_errno,
+                    "setns_pre_filter_errno": setns_before,
+                    "setns_post_filter_errno": setns_after,
                     "filters_after": filters_after,
                     "filters_before": filters_before,
                     "mode_after": mode_after,

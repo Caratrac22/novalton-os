@@ -35,6 +35,11 @@ def main() -> None:
     foundation_input_sha256 = hashlib.sha256((RELEASE / "foundation-input.json").read_bytes()).hexdigest()
     evidence = provision.verify_release(RELEASE, foundation_input_sha256)
     provision.verify_apparmor(RELEASE)
+    for name in ("dev", "proc", "source", "scratch"):
+        point = RELEASE / "rootfs" / name
+        assert stat.S_ISDIR(point.lstat().st_mode)
+        assert stat.S_IMODE(point.lstat().st_mode) == 0o555
+        assert (point / ".novalton-mountpoint").read_bytes() == b"novalton.i044b.mountpoint.v1\n"
     anchor = Path("/run/novalton-verification-proc").lstat()
     assert stat.S_ISDIR(anchor.st_mode)
     assert (anchor.st_uid, anchor.st_gid, stat.S_IMODE(anchor.st_mode)) == (0, 0, 0o700)

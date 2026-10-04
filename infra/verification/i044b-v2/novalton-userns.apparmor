@@ -28,10 +28,7 @@ profile novalton-i044b-userns /opt/novalton-verification/i044b-v2/userns-helper 
 profile novalton-i044a-bwrap /opt/novalton-verification/i044b-v2/bwrap-loader flags=(attach_disconnected,mediate_deleted) {
   userns create,
   capability sys_admin,
-  capability setuid,
-  capability setgid,
   capability setpcap,
-  capability sys_chroot,
   capability net_admin,
   network netlink raw,
   /opt/novalton-verification/i044b-v2/bwrap-loader mr,
@@ -43,7 +40,7 @@ profile novalton-i044a-bwrap /opt/novalton-verification/i044b-v2/bwrap-loader fl
   /var/lib/novalton-verification/snapshot-[0-9a-f]*/** r,
   /{,oldroot/}proc/** r,
   /{,oldroot/}proc/@{pid}/{uid_map,gid_map,setgroups} w,
-  /{,oldroot/}dev/{null,zero,random,urandom,tty} rw,
+  /{,oldroot/}dev/{null,zero,full,random,urandom,tty} rw,
   /tmp/ rw,
   / rw,
   /newroot/** rw,
@@ -64,7 +61,7 @@ profile novalton-i044a-bwrap /opt/novalton-verification/i044b-v2/bwrap-loader fl
   mount fstype=tmpfs options=(rw,nosuid,nodev) -> /newroot/{dev,scratch}/,
   mount fstype=proc options=(rw,nosuid,nodev,noexec) -> /newroot/proc/,
   mount fstype=devpts options=(rw,nosuid,noexec) -> /newroot/dev/pts/,
-  mount options=(rw,silent,rbind) /oldroot/dev/{null,zero,random,urandom,tty} -> /newroot/dev/{null,zero,random,urandom,tty},
+  mount options=(rw,silent,rbind) /oldroot/dev/{null,zero,full,random,urandom,tty} -> /newroot/dev/{null,zero,full,random,urandom,tty},
   mount options=(rw,silent,rbind) /oldroot/opt/novalton-verification/i044a-v2/rootfs/ -> /newroot/,
   mount options=(rw,silent,rbind) /oldroot/var/lib/novalton-verification/snapshot-[0-9a-f]*/ -> /newroot/source/,
   # bind-mount.c preserves existing noexec/relatime while adding these flags.

@@ -115,8 +115,8 @@ jobs:
           manifest = json.loads((root / "bundle-manifest.json").read_bytes())
           for destination, source in (installer.FILES | installer.AUXILIARY).items():
               assert hashlib.sha256((root / source).read_bytes()).hexdigest() == manifest[destination]
-          assert installer.FOUNDATION_INPUT_SHA256 == "5e523e94210add1045c0dbe76f52899bfd41e1e0616fcb7fdd7d9b7da59340eb"
-          assert installer.I044A_INPUT_SHA256 == "870c52ee31debd1fd4b4805700a74992c9ac0bca721eb6d95d066bf1f594adf1"
+          assert installer.FOUNDATION_INPUT_SHA256 == "0fbdcd09ba415769899a546a166e2a9e642acf115ac50268a03bb0cf1424756c"
+          assert installer.I044A_INPUT_SHA256 == "05f8173d0598ed39a9032910229be70004baca85452d6b188f267969579db4db"
           PY
 
       - name: Lint I-044A and sandbox files
@@ -160,7 +160,7 @@ jobs:
           set -eu
           sudo apt-get update
           sudo apt-get install --yes build-essential curl libffi-dev pkg-config apparmor
-          sudo apparmor_parser --skip-kernel-load --skip-cache infra/verification/i044b-v2/novalton-userns.apparmor
+          apparmor_parser --skip-kernel-load --skip-cache infra/verification/i044b-v2/novalton-userns.apparmor
 
       - name: Build and install the reviewed I-044B v2 foundation
         run: |
@@ -182,14 +182,14 @@ jobs:
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/tests/accept_apparmor_installed.py "$input/tests/accept_apparmor_installed.py"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/root-handoff.sh "$stage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          fde6a8e5c51be08c4a241a0260bbd7033be623f929b6105a9ebcb434414b26a8  /run/novalton-i044b-v2-reviewed/root-handoff.sh
+          12ea2b794c9427bc215c3ca2b24cad9aad8191f489f84ca1cedc0fd351877a9d  /run/novalton-i044b-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$stage/root-handoff.sh"
 
       - name: Verify exact I-044B v2 identity
         run: |
           set -eu
-          expected=5e523e94210add1045c0dbe76f52899bfd41e1e0616fcb7fdd7d9b7da59340eb
+          expected=0fbdcd09ba415769899a546a166e2a9e642acf115ac50268a03bb0cf1424756c
           base=/opt/novalton-verification/i044b-v2
           test -d "$base"
           test ! -L "$base"
@@ -212,7 +212,7 @@ jobs:
           set -eu
           sudo apt-get update
           sudo apt-get install --yes build-essential curl libffi-dev pkg-config apparmor bpftrace
-          sudo apparmor_parser --skip-kernel-load --skip-cache infra/verification/i044b-v2/novalton-userns.apparmor
+          apparmor_parser --skip-kernel-load --skip-cache infra/verification/i044b-v2/novalton-userns.apparmor
           bstage=/run/novalton-i044b-v2-reviewed
           binput=/run/novalton-i044b-v2-input
           sudo install -d -o root -g root -m 0500 "$bstage" "$binput" "$binput/worker" "$binput/client" "$binput/tests"
@@ -229,7 +229,7 @@ jobs:
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/tests/accept_apparmor_installed.py "$binput/tests/accept_apparmor_installed.py"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/root-handoff.sh "$bstage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          fde6a8e5c51be08c4a241a0260bbd7033be623f929b6105a9ebcb434414b26a8  /run/novalton-i044b-v2-reviewed/root-handoff.sh
+          12ea2b794c9427bc215c3ca2b24cad9aad8191f489f84ca1cedc0fd351877a9d  /run/novalton-i044b-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$bstage/root-handoff.sh"
           # This root-owned static source is the only path admitted by the
@@ -246,7 +246,7 @@ jobs:
           sudo install -d -o root -g root -m 0500 "$stage"
           sudo install -o root -g root -m 0400 infra/verification/i044a-v2/root-handoff.sh "$stage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          1895f5bee4057519ec34d32dbc27e5c5b6e36b999df961e8882b216223d64b34  /run/novalton-i044a-v2-reviewed/root-handoff.sh
+          90d8de5316b05af45569d91abda950adc7cb5b49e3b7d200e0f429312497776d  /run/novalton-i044a-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$stage/root-handoff.sh"
 
@@ -260,9 +260,9 @@ jobs:
           release = Path("/opt/novalton-verification/i044a-v2")
           foundation = json.loads((base / "foundation-metadata.json").read_bytes())
           metadata = json.loads((release / "release-metadata.json").read_bytes())
-          assert foundation["foundation_input_sha256"] == "5e523e94210add1045c0dbe76f52899bfd41e1e0616fcb7fdd7d9b7da59340eb"
+          assert foundation["foundation_input_sha256"] == "0fbdcd09ba415769899a546a166e2a9e642acf115ac50268a03bb0cf1424756c"
           assert foundation["installed_manifest_sha256"] == hashlib.sha256((base / "installed-manifest.json").read_bytes()).hexdigest()
-          assert metadata["i044a_input_sha256"] == "870c52ee31debd1fd4b4805700a74992c9ac0bca721eb6d95d066bf1f594adf1"
+          assert metadata["i044a_input_sha256"] == "05f8173d0598ed39a9032910229be70004baca85452d6b188f267969579db4db"
           assert metadata["foundation_input_sha256"] == foundation["foundation_input_sha256"]
           assert metadata["foundation_installed_manifest_sha256"] == foundation["installed_manifest_sha256"]
           assert metadata["installed_manifest_sha256"] == hashlib.sha256((release / "manifest.json").read_bytes()).hexdigest()

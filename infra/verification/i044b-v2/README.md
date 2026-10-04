@@ -5,7 +5,7 @@ foundation.  It deliberately does **not** claim equivalence with the historical
 host-only `6643fdf075190c785de92ee28e0776915297640208fd091b64045313fe16bd7c`
 release. That digest is historical evidence only. A fresh installation uses
 `foundation_input_sha256`
-`5e523e94210add1045c0dbe76f52899bfd41e1e0616fcb7fdd7d9b7da59340eb`
+`0fbdcd09ba415769899a546a166e2a9e642acf115ac50268a03bb0cf1424756c`
 and generates a separate `installed_manifest_sha256` for its concrete bytes.
 
 Ubuntu's restricted user namespaces are handled by two confined, explicit
@@ -17,7 +17,10 @@ namespaces and sets only its new user namespace's nesting limit. It never accept
 a command, environment or filesystem path. The profile requires enforcement.
 The second profile attaches to the immutable `bwrap-loader`, permits only the
 fixed bubblewrap construction paths and inherits into the seccomp-filtered probe.
-Neither profile adds Linux capabilities to the worker. Its capability bounding
+The loader's only LSM capability permissions are SYS_ADMIN for namespace
+construction, NET_ADMIN for its private loopback, and SETPCAP for dropping its
+bounding set. The fixed non-setuid path needs no SETUID, SETGID or SYS_CHROOT
+permission. Neither profile adds Linux capabilities to the worker. Its capability bounding
 set, NoNewPrivileges, host protections and address-family limits are unchanged.
 The helper also asserts that a mount operation before unshare is denied by the
 kernel, even though its LSM rule permits the operation in a new user namespace.
@@ -49,6 +52,12 @@ After reviewing a source change, `tools/refresh_reviewed_inputs.py` computes the
 foundation, bundle and handoff pins in dependency order. It is unprivileged build
 plumbing, not installed authority. Run it twice to check deterministic output;
 review the complete generated diff before a validation push.
+
+The rootfs precreates the four fixed child mount destinations `dev`, `proc`,
+`source` and `scratch` before it becomes read-only. Each contains a static regular
+marker, covered by both manifests, so I-044A's exact file-derived directory
+closure remains strict. Child mounts hide the markers; no writable rootfs or
+unexpected-directory exception is required.
 
 `provision.py` accepts no arguments, runs only as root, downloads the exact
 CPython source and Ubuntu bubblewrap package named in `runtime.lock.json`, and

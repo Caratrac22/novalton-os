@@ -41,7 +41,11 @@ class I044AStagingSeccompKernelTests(kernel.unittest.TestCase):
         )
         self.assertEqual(bytes(ordinary_arguments), argument_identity)
 
+        setns_before = kernel.setns_invalid_fd_errno()
+        self.assertEqual(setns_before, kernel.errno.EBADF)
         kernel.load_exact_policy(policy)
+        setns_after = kernel.setns_invalid_fd_errno()
+        self.assertEqual(setns_after, kernel.errno.EPERM)
         mode_after, filters_after = kernel.proc_status()
         self.assertEqual(mode_after, 2)
         self.assertEqual(filters_after, filters_before + 1)
@@ -72,6 +76,8 @@ class I044AStagingSeccompKernelTests(kernel.unittest.TestCase):
                     ).hexdigest(),
                     "clone3_post_filter_errno": post_filter_errno,
                     "clone3_pre_filter_errno": pre_filter_errno,
+                    "setns_pre_filter_errno": setns_before,
+                    "setns_post_filter_errno": setns_after,
                     "filters_after": filters_after,
                     "filters_before": filters_before,
                     "mode_after": mode_after,

@@ -272,6 +272,13 @@ def runtime_rootfs(runtime: Path, rootfs: Path, bubblewrap: Path) -> None:
     if not link.exists():
         link.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(loader, link)
+    # These destinations must exist before bwrap makes the rootfs read-only.
+    # Static regular markers preserve I-044A's exact file-derived directory
+    # closure; each is hidden by its fixed child mount during verification.
+    for name in ("dev", "proc", "source", "scratch"):
+        point = rootfs / name
+        point.mkdir(mode=0o755)
+        (point / ".novalton-mountpoint").write_bytes(b"novalton.i044b.mountpoint.v1\n")
 
 
 def manifest(root: Path) -> bytes:

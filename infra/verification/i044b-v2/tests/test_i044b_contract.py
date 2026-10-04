@@ -4,6 +4,7 @@ import ast
 import hashlib
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -67,6 +68,9 @@ assert "proc_anchor_untrusted" in worker_source
 assert "runtime_rootfs(prefix, candidate / \"rootfs\", bubblewrap)" in provision_source
 assert '"novalton-i044b-userns (enforce)\\n"' in helper_source
 policy = (ROOT / "novalton-userns.apparmor").read_text()
+helper_policy, bwrap_policy = policy.split("profile novalton-i044a-bwrap", 1)
+assert set(re.findall(r"^  capability ([a-z_]+),$", helper_policy, re.MULTILINE)) == {"sys_admin", "sys_resource"}
+assert set(re.findall(r"^  capability ([a-z_]+),$", bwrap_policy, re.MULTILINE)) == {"sys_admin", "net_admin", "setpcap"}
 assert "userns create," in policy and "capability sys_admin," in policy
 assert "profile novalton-i044b-userns /opt/novalton-verification/i044b-v2/userns-helper" in policy
 assert "profile novalton-i044a-bwrap /opt/novalton-verification/i044b-v2/bwrap-loader" in policy
@@ -159,4 +163,8 @@ with tempfile.TemporaryDirectory(prefix="i044b-dependency-contract-") as directo
     assert dependencies
     assert any(path.name == "libselinux.so.1" for path in dependencies)
     assert all(not path.is_symlink() for path in rootfs.rglob("*"))
+    for name in ("dev", "proc", "source", "scratch"):
+        point = rootfs / name
+        assert point.is_dir()
+        assert (point / ".novalton-mountpoint").read_bytes() == b"novalton.i044b.mountpoint.v1\n"
 print(json.dumps({"foundation_input_sha256": foundation_input_sha256, "i044b_source_contract": "PASS"}, sort_keys=True))

@@ -55,6 +55,24 @@ def clone_errno(flag: int = 0) -> int:
     return ctypes.get_errno()
 
 
+def namespace_mutations_denied() -> bool:
+    """Exercise the real installed filter, including setns before FD lookup."""
+    if platform.machine() != "x86_64":
+        return False
+    libc = ctypes.CDLL(None, use_errno=True)
+    operations = (
+        (272, ctypes.c_int(0x00020000)),  # unshare(CLONE_NEWNS)
+        (308, ctypes.c_int(-1), ctypes.c_int(0)),  # would be EBADF without seccomp
+        (165, ctypes.c_char_p(None), ctypes.c_char_p(b"/"),
+         ctypes.c_char_p(None), ctypes.c_ulong(0x44000), ctypes.c_void_p()),
+    )
+    for arguments in operations:
+        ctypes.set_errno(0)
+        if libc.syscall(*arguments) != -1 or ctypes.get_errno() != errno.EPERM:
+            return False
+    return True
+
+
 class CloneArgs(ctypes.Structure):
     _fields_ = [(name, ctypes.c_uint64) for name in (
         "flags", "pidfd", "child_tid", "parent_tid", "exit_signal", "stack",
@@ -113,7 +131,7 @@ checks = {
     "host_filesystem_absent": absent("/etc/passwd")
     and absent("/var/lib/novalton-verification/current.json"),
     "mount_escape_absent": absent("/source/../etc/passwd")
-    and absent("/scratch/../etc/passwd"),
+    and absent("/scratch/../etc/passwd") and namespace_mutations_denied(),
     "private_pid": os.getpid() < 10 and not Path("/proc/1/root/etc/passwd").exists(),
     "user_namespace_private": len(uid_map) == 3 and uid_map[2] == "1",
     "network_denied": network_denied(),
