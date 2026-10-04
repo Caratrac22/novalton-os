@@ -95,8 +95,11 @@ int main(int argc, char **argv) {
     write_fixed("/proc/self/gid_map", mapping);
     /* Fresh proc in a child PID+mount namespace: ProtectKernelTunables keeps
      * host proc/sys read-only. Only the new user namespace's limit is changed. */
-    stage = "private_proc";
+    stage = "namespaced_caps";
+    if (syscall(SYS_capget, &header, caps) || !(caps[0].effective & (1U << CAP_SYS_ADMIN))) fail();
+    stage = "private_unshare";
     if (unshare(CLONE_NEWNS | CLONE_NEWPID)) fail();
+    stage = "private_fork";
     pid_t child = fork();
     if (child < 0) fail();
     if (child) {
@@ -105,8 +108,10 @@ int main(int argc, char **argv) {
         if (waitpid(child, &status, 0) != child) return 1;
         return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
     }
-    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)
-        || mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL)) fail();
+    stage = "private_mount";
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)) fail();
+    stage = "private_proc";
+    if (mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL)) fail();
     stage = "namespace_limit";
     write_fixed("/proc/sys/user/max_user_namespaces", "1\n");
     stage = "namespace_open";

@@ -111,8 +111,8 @@ jobs:
           manifest = json.loads((root / "bundle-manifest.json").read_bytes())
           for destination, source in (installer.FILES | installer.AUXILIARY).items():
               assert hashlib.sha256((root / source).read_bytes()).hexdigest() == manifest[destination]
-          assert installer.FOUNDATION_INPUT_SHA256 == "9d84b28f44f3cc19587b30382e737ced3c1df8fb91722177306335ca223249d0"
-          assert installer.I044A_INPUT_SHA256 == "6e874425fa353e80cc2768860357bb5271f836c989238c6d8732a076d4c93173"
+          assert installer.FOUNDATION_INPUT_SHA256 == "ed5fc88315005d2928340d9ecb4a4bb168a31405040941cacfd2e2ac30516297"
+          assert installer.I044A_INPUT_SHA256 == "ed85040c63386b1d9b19b6d8ab4992ece04a0757122d2e050634a2ca453f4ee9"
           PY
 
       - name: Lint I-044A and sandbox files
@@ -178,14 +178,14 @@ jobs:
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/tests/accept_apparmor_installed.py "$input/tests/accept_apparmor_installed.py"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/root-handoff.sh "$stage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          37bf99c12e0184411d64c0e1f24ace617764d1bf963aca4e2698206f17aa51db  /run/novalton-i044b-v2-reviewed/root-handoff.sh
+          5b581b1d6c125415e3b7d5ac87097cc96cd32675b30ba24955d85a3ec52d746f  /run/novalton-i044b-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$stage/root-handoff.sh"
 
       - name: Verify exact I-044B v2 identity
         run: |
           set -eu
-          expected=9d84b28f44f3cc19587b30382e737ced3c1df8fb91722177306335ca223249d0
+          expected=ed5fc88315005d2928340d9ecb4a4bb168a31405040941cacfd2e2ac30516297
           base=/opt/novalton-verification/i044b-v2
           test -d "$base"
           test ! -L "$base"
@@ -225,7 +225,7 @@ jobs:
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/tests/accept_apparmor_installed.py "$binput/tests/accept_apparmor_installed.py"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/root-handoff.sh "$bstage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          37bf99c12e0184411d64c0e1f24ace617764d1bf963aca4e2698206f17aa51db  /run/novalton-i044b-v2-reviewed/root-handoff.sh
+          5b581b1d6c125415e3b7d5ac87097cc96cd32675b30ba24955d85a3ec52d746f  /run/novalton-i044b-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$bstage/root-handoff.sh"
           # This root-owned static source is the only path admitted by the
@@ -242,7 +242,7 @@ jobs:
           sudo install -d -o root -g root -m 0500 "$stage"
           sudo install -o root -g root -m 0400 infra/verification/i044a-v2/root-handoff.sh "$stage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          fcd521f61a6af2a20864bffa7f86e76b9edb02221328c7626e006f57e7c022c4  /run/novalton-i044a-v2-reviewed/root-handoff.sh
+          f2f8852059207223a3150d16d3c0d69678bdfaaa0fef8462dc1f70c68d5513b2  /run/novalton-i044a-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$stage/root-handoff.sh"
 
@@ -256,9 +256,9 @@ jobs:
           release = Path("/opt/novalton-verification/i044a-v2")
           foundation = json.loads((base / "foundation-metadata.json").read_bytes())
           metadata = json.loads((release / "release-metadata.json").read_bytes())
-          assert foundation["foundation_input_sha256"] == "9d84b28f44f3cc19587b30382e737ced3c1df8fb91722177306335ca223249d0"
+          assert foundation["foundation_input_sha256"] == "ed5fc88315005d2928340d9ecb4a4bb168a31405040941cacfd2e2ac30516297"
           assert foundation["installed_manifest_sha256"] == hashlib.sha256((base / "installed-manifest.json").read_bytes()).hexdigest()
-          assert metadata["i044a_input_sha256"] == "6e874425fa353e80cc2768860357bb5271f836c989238c6d8732a076d4c93173"
+          assert metadata["i044a_input_sha256"] == "ed85040c63386b1d9b19b6d8ab4992ece04a0757122d2e050634a2ca453f4ee9"
           assert metadata["foundation_input_sha256"] == foundation["foundation_input_sha256"]
           assert metadata["foundation_installed_manifest_sha256"] == foundation["installed_manifest_sha256"]
           assert metadata["installed_manifest_sha256"] == hashlib.sha256((release / "manifest.json").read_bytes()).hexdigest()
@@ -313,6 +313,11 @@ jobs:
               check=False, capture_output=True, text=True,
               env={"PATH": "/usr/bin:/bin"}, timeout=5,
           )
+          if audit.returncode:
+              audit = subprocess.run(
+                  ["/usr/bin/journalctl", "--kernel", "--since=-10min", "--no-pager"],
+                  check=False, capture_output=True, text=True, env={}, timeout=5,
+              )
           denials = []
           for line in audit.stdout.splitlines():
               if 'apparmor="DENIED"' not in line or not any(
@@ -327,5 +332,5 @@ jobs:
                       fields[name] = found.group(1)
               if fields and fields not in denials:
                   denials.append(fields)
-          print(json.dumps({"host_userns_policy": policy, "apparmor_denials": denials[:16]}, sort_keys=True))
+          print(json.dumps({"host_userns_policy": policy, "apparmor_denials": denials[:16], "audit_exit": audit.returncode}, sort_keys=True))
           PY

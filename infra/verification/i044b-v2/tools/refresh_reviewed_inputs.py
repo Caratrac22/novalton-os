@@ -100,6 +100,7 @@ def main() -> None:
             text = text.replace(old, digest(target.read_bytes()))
         for relative in ("infra/verification/i044a-v2/install.py", "infra/verification/i044a-v2/bundle.tar", "infra/verification/i044a-v2/root-handoff.sh"):
             text = re.sub(rf"(?m)^[0-9a-f]{{64}}  {re.escape(relative)}$", f"{digest((REPO / relative).read_bytes())}  {relative}", text)
+        text = re.sub(r"(?m)^(immutable installer SHA-256: )[0-9a-f]{64}$", rf"\g<1>{digest((A / 'install.py').read_bytes())}", text)
         for generation in ("i044a", "i044b"):
             text = re.sub(rf"(?m)^(\s*)[0-9a-f]{{64}}  /run/novalton-{generation}-v2-reviewed/root-handoff.sh$", rf"\g<1>{digest((B.parent / (generation + '-v2') / 'root-handoff.sh').read_bytes())}  /run/novalton-{generation}-v2-reviewed/root-handoff.sh", text)
         path.write_text(text)

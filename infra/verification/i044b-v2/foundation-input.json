@@ -5,14 +5,14 @@
   "schema": "novalton.i044b.foundation-input.v1",
   "source": {
     "client/i044b_client.py": "439773325ea683d8e98c0143174b2950df88955e049060aed6c3a081310a5fdc",
-    "novalton-userns.apparmor": "d336672706f3037fe936eac82608af61b010271da685c840f94c5b12b27032f0",
+    "novalton-userns.apparmor": "04b5f7b4a880f3fb2bb16c2efc60b8ccfe242363ec5af1f9b1f0686928ca85f6",
     "novalton-verification.service": "3e1c6243f805b1f792154d57d7fd40bf953a232630262695bc414a75fee857df",
     "provision.py": "6f7ac7c00e57dae33a939334a8fa6033e3935698939ee80095e36cf32bb6d654",
     "runtime.lock.json": "0e43622f895e34b29f933743a508698bc7e38fb4d2519bbe38e6d8c8255235c9",
     "tests/accept_apparmor_installed.py": "3d149471078fcc490df41c3aef82c74807e8e84b35a4dc2e7c41bb228407c14f",
     "tests/accept_i044b_installed.py": "79ce8a096aa3590b7613cb8b88fd160fe57beeb9f9a0c6bc28cbf963839ba4fa",
     "var-lib-novalton\\x2dverification.mount": "24b1d592f2b21cef4dd319484375c4aa660135f565aae0604beca2c7c545a438",
-    "worker/userns-helper.c": "1a470f9e66711b2a57b35cfa52c421665736c806e0fa0706d2e02930c14e054e",
-    "worker/worker.py": "8275dde74dec2c5e4472242e4f58f1692f702fbc087cb23cf087060bd3b30ac9"
+    "worker/userns-helper.c": "3bac81bc367bac46817faa87a73bbc52e2f428ba7d37183914133a77fbfea254",
+    "worker/worker.py": "49d6d4f9d29c1d671568d79c4226d1ddd1da3dd6cd73488449a6807a210c5ffd"
   }
 }

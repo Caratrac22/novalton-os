@@ -5,7 +5,7 @@ foundation.  It deliberately does **not** claim equivalence with the historical
 host-only `6643fdf075190c785de92ee28e0776915297640208fd091b64045313fe16bd7c`
 release. That digest is historical evidence only. A fresh installation uses
 `foundation_input_sha256`
-`9d84b28f44f3cc19587b30382e737ced3c1df8fb91722177306335ca223249d0`
+`ed5fc88315005d2928340d9ecb4a4bb168a31405040941cacfd2e2ac30516297`
 and generates a separate `installed_manifest_sha256` for its concrete bytes.
 
 Ubuntu's restricted user namespaces are handled by two confined, explicit
