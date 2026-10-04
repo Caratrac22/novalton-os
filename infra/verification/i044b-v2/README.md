@@ -5,14 +5,16 @@ foundation.  It deliberately does **not** claim equivalence with the historical
 host-only `6643fdf075190c785de92ee28e0776915297640208fd091b64045313fe16bd7c`
 release. That digest is historical evidence only. A fresh installation uses
 `foundation_input_sha256`
-`0c4be7938e1c1d0284fccb1d2440b5e3298a5bf3ca0c9bb0f84af4db27c3863c`
+`aec46813d4f940b49fb30c64d43d738e9eca5c25330db02f06a4c4e75e25d367`
 and generates a separate `installed_manifest_sha256` for its concrete bytes.
 
 Ubuntu's restricted user namespaces are handled by two confined, explicit
 AppArmor profiles. The static `userns-helper` admits only an authenticated
 inherited socket and a 32-hex run identifier, rejects root/initial capabilities,
-requires NoNewPrivileges, and moves itself into that run's bounded cgroup before
-unshare. It maps only its own UID/GID, mounts a private proc in new mount/PID
+requires NoNewPrivileges, rejects callers outside the initial UID/GID maps and
+exact system service cgroup, and moves itself into that run's bounded cgroup
+before unshare. The installed regression rejects the same service UID invoked
+outside that unit; the helper is not a general namespace-FD constructor. It maps only its own UID/GID, mounts a private proc in new mount/PID
 namespaces and sets only its new user namespace's nesting limit. It never accepts
 a command, environment or filesystem path. The profile requires enforcement.
 The second profile attaches to the immutable `bwrap-loader`, permits only the

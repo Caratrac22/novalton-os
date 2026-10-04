@@ -60,6 +60,10 @@ assert "-c" not in worker_source
 assert helper_source.index("uid_t uid = getuid()") < helper_source.index("unshare(CLONE_NEWUSER)")
 assert "PR_GET_NO_NEW_PRIVS" in helper_source and "SYS_capget" in helper_source
 assert "peer.pid != getppid()" in helper_source
+assert '"0::/system.slice/novalton-verification.service/supervisor\\n"' in helper_source
+assert 'initial_mapping("/proc/self/uid_map")' in helper_source
+assert 'initial_mapping("/proc/self/gid_map")' in helper_source
+assert "4294967295ULL" in helper_source
 assert 'write_fixed("/proc/sys/user/max_user_namespaces", "0\\n")' in helper_source
 assert '"/run/novalton-verification-proc/full/self/status"' in helper_source
 assert "anchor_as_host" in helper_source and "anchor_as_namespace" in helper_source
@@ -111,6 +115,7 @@ child.close.assert_called_once()
 parent.settimeout.assert_called_once_with(worker.TIMEOUT)
 for message, expected in (
     (b"E:unshare:1", "userns_unshare_errno_1"),
+    (b"E:service_origin:1", "userns_service_origin_errno_1"),
     (b"E:namespace_limit:30", "userns_namespace_limit_errno_30"),
     (b"E:attacker_path:1", "userns_protocol"),
 ):

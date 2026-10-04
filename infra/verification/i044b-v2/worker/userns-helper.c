@@ -39,6 +39,20 @@ static void write_fixed(const char *path, const char *value) {
     if (close(fd)) fail();
 }
 
+static void initial_mapping(const char *path) {
+    /* Reject namespace-relative UID/cgroup spoofing by an outside caller. */
+    FILE *stream = fopen(path, "re");
+    unsigned long long inside, outside, count;
+    char extra;
+    if (!stream) fail();
+    int fields = fscanf(stream, "%llu %llu %llu %c", &inside, &outside, &count, &extra);
+    if (fclose(stream)) fail();
+    if (fields != 3 || inside || outside || count != 4294967295ULL) {
+        errno = EPERM;
+        fail();
+    }
+}
+
 static void anchor_denied(void) {
     int fd = open("/run/novalton-verification-proc/full/self/status", O_RDONLY | O_CLOEXEC);
     if (fd >= 0) { close(fd); errno = EPERM; fail(); }
@@ -73,6 +87,9 @@ int main(int argc, char **argv) {
     char profile[128];
     if (!profile_stream || !fgets(profile, sizeof profile, profile_stream)
         || fclose(profile_stream) || strcmp(profile, "novalton-i044b-userns (enforce)\n")) fail();
+    stage = "service_origin";
+    initial_mapping("/proc/self/uid_map");
+    initial_mapping("/proc/self/gid_map");
     stage = "anchor_as_host";
     anchor_denied();
     /* LSM allows this operation, kernel initial-namespace capabilities do not.
@@ -85,7 +102,11 @@ int main(int argc, char **argv) {
     char current[4096], group[4200];
     if (!stream || !fgets(current, sizeof current, stream) || fclose(stream)) fail();
     size_t length = strlen(current);
-    if (length < 15 || strcmp(current + length - 12, "/supervisor\n") || strncmp(current, "0::/", 4)) fail();
+    stage = "service_origin";
+    if (strcmp(current, "0::/system.slice/novalton-verification.service/supervisor\n")) {
+        errno = EPERM;
+        fail();
+    }
     current[length - 12] = '\0';
     if (strstr(current, "..")) fail();
     snprintf(group, sizeof group, "/sys/fs/cgroup%s/run-%s/cgroup.procs", current + 3, argv[2]);

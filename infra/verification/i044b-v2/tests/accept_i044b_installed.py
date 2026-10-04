@@ -98,7 +98,24 @@ def main() -> None:
         str(RELEASE / "runtime/bin/python3.13"), "-I", "-S", "-B",
         str(RELEASE / "client/i044b_client.py"),
     ])
-    print(json.dumps({"i044b_installed_acceptance": "PASS", **evidence}, sort_keys=True))
+    # The same dedicated UID outside the exact service cgroup must not be
+    # able to reuse the public helper as a general namespace-FD constructor.
+    outside = checked([
+        "/usr/sbin/runuser", "-u", "novalton-verify", "--",
+        str(RELEASE / "runtime/bin/python3.13"), "-I", "-S", "-B", "-c",
+        "import ctypes,json,socket,subprocess;"
+        "assert ctypes.CDLL(None).prctl(38,1,0,0,0)==0;"
+        "parent,child=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET);"
+        "p=subprocess.Popen(['/opt/novalton-verification/i044b-v2/userns-helper',"
+        "str(child.fileno()),'a'*32],env={},pass_fds=(child.fileno(),));"
+        "child.close();parent.settimeout(5);"
+        "message,rights,flags,_=parent.recvmsg(128,socket.CMSG_SPACE(4));"
+        "assert message==b'E:service_origin:1' and not rights and not flags;"
+        "parent.close();assert p.wait(timeout=5)==1;"
+        "print('outside_service_helper_rejected')",
+    ])
+    assert outside == "outside_service_helper_rejected"
+    print(json.dumps({"i044b_installed_acceptance": "PASS", "outside_service_helper": "REJECTED", **evidence}, sort_keys=True))
 
 
 if __name__ == "__main__":

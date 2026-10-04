@@ -185,7 +185,7 @@ def prepare_userns(group: Path) -> tuple[int, socket.socket, subprocess.Popen[by
         parent.settimeout(TIMEOUT)
         message, ancillary, flags, _ = parent.recvmsg(128, socket.CMSG_SPACE(4))
         if not flags and not ancillary and re.fullmatch(
-            rb"E:(precondition|anchor_as_host|unshare|uid_map|gid_map|namespaced_caps|anchor_as_namespace|private_unshare|private_fork|private_mount|private_proc|namespace_limit|namespace_open):[0-9]{1,4}", message
+            rb"E:(precondition|service_origin|anchor_as_host|unshare|uid_map|gid_map|namespaced_caps|anchor_as_namespace|private_unshare|private_fork|private_mount|private_proc|namespace_limit|namespace_open):[0-9]{1,4}", message
         ):
             raise WorkerFailure("userns_" + message[2:].decode("ascii").replace(":", "_errno_"))
         if message != b"R" or flags or len(ancillary) != 1:
