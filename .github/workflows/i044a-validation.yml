@@ -207,7 +207,7 @@ jobs:
         run: |
           set -eu
           sudo apt-get update
-          sudo apt-get install --yes build-essential curl libffi-dev pkg-config apparmor
+          sudo apt-get install --yes build-essential curl libffi-dev pkg-config apparmor bpftrace
           sudo apparmor_parser --skip-kernel-load --skip-cache infra/verification/i044b-v2/novalton-userns.apparmor
           bstage=/run/novalton-i044b-v2-reviewed
           binput=/run/novalton-i044b-v2-input
@@ -268,7 +268,33 @@ jobs:
         run: sudo /opt/novalton-verification/i044a-v2/rootfs/runtime/bin/python3.13 -I -S -B /run/novalton-i044a-v2-reviewed/tests/test_i044a_seccomp_kernel.py
 
       - name: Run installed I-044A acceptance
-        run: sudo /opt/novalton-verification/i044a-v2/rootfs/runtime/bin/python3.13 -I -S -B /run/novalton-i044a-v2-reviewed/tests/accept_i044a_installed.py
+        run: |
+          set -eu
+          # CI-only read-only kernel observer; never injected into the product.
+          # Numeric syscall outcomes and fixed mount paths only, no environment.
+          service_uid=$(id -u novalton-verify)
+          trace="$RUNNER_TEMP/i044a-namespace-trace.txt"
+          sudo bpftrace -q -e '
+          tracepoint:syscalls:sys_enter_mount
+          /uid == '"$service_uid"' && comm == "bwrap-loader"/
+          { printf("mount target=%s flags=%lu\n", str(args->dir_name), args->flags); }
+          tracepoint:syscalls:sys_exit_mount,
+          tracepoint:syscalls:sys_exit_unshare,
+          tracepoint:syscalls:sys_exit_setns,
+          tracepoint:syscalls:sys_exit_pivot_root,
+          tracepoint:syscalls:sys_exit_execve
+          /uid == '"$service_uid"' && comm == "bwrap-loader"/
+          { printf("%s result=%ld\n", probe, args->ret); }
+          ' > "$trace" 2>&1 &
+          observer=$!
+          finish() {
+            sudo kill -INT "$observer" 2>/dev/null || true
+            wait "$observer" || true
+            tail -80 "$trace"
+          }
+          trap finish EXIT
+          sleep 2
+          sudo /opt/novalton-verification/i044a-v2/rootfs/runtime/bin/python3.13 -I -S -B /run/novalton-i044a-v2-reviewed/tests/accept_i044a_installed.py
 
       - name: Run targeted AppArmor negative and positive acceptance
         run: sudo /opt/novalton-verification/i044b-v2/runtime/bin/python3.13 -I -S -B /opt/novalton-verification/i044b-v2/tests/accept_apparmor_installed.py
