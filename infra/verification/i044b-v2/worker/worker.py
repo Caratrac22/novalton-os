@@ -113,6 +113,10 @@ def trust_check() -> dict[str, str]:
             or info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != 0o644
             or apparmor.read_bytes() != (RELEASE / "novalton-userns.apparmor").read_bytes()):
         raise WorkerFailure("apparmor_policy_drift")
+    anchor = Path("/run/novalton-verification-proc").lstat()
+    if (not stat.S_ISDIR(anchor.st_mode) or anchor.st_uid != 0 or anchor.st_gid != 0
+            or stat.S_IMODE(anchor.st_mode) != 0o700):
+        raise WorkerFailure("proc_anchor_untrusted")
     return metadata
 
 

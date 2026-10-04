@@ -56,6 +56,11 @@ assert "-c" not in worker_source
 assert helper_source.index("uid_t uid = getuid()") < helper_source.index("unshare(CLONE_NEWUSER)")
 assert "PR_GET_NO_NEW_PRIVS" in helper_source and "SYS_capget" in helper_source
 assert "peer.pid != getppid()" in helper_source
+assert 'write_fixed("/proc/sys/user/max_user_namespaces", "0\\n")' in helper_source
+assert '"/run/novalton-verification-proc/full/self/status"' in helper_source
+assert "anchor_as_host" in helper_source and "anchor_as_namespace" in helper_source
+assert "BindPaths=/proc/1/root/proc:/run/novalton-verification-proc/full" in UNIT
+assert "proc_anchor_untrusted" in worker_source
 assert '"novalton-i044b-userns (enforce)\\n"' in helper_source
 policy = (ROOT / "novalton-userns.apparmor").read_text()
 assert "userns create," in policy and "capability sys_admin," in policy

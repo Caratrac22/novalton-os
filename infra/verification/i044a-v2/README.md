@@ -72,11 +72,11 @@ server-owned and the restricted client never gains repository traversal.
 ## Reviewed identities
 
 ```text
-root handoff SHA-256:       493c98081ee56e7368ad63905657093b081aa262bfd15e4861f2af00c0c9d9a4
-immutable installer SHA-256: 02c9536d6f5e05e5d86600866fe602c2963bf2f54a81a8a7d8e6af2c24ffd4ac
-bundle SHA-256:             de04b2bf0d02a59754471f0f60b050897dedb4ce11d4707a7f6e650feb655bc5
-I-044A input SHA-256:       6c1f64ce0c019baa9f5801b51520c23423b5c0a3f11b2e6f89b960aa938e5a47
-foundation input SHA-256:   a0969ea18ac2e52f8aafb21c9b02286d25f3375703e41253e1cbcc102a943eb5
+root handoff SHA-256:       eb24081f747de40551fa499f61d9cf38116f18e3ac21faaf8bef143fe5e5a628
+immutable installer SHA-256: 7862da83154ff7a2e5b4f4f08b3ac318bef58052768377cfe8e92b429f3a943e
+bundle SHA-256:             6dfbd51f8a6b93f632bc7e3d61655dfb4eb0a776926c8392a62a526b8a3fb878
+I-044A input SHA-256:       fbbef1ca19c21f0d7ec68c6f322b0b0dfdddab42d09a9552d9ca58027b559b6e
+foundation input SHA-256:   2d4ccd8e25f8055ed9e85d68bc554a80f37ed318a68ea5d2bf1983a687f66fff
 ```
 
 The two generations and the two installed proofs are deliberately distinct.
@@ -123,9 +123,9 @@ From the repository root, verify the three handoff inputs without privilege:
 
 ```bash
 sha256sum -c <<'EOF'
-493c98081ee56e7368ad63905657093b081aa262bfd15e4861f2af00c0c9d9a4  infra/verification/i044a-v2/root-handoff.sh
-02c9536d6f5e05e5d86600866fe602c2963bf2f54a81a8a7d8e6af2c24ffd4ac  infra/verification/i044a-v2/install.py
-de04b2bf0d02a59754471f0f60b050897dedb4ce11d4707a7f6e650feb655bc5  infra/verification/i044a-v2/bundle.tar
+eb24081f747de40551fa499f61d9cf38116f18e3ac21faaf8bef143fe5e5a628  infra/verification/i044a-v2/root-handoff.sh
+7862da83154ff7a2e5b4f4f08b3ac318bef58052768377cfe8e92b429f3a943e  infra/verification/i044a-v2/install.py
+6dfbd51f8a6b93f632bc7e3d61655dfb4eb0a776926c8392a62a526b8a3fb878  infra/verification/i044a-v2/bundle.tar
 EOF
 ```
 
