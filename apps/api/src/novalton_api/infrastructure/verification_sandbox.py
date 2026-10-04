@@ -15,8 +15,8 @@ from typing import Any, Final
 
 _ENDPOINT: Final = "/run/novalton-verification/control.sock"
 _DEFINITION: Final = "repository-probe-v1"
-_FOUNDATION_INPUT_SHA256: Final = "e46b1d9aea571451b4b1a52c4cf8a860e5e5d78999c14241b33f65499112b8a6"
-_I044A_INPUT_SHA256: Final = "4789071c77293e859c26ae28b375ac1d0e017fe88611a0747e4fbdcc476d33c6"
+_FOUNDATION_INPUT_SHA256: Final = "f8dd991d21f02481755d3c3bf325dacad80ef0f01defaab5a76a7ea7e8078fa5"
+_I044A_INPUT_SHA256: Final = "a6a0ed6df765e35157d9270ec2657f6f2bc9a81ee839dcbd1d92c459595fd90d"
 _MAX_REQUEST_BYTES: Final = 1024
 _MAX_RESPONSE_BYTES: Final = 8192
 _MAX_FILES: Final = 4096

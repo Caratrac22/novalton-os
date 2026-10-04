@@ -4,6 +4,9 @@ import ast
 import hashlib
 import importlib.util
 import json
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -117,4 +120,43 @@ for message, expected in (
             assert error.code == expected
         else:
             raise AssertionError("helper failure must not authorize execution")
+
+# Exercise real ELF dependency resolution in disposable non-production data.
+# A fixture named python3.13 is only input to the library copier, never evidence
+# of runtime version, installed identity, AppArmor or namespace acceptance.
+spec = importlib.util.spec_from_file_location("i044b_contract_provision", ROOT / "provision.py")
+assert spec is not None and spec.loader is not None
+provision = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(provision)
+with tempfile.TemporaryDirectory(prefix="i044b-dependency-contract-") as directory:
+    temporary = Path(directory)
+    runtime = temporary / "runtime"
+    (runtime / "bin").mkdir(parents=True)
+    (runtime / "lib/python3.13/lib-dynload").mkdir(parents=True)
+    shutil.copyfile("/usr/bin/python3", runtime / "bin/python3.13")
+    rootfs = temporary / "rootfs"
+    # Coreutils' ELF supplies real SONAME aliases without requiring a mutable
+    # system bubblewrap package; installed acceptance tests the pinned bwrap.
+    provision.runtime_rootfs(runtime, rootfs, Path("/usr/bin/ls"))
+    loader = temporary / "dedicated-loader"
+    shutil.copy2(rootfs / "lib64/ld-linux-x86-64.so.2", loader)
+    output = subprocess.check_output([
+        str(loader), "--inhibit-cache",
+        "--library-path", str(rootfs / "usr/lib/x86_64-linux-gnu"),
+        "--list", "/usr/bin/ls",
+    ], env={}, text=True)
+    dependencies = []
+    for line in output.splitlines():
+        if "=>" in line:
+            path = Path(line.split("=>", 1)[1].strip().split()[0])
+            if line.split("=>", 1)[0].strip() == "/lib64/ld-linux-x86-64.so.2":
+                assert path == loader
+                assert path.read_bytes() == (rootfs / "lib64/ld-linux-x86-64.so.2").read_bytes()
+            else:
+                assert path.is_relative_to(rootfs)
+            assert path.is_file() and not path.is_symlink()
+            dependencies.append(path)
+    assert dependencies
+    assert any(path.name == "libselinux.so.1" for path in dependencies)
+    assert all(not path.is_symlink() for path in rootfs.rglob("*"))
 print(json.dumps({"foundation_input_sha256": foundation_input_sha256, "i044b_source_contract": "PASS"}, sort_keys=True))

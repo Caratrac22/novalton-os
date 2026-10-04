@@ -46,7 +46,11 @@ def main() -> None:
     for line in dependencies.splitlines():
         if "=>" in line:
             target = Path(line.split("=>", 1)[1].strip().split()[0])
-            assert target.is_relative_to(RELEASE / "rootfs")
+            if line.split("=>", 1)[0].strip() == "/lib64/ld-linux-x86-64.so.2":
+                assert target == RELEASE / "bwrap-loader"
+                assert target.read_bytes() == (RELEASE / "rootfs/lib64/ld-linux-x86-64.so.2").read_bytes()
+            else:
+                assert target.is_relative_to(RELEASE / "rootfs"), str(target)
             assert target.is_file()
     assert evidence["foundation_input_sha256"] == foundation_input_sha256
     assert UNIT.read_bytes() == (RELEASE / "novalton-verification.service").read_bytes()
