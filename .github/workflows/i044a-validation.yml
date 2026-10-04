@@ -9,7 +9,34 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: i044a-validation-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  stop-stale-diagnostic:
+    name: Stop only the stale validation observer
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          python3 - <<'PYCI'
+          import json, os, urllib.request
+          base = "https://api.github.com/repos/Caratrac22/novalton-os/actions/runs/37203033255"
+          headers = {"Authorization": "Bearer " + os.environ["GITHUB_TOKEN"], "Accept": "application/vnd.github+json"}
+          with urllib.request.urlopen(urllib.request.Request(base, headers=headers)) as response:
+              run = json.load(response)
+          assert run["head_branch"] == "ci/i044a-validation"
+          assert run["head_sha"] == "5b4535ab6e638bb2f601c787753dea90b2ee192d"
+          assert run["path"] == ".github/workflows/i044a-validation.yml"
+          if run["status"] != "completed":
+              with urllib.request.urlopen(urllib.request.Request(base + "/cancel", headers=headers, method="POST")) as response:
+                  assert response.status == 202
+          print("Exact stale validation run stopped or already complete")
+          PYCI
   source-and-api:
     name: Source contracts and disposable API database
     runs-on: ubuntu-latest
@@ -268,13 +295,14 @@ jobs:
         run: sudo /opt/novalton-verification/i044a-v2/rootfs/runtime/bin/python3.13 -I -S -B /run/novalton-i044a-v2-reviewed/tests/test_i044a_seccomp_kernel.py
 
       - name: Run installed I-044A acceptance
+        timeout-minutes: 2
         run: |
           set -eu
           # CI-only read-only kernel observer; never injected into the product.
           # Numeric syscall outcomes and fixed mount paths only, no environment.
           service_uid=$(id -u novalton-verify)
           trace="$RUNNER_TEMP/i044a-namespace-trace.txt"
-          sudo bpftrace -q -e '
+          sudo /usr/bin/timeout --signal=TERM --kill-after=3s 45s /usr/bin/bpftrace -q -e '
           tracepoint:syscalls:sys_enter_mount
           /uid == '"$service_uid"' && comm == "bwrap-loader"/
           { printf("mount target=%s flags=%lu\n", str(args->dir_name), args->flags); }
@@ -288,7 +316,7 @@ jobs:
           ' > "$trace" 2>&1 &
           observer=$!
           finish() {
-            sudo kill -INT "$observer" 2>/dev/null || true
+            sudo kill -TERM "$observer" 2>/dev/null || true
             wait "$observer" || true
             tail -80 "$trace"
           }
