@@ -59,8 +59,7 @@ profile novalton-i044a-bwrap /opt/novalton-verification/i044b-v2/bwrap-loader fl
   # AppArmor's path mediation remains a second restriction on trusted setup.
   mount options=(rslave) -> /,
   mount options=(rprivate) -> /oldroot/,
-  mount options=(rbind) -> /newroot/,
-  mount options=(rbind) -> /tmp/newroot/,
+  mount options=(rbind) /tmp/newroot/ -> /tmp/newroot/,
   mount fstype=tmpfs -> /tmp/,
   mount fstype=tmpfs -> /newroot/{dev,scratch}/,
   mount fstype=proc -> /newroot/proc/,
@@ -71,10 +70,9 @@ profile novalton-i044a-bwrap /opt/novalton-verification/i044b-v2/bwrap-loader fl
   pivot_root oldroot=/tmp/oldroot/ /tmp/,
   pivot_root oldroot=/newroot/ /newroot/,
   umount /{oldroot/,},
-  unix (create, getopt, getattr, shutdown) type=stream,
-  unix (send, receive) type=stream peer=(label=novalton-i044a-bwrap),
-  unix (create, getopt, getattr, shutdown) type=seqpacket addr=none,
-  unix (send, receive) type=seqpacket addr=none peer=(label=novalton-i044a-bwrap),
+  # glibc if_nametoindex("lo") uses an anonymous AF_UNIX datagram ioctl socket.
+  # No connect, bind, send or receive permission to host Unix endpoints.
+  unix (create, getopt, getattr) type=dgram addr=none,
   signal (receive) peer=unconfined,
   signal (send) set=(chld) peer=unconfined,
   signal (send, receive) peer=novalton-i044a-bwrap,
