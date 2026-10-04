@@ -3,8 +3,8 @@ set -efu
 
 source=/run/novalton-i044a-v2-input
 stage=/run/novalton-i044a-v2-reviewed
-installer_sha256=53af076934e3c43ac9fed4952e6964f03e2c627b8959d710ff6cc64b53b7f0c6
-bundle_sha256=950b19b316c1db75491d2139830fb71e92e6e8479d495435a701807e71d416ad
+installer_sha256=57d100324d4b8a1fe656fe2ace04c77f52b262746177c69380064191fd9da9ba
+bundle_sha256=d793b1e2ddf54283fe262368912879a2102abee2034cfebe2a9bdea362556de1
 
 test "$(/usr/bin/id -u)" = 0
 test "$(/usr/bin/stat -c '%u:%g:%a' "$stage/root-handoff.sh")" = 0:0:400
