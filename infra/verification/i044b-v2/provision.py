@@ -38,6 +38,7 @@ COPY_FILES = (
     "provision.py",
     "worker/worker.py",
     "worker/userns-helper.c",
+    "worker/bwrap-entry.c",
     "novalton-userns.apparmor",
     "client/i044b_client.py",
     "novalton-verification.service",
@@ -410,11 +411,12 @@ def install() -> str:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(SOURCE / relative, destination)
             shutil.copy2(bubblewrap, candidate / "bwrap")
-            checked([
-                "/usr/bin/cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror",
-                "-o", str(candidate / "userns-helper"),
-                str(SOURCE / "worker/userns-helper.c"),
-            ])
+            for primitive in ("userns-helper", "bwrap-entry"):
+                checked([
+                    "/usr/bin/cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror",
+                    "-o", str(candidate / primitive),
+                    str(SOURCE / "worker" / (primitive + ".c")),
+                ])
             shutil.copy2(Path("/lib64/ld-linux-x86-64.so.2").resolve(), candidate / "bwrap-loader")
             runtime_rootfs(prefix, candidate / "rootfs", bubblewrap)
             shutil.copytree(prefix, candidate / "runtime", symlinks=False)

@@ -1892,7 +1892,11 @@ class I044AContractTests(unittest.TestCase):
 
     def test_launcher_executes_only_release_owned_probe(self):
         launcher = (release / "worker/i044a_launch.py").read_text()
-        self.assertIn('"/runtime/i044a_probe.py"', launcher)
+        self.assertIn('"/opt/novalton-verification/i044b-v2/bwrap-entry"', launcher)
+        self.assertIn("[entry, str(userns_fd), group.name[4:]]", launcher)
+        native = (artifacts.parent / "i044b-v2/worker/bwrap-entry.c").read_text()
+        self.assertIn('"/runtime/i044a_probe.py"', native)
+        self.assertIn('"--seccomp", filter_fd', native)
         self.assertNotIn('"/source/', launcher)
         self.assertNotIn("sys.argv[3]", launcher)
 

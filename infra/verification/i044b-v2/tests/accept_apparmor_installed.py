@@ -52,6 +52,47 @@ def main() -> None:
     assert host_policy.strip() == b"1"
     host_mount = Path("/proc/1/ns/mnt").readlink()
     host_limit = Path("/proc/sys/user/max_user_namespaces").read_bytes()
+    # An ELF loader can start Python with arbitrary arguments. It must never
+    # be an AppArmor attachment granting generic namespace construction.
+    loader_negative = checked([
+        "/usr/sbin/runuser", "-u", "novalton-verify-client", "--",
+        "/usr/bin/env", "-i", "PYTHONHOME=" + str(BASE / "runtime"),
+        str(BASE / "bwrap-loader"), "--inhibit-cache", "--library-path",
+        str(A / "rootfs/usr/lib/x86_64-linux-gnu"),
+        str(BASE / "runtime/bin/python3.13"), "-S", "-B", "-c",
+        """import ctypes,errno,os
+c=ctypes.CDLL(None,use_errno=True)
+uid=os.getuid()
+assert c.prctl(38,1,0,0,0)==0
+assert 'novalton-i044' not in open('/proc/self/attr/current').read()
+if c.unshare(0x10000000)==-1:
+    assert ctypes.get_errno()==errno.EPERM
+else:
+    fd=-1
+    try:
+        fd=os.open('/proc/self/uid_map',os.O_WRONLY)
+        os.write(fd,f'0 {uid} 1\\n'.encode())
+    except OSError as error:
+        assert error.errno==errno.EPERM
+    else:
+        raise AssertionError('generic loader acquired namespace authority')
+    finally:
+        if fd>=0:
+            os.close(fd)
+print('generic_loader_namespace_denied')
+""",
+    ])
+    assert loader_negative.strip() == b"generic_loader_namespace_denied"
+    entry_negative = checked([
+        "/usr/sbin/runuser", "-u", "novalton-verify", "--",
+        str(BASE / "runtime/bin/python3.13"), "-I", "-S", "-B", "-c",
+        ("import ctypes,os,subprocess;assert ctypes.CDLL(None).prctl(38,1,0,0,0)==0;"
+        "fd=os.open('/proc/self/ns/user',os.O_RDONLY);"
+        "r=subprocess.run(['/opt/novalton-verification/i044b-v2/bwrap-entry',"
+        "str(fd),'a'*32],env={},pass_fds=(fd,));"
+        "os.close(fd);assert r.returncode==2;print('outside_service_entry_rejected')"),
+    ])
+    assert entry_negative.strip() == b"outside_service_entry_rejected"
     try:
         checked(["/usr/sbin/apparmor_parser", "--remove", str(POLICY)])
         try:
@@ -85,6 +126,7 @@ def main() -> None:
         "apparmor_negative": "PASS", "apparmor_positive": "PASS", "cleanup": "PASS",
         "worker_host_caps_empty": "PASS", "namespace_escape_denied": "PASS",
         "host_sysctl_unchanged": "PASS", "host_mount_namespace_unchanged": "PASS",
+        "generic_loader_authority_denied": "PASS", "outside_service_entry_rejected": "PASS",
     }))
 
 

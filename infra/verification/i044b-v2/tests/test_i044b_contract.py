@@ -77,7 +77,19 @@ assert set(re.findall(r"^  capability ([a-z_]+),$", helper_policy, re.MULTILINE)
 assert set(re.findall(r"^  capability ([a-z_]+),$", bwrap_policy, re.MULTILINE)) == {"sys_admin", "net_admin", "setpcap"}
 assert "userns create," in policy and "capability sys_admin," in policy
 assert "profile novalton-i044b-userns /opt/novalton-verification/i044b-v2/userns-helper" in policy
-assert "profile novalton-i044a-bwrap /opt/novalton-verification/i044b-v2/bwrap-loader" in policy
+assert "profile novalton-i044a-bwrap /opt/novalton-verification/i044b-v2/bwrap-entry" in policy
+assert "profile novalton-i044a-bwrap /opt/novalton-verification/i044b-v2/bwrap-loader" not in policy
+entry_source = (ROOT / "worker/bwrap-entry.c").read_text()
+for required in (
+    "PR_GET_NO_NEW_PRIVS", "SYS_capget", "4294967295ULL", "NS_GET_OWNER_UID",
+    "NS_GET_NSTYPE", "NSFS_MAGIC", "CLOSE_RANGE_CLOEXEC",
+    '"0::/system.slice/novalton-verification.service/run-%s\\n"',
+    '"--assert-userns-disabled"', '"--seccomp", filter_fd',
+    '"/runtime/i044a_probe.py"', "environment[] = {NULL}",
+):
+    assert required in entry_source
+assert "argc != 3" in entry_source and 'strspn(argv[2], "0123456789abcdef") != 32' in entry_source
+assert "execve(B \"/bwrap-loader\", arguments, environment)" in entry_source
 for forbidden in ("flags=(unconfined", "default_allow", "complain", " ux,", "change_profile", "\n  /** rw,", "\n  mount,", "\n  capability,", "\n  network,"):
     assert forbidden not in policy
 for required in (
@@ -139,6 +151,13 @@ provision = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(provision)
 with tempfile.TemporaryDirectory(prefix="i044b-dependency-contract-") as directory:
     temporary = Path(directory)
+    entry = temporary / "bwrap-entry"
+    subprocess.run([
+        "/usr/bin/cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-o", str(entry), str(ROOT / "worker/bwrap-entry.c"),
+    ], check=True)
+    for arguments in ([], ["3", "../escape"], ["3", "a" * 32, "/bin/sh"]):
+        assert subprocess.run([str(entry), *arguments], env={}, timeout=5, check=False).returncode == 2
     runtime = temporary / "runtime"
     (runtime / "bin").mkdir(parents=True)
     (runtime / "lib/python3.13/lib-dynload").mkdir(parents=True)

@@ -28,49 +28,5 @@ root = release / "rootfs"
 snapshot = Path("/var/lib/novalton-verification") / ("snapshot-" + group.name[4:])
 if not snapshot.is_dir():
     raise SystemExit(2)
-seccomp_fd = os.open(release / "seccomp.bpf", os.O_RDONLY | os.O_CLOEXEC)
-os.set_inheritable(seccomp_fd, True)
-argv = [
-    str(release / "bwrap"),
-    "--userns",
-    str(userns_fd),
-    "--sync-fd",
-    str(userns_fd),
-    "--assert-userns-disabled",
-    "--unshare-ipc",
-    "--unshare-pid",
-    "--unshare-net",
-    "--unshare-uts",
-    "--unshare-cgroup-try",
-    "--die-with-parent",
-    "--new-session",
-    "--cap-drop",
-    "ALL",
-    "--clearenv",
-    "--ro-bind",
-    str(root),
-    "/",
-    "--ro-bind",
-    str(snapshot),
-    "/source",
-    "--proc",
-    "/proc",
-    "--dev",
-    "/dev",
-    "--size",
-    "268435456",
-    "--tmpfs",
-    "/scratch",
-    "--seccomp",
-    str(seccomp_fd),
-    "--chdir",
-    "/scratch",
-    "/runtime/bin/python3.13",
-    "-I",
-    "-S",
-    "-B",
-    "/runtime/i044a_probe.py",
-]
-loader = "/opt/novalton-verification/i044b-v2/bwrap-loader"
-argv = [loader, "--inhibit-cache", "--library-path", str(root / "usr/lib/x86_64-linux-gnu"), *argv]
-os.execve(loader, argv, {})
+entry = "/opt/novalton-verification/i044b-v2/bwrap-entry"
+os.execve(entry, [entry, str(userns_fd), group.name[4:]], {})

@@ -115,8 +115,8 @@ jobs:
           manifest = json.loads((root / "bundle-manifest.json").read_bytes())
           for destination, source in (installer.FILES | installer.AUXILIARY).items():
               assert hashlib.sha256((root / source).read_bytes()).hexdigest() == manifest[destination]
-          assert installer.FOUNDATION_INPUT_SHA256 == "aec46813d4f940b49fb30c64d43d738e9eca5c25330db02f06a4c4e75e25d367"
-          assert installer.I044A_INPUT_SHA256 == "7cfe359e74f17c3213940bf7ad82c02f446ca43f84670b816a035305fb029ee6"
+          assert installer.FOUNDATION_INPUT_SHA256 == "412f4b3fb41491dc3b7b4cb6eb7f2395ab4bbc3a36afd84d803206742fcb8ec2"
+          assert installer.I044A_INPUT_SHA256 == "7d23fe16ce791cfac73b61a2ae3bcf46363e40d9186a7184e15a3212f0eb411e"
           PY
 
       - name: Lint I-044A and sandbox files
@@ -176,20 +176,21 @@ jobs:
           sudo install -o root -g root -m 0400 'infra/verification/i044b-v2/var-lib-novalton\x2dverification.mount' "$input/var-lib-novalton\\x2dverification.mount"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/worker/worker.py "$input/worker/worker.py"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/worker/userns-helper.c "$input/worker/userns-helper.c"
+          sudo install -o root -g root -m 0400 infra/verification/i044b-v2/worker/bwrap-entry.c "$input/worker/bwrap-entry.c"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/novalton-userns.apparmor "$input/novalton-userns.apparmor"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/client/i044b_client.py "$input/client/i044b_client.py"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/tests/accept_i044b_installed.py "$input/tests/accept_i044b_installed.py"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/tests/accept_apparmor_installed.py "$input/tests/accept_apparmor_installed.py"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/root-handoff.sh "$stage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          dd24bb47e9ce00c470f2bd7662fb48998d7cbbddd7f3378249e26c4cf0403060  /run/novalton-i044b-v2-reviewed/root-handoff.sh
+          c9add3a9ffe7fa93ee2bdcb4ef7699bb46e73efbd14d961dc1efcf2caea24824  /run/novalton-i044b-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$stage/root-handoff.sh"
 
       - name: Verify exact I-044B v2 identity
         run: |
           set -eu
-          expected=aec46813d4f940b49fb30c64d43d738e9eca5c25330db02f06a4c4e75e25d367
+          expected=412f4b3fb41491dc3b7b4cb6eb7f2395ab4bbc3a36afd84d803206742fcb8ec2
           base=/opt/novalton-verification/i044b-v2
           test -d "$base"
           test ! -L "$base"
@@ -223,13 +224,14 @@ jobs:
           sudo install -o root -g root -m 0400 'infra/verification/i044b-v2/var-lib-novalton\x2dverification.mount' "$binput/var-lib-novalton\\x2dverification.mount"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/worker/worker.py "$binput/worker/worker.py"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/worker/userns-helper.c "$binput/worker/userns-helper.c"
+          sudo install -o root -g root -m 0400 infra/verification/i044b-v2/worker/bwrap-entry.c "$binput/worker/bwrap-entry.c"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/novalton-userns.apparmor "$binput/novalton-userns.apparmor"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/client/i044b_client.py "$binput/client/i044b_client.py"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/tests/accept_i044b_installed.py "$binput/tests/accept_i044b_installed.py"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/tests/accept_apparmor_installed.py "$binput/tests/accept_apparmor_installed.py"
           sudo install -o root -g root -m 0400 infra/verification/i044b-v2/root-handoff.sh "$bstage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          dd24bb47e9ce00c470f2bd7662fb48998d7cbbddd7f3378249e26c4cf0403060  /run/novalton-i044b-v2-reviewed/root-handoff.sh
+          c9add3a9ffe7fa93ee2bdcb4ef7699bb46e73efbd14d961dc1efcf2caea24824  /run/novalton-i044b-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$bstage/root-handoff.sh"
           # Verify this runner's actual foundation before applying the overlay.
@@ -248,7 +250,7 @@ jobs:
           sudo install -d -o root -g root -m 0500 "$stage"
           sudo install -o root -g root -m 0400 infra/verification/i044a-v2/root-handoff.sh "$stage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          92bf2b17988121e3d1d2778b31fb3ecc52caf06361c903c33efba42cbe07f803  /run/novalton-i044a-v2-reviewed/root-handoff.sh
+          2d1142be82e92878a1fa2c9ea6d67c743284110663524beeda30b5e317f88ccd  /run/novalton-i044a-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$stage/root-handoff.sh"
 
@@ -262,9 +264,9 @@ jobs:
           release = Path("/opt/novalton-verification/i044a-v2")
           foundation = json.loads((base / "foundation-metadata.json").read_bytes())
           metadata = json.loads((release / "release-metadata.json").read_bytes())
-          assert foundation["foundation_input_sha256"] == "aec46813d4f940b49fb30c64d43d738e9eca5c25330db02f06a4c4e75e25d367"
+          assert foundation["foundation_input_sha256"] == "412f4b3fb41491dc3b7b4cb6eb7f2395ab4bbc3a36afd84d803206742fcb8ec2"
           assert foundation["installed_manifest_sha256"] == hashlib.sha256((base / "installed-manifest.json").read_bytes()).hexdigest()
-          assert metadata["i044a_input_sha256"] == "7cfe359e74f17c3213940bf7ad82c02f446ca43f84670b816a035305fb029ee6"
+          assert metadata["i044a_input_sha256"] == "7d23fe16ce791cfac73b61a2ae3bcf46363e40d9186a7184e15a3212f0eb411e"
           assert metadata["foundation_input_sha256"] == foundation["foundation_input_sha256"]
           assert metadata["foundation_installed_manifest_sha256"] == foundation["installed_manifest_sha256"]
           assert metadata["installed_manifest_sha256"] == hashlib.sha256((release / "manifest.json").read_bytes()).hexdigest()

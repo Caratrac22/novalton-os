@@ -24,15 +24,16 @@ profile novalton-i044b-userns /opt/novalton-verification/i044b-v2/userns-helper 
   signal (send, receive) peer=novalton-i044b-userns,
 }
 
-# Attached to a dedicated immutable dynamic loader, not the service Python.
+# Attached only to a static entry that validates service origin and fixed argv.
 # The only executable allowed after namespace construction is the probe Python.
-profile novalton-i044a-bwrap /opt/novalton-verification/i044b-v2/bwrap-loader flags=(attach_disconnected,mediate_deleted) {
+profile novalton-i044a-bwrap /opt/novalton-verification/i044b-v2/bwrap-entry flags=(attach_disconnected,mediate_deleted) {
   userns create,
   capability sys_admin,
   capability setpcap,
   capability net_admin,
   network netlink raw,
-  /opt/novalton-verification/i044b-v2/bwrap-loader mr,
+  /opt/novalton-verification/i044b-v2/bwrap-entry mr,
+  /opt/novalton-verification/i044b-v2/bwrap-loader mrix,
   /opt/novalton-verification/i044b-v2/bwrap mr,
   /opt/novalton-verification/i044b-v2/rootfs/** mr,
   /opt/novalton-verification/i044a-v2/bwrap mr,

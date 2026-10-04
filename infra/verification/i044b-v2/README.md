@@ -5,7 +5,7 @@ foundation.  It deliberately does **not** claim equivalence with the historical
 host-only `6643fdf075190c785de92ee28e0776915297640208fd091b64045313fe16bd7c`
 release. That digest is historical evidence only. A fresh installation uses
 `foundation_input_sha256`
-`aec46813d4f940b49fb30c64d43d738e9eca5c25330db02f06a4c4e75e25d367`
+`412f4b3fb41491dc3b7b4cb6eb7f2395ab4bbc3a36afd84d803206742fcb8ec2`
 and generates a separate `installed_manifest_sha256` for its concrete bytes.
 
 Ubuntu's restricted user namespaces are handled by two confined, explicit
@@ -17,9 +17,15 @@ before unshare. The installed regression rejects the same service UID invoked
 outside that unit; the helper is not a general namespace-FD constructor. It maps only its own UID/GID, mounts a private proc in new mount/PID
 namespaces and sets only its new user namespace's nesting limit. It never accepts
 a command, environment or filesystem path. The profile requires enforcement.
-The second profile attaches to the immutable `bwrap-loader`, permits only the
-fixed bubblewrap construction paths and inherits into the seccomp-filtered probe.
-The loader's only LSM capability permissions are SYS_ADMIN for namespace
+The second profile attaches to a static `bwrap-entry`, never to the generic ELF
+loader or Python. It rejects root/capabilities/non-initial UID/GID maps, requires
+NoNewPrivileges and the exact service run cgroup, validates the supplied owned
+user namespace FD, and executes only fixed bubblewrap arguments with an empty
+environment. Its only inputs are that FD and the 32-hex run identifier; it has no
+command/path/environment API. The generic loader remains unprofiled, so invoking
+Python through it cannot acquire this AppArmor namespace permission. The profile
+inherits into the seccomp-filtered probe.
+The construction profile's only LSM capability permissions are SYS_ADMIN for namespace
 construction, NET_ADMIN for its private loopback, and SETPCAP for dropping its
 bounding set. The fixed non-setuid path needs no SETUID, SETGID or SYS_CHROOT
 permission. Neither profile adds Linux capabilities to the worker. Its capability bounding
@@ -30,7 +36,7 @@ kernel, even though its LSM rule permits the operation in a new user namespace.
 Provisioning installs the exact reviewed policy at
 `/etc/apparmor.d/novalton-verification-userns` and loads only these two profiles.
 Policy bytes and helper source belong to `foundation-input.json`; the compiled
-helper and dedicated loader also belong to the installed manifest. The installer
+helpers and dedicated loader also belong to the installed manifest. The installer
 and installed verifier reject missing, changed or non-enforced policy. No sysctl,
 global AppArmor mode, stock profile or systemd capability grant is changed.
 
