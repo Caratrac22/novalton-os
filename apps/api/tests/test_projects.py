@@ -127,6 +127,9 @@ def test_project_metadata_has_workspace_scope_and_constraints() -> None:
         "workflow_step_handoffs",
         "memory_records",
         "memory_provenance",
+        "agent_challenge_resolutions",
+        "tool_calls",
+        "git_commit_actions",
         "github_publication_actions",
     }
     table = Base.metadata.tables["projects"]
@@ -142,6 +145,15 @@ def test_project_metadata_has_workspace_scope_and_constraints() -> None:
     foreign_key = next(iter(table.c.workspace_id.foreign_keys))
     assert foreign_key.target_fullname == "workspaces.id"
     assert foreign_key.ondelete == "RESTRICT"
+
+    for table_name in ("agent_challenge_resolutions", "tool_calls", "git_commit_actions"):
+        scoped_table = Base.metadata.tables[table_name]
+        assert scoped_table.c.id.primary_key
+        for column_name, target in (("tenant_id", "tenants.id"), ("workspace_id", "workspaces.id")):
+            column = scoped_table.c[column_name]
+            assert not column.nullable
+            assert {key.target_fullname for key in column.foreign_keys} == {target}
+            assert all(key.ondelete == "RESTRICT" for key in column.foreign_keys)
 
 
 def test_create_list_read_update_delete_contract(api: ApiContext) -> None:
