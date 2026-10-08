@@ -7,6 +7,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import struct
 import tempfile
 import threading
@@ -648,6 +649,7 @@ def assert_installed_acceptance_authority(
             (
                 ("is-active", "$UNIT"),
                 ("show", "$UNIT", "-p", "MainPID", "--value"),
+                ("show", "$UNIT", "-p", "MainPID", "--value"),
                 ("show", "$UNIT", "-p", "ControlGroup", "--value"),
                 ("kill", "--kill-whom=main", "--signal=KILL", "$UNIT"),
             )
@@ -755,7 +757,7 @@ def assert_installed_acceptance_authority(
     # checks above provide focused failures; this prevents receiver rebinding or
     # a helper-body rewrite from preserving the visible call spelling.
     reviewed_ast_digest = (
-        "83c65add5235c22593219672f1dbf90964052b0ad8fa8567de292a8e7c60e436"
+        "954b650657ae9b08c8f8846ec0de50ec64de7befa499471e63079e623ebb806d"
     )
     canonical_ast = ast.dump(tree, annotate_fields=True, include_attributes=False)
     case.assertEqual(hashlib.sha256(canonical_ast.encode()).hexdigest(), reviewed_ast_digest)
@@ -933,9 +935,12 @@ class I044AContractTests(unittest.TestCase):
         normal = {
             "accepted": {"state": "accepted", "run_id": "a" * 32},
             "arbitrary_fd": {"error": "invalid_request"},
+            "diagnostic": {"error": "invalid_request"},
             "extra_fd": {"error": "invalid_request"},
+            "health_after_invalid": {"state": "ready", "active": False},
             "other_pid": {"error": "invalid_capability"},
             "replay": {"error": "invalid_capability"},
+            "repeated_invalid": [{"error": "invalid_request"}] * 8,
             "wrong_capability": {"error": "invalid_capability"},
             "wrong_digest": {"error": "invalid_request"},
         }
@@ -1166,14 +1171,265 @@ class I044AContractTests(unittest.TestCase):
         self.assertEqual(i044a.decode(b'{"op":"prepare"}', 0), {"op": "prepare"})
         value = {"op": "verify", "capability": "a" * 64}
         self.assertEqual(i044a.decode(json.dumps(value).encode(), 0), value)
-        for operation in ("health", "diagnostic"):
-            self.assertEqual(
-                i044a.decode(json.dumps({"op": operation}).encode(), 0),
-                {"op": operation},
-            )
+        self.assertEqual(i044a.decode(b'{"op":"health"}', 0), {"op": "health"})
         for operation in ("result", "cancel", "cleanup"):
             value = {"op": operation, "run_id": "b" * 32}
             self.assertEqual(i044a.decode(json.dumps(value).encode(), 0), value)
+
+    @staticmethod
+    def _ipc_worker():
+        worker = i044a.Worker.__new__(i044a.Worker)
+        worker.lock = threading.RLock()
+        worker.pending = None
+        worker.active = None
+        worker.recent = None
+        worker.blocked = False
+        worker.reconciled = False
+        worker.cgroup = Path("/unused-protocol-cgroup")
+        worker.evidence = {
+            "i044a_input_sha256": "a" * 64,
+            "installed_manifest_sha256": "b" * 64,
+            "foundation_input_sha256": "c" * 64,
+            "foundation_installed_manifest_sha256": "d" * 64,
+        }
+        return worker
+
+    def test_b1_all_admitted_operations_have_real_dispatch_handlers(self):
+        # Exercise dispatch only: this does not simulate or claim kernel
+        # acceptance. The execution thread is inspected but never started.
+        worker = self._ipc_worker()
+        foundation_worker = load(
+            "b1_foundation_worker", artifacts.parent / "i044b-v2/worker/worker.py"
+        )
+        operations = set()
+        source = ast.parse((artifacts / "worker/i044a.py").read_text())
+        decoder = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "decode")
+        fields = next(node for node in ast.walk(decoder) if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "fields" for target in node.targets))
+        admitted = set(ast.literal_eval(fields.value))
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(i044a.foundation, "STORAGE", Path(directory)),
+            patch.object(i044a.foundation, "write_state", foundation_worker.write_state),
+            patch.object(i044a, "stage_snapshot", return_value=(Path(directory) / "snapshot", "d" * 64)),
+            patch.object(i044a.threading, "Thread") as thread,
+        ):
+            def dispatch(value):
+                operations.add(value["op"])
+                return worker.request(i044a.decode(json.dumps(value).encode(), 0), 101)
+
+            self.assertFalse(dispatch({"op": "health"})["active"])
+            prepared = dispatch({"op": "prepare"})
+            self.assertEqual(prepared["state"], "prepared")
+            self.assertFalse((Path(directory) / "current.json").exists())
+            accepted = dispatch({"op": "verify", "capability": prepared["capability"]})
+            thread.assert_called_once()
+            self.assertEqual(thread.call_args.kwargs["target"], worker.execute_probe)
+            self.assertTrue(callable(thread.call_args.kwargs["target"]))
+            identity = accepted["run_id"]
+            current = Path(directory) / "current.json"
+            current_bytes = current.read_bytes()
+            self.assertEqual(json.loads(current_bytes), {"run_id": identity})
+            self.assertEqual(dispatch({"op": "result", "run_id": identity})["state"], "running")
+            self.assertEqual(dispatch({"op": "cancel", "run_id": identity})["state"], "running")
+            self.assertTrue(worker.active["cancel"].is_set())
+            first = dispatch({"op": "cleanup", "run_id": identity})
+            self.assertEqual(dispatch({"op": "cleanup", "run_id": identity}), first)
+            self.assertEqual(current.read_bytes(), current_bytes)
+            worker.active = None
+            worker.recent = {"run_id": identity, "state": "cancelled"}
+            foundation_worker.write_state(Path(directory) / "recent.json", worker.recent)
+            current.unlink()
+            self.assertEqual(dispatch({"op": "cleanup", "run_id": identity}), worker.recent)
+            self.assertEqual(dispatch({"op": "cleanup", "run_id": identity}), worker.recent)
+            self.assertFalse(current.exists())
+        self.assertEqual(operations, admitted)
+        self.assertEqual(admitted, {"health", "prepare", "verify", "result", "cancel", "cleanup"})
+
+    def test_b1_internal_dispatch_drift_is_explicit_not_silently_caught(self):
+        worker = self._ipc_worker()
+        with self.assertRaisesRegex(RuntimeError, "unhandled_operation"):
+            worker.request({"op": "diagnostic"}, 101)
+        self.assertIsNone(worker.active)
+        self.assertIsNone(worker.pending)
+        source = ast.parse((artifacts / "worker/i044a.py").read_text())
+        server = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "serve")
+        for handler in (node for node in ast.walk(server) if isinstance(node, ast.ExceptHandler)):
+            self.assertIsNotNone(handler.type)
+            caught = {node.id for node in ast.walk(handler.type) if isinstance(node, ast.Name)}
+            self.assertFalse(caught & {"Exception", "BaseException", "RuntimeError", "AttributeError"})
+
+    def test_b1_raw_authorized_ipc_survives_repeated_invalid_requests(self):
+        # A real Unix server and SO_PEERCRED, with disposable protocol storage.
+        # No sandbox executable, cgroup or production namespace is mocked here.
+        try:
+            with i044a.socket.socket(i044a.socket.AF_UNIX, i044a.socket.SOCK_STREAM):
+                pass
+        except PermissionError:
+            if os.environ.get("CI") == "true":
+                raise  # Hosted CI must exercise real IPC, never skip it.
+            self.skipTest("Work forbids AF_UNIX creation; real IPC is required in CI")
+        foundation_worker = load(
+            "b1_socket_foundation_worker", artifacts.parent / "i044b-v2/worker/worker.py"
+        )
+        with tempfile.TemporaryDirectory(prefix="i044a-b1-protocol-") as directory:
+            root = Path(directory)
+            storage = root / "storage"
+            storage.mkdir()
+            source = root / "source"
+            source.mkdir()
+            (source / "data.txt").write_bytes(b"fixed protocol fixture\n")
+            endpoint = root / "control.sock"
+            policy = root / "policy.json"
+            policy.write_text(json.dumps({"client_gid": os.getgid()}))
+            recent = storage / "recent.json"
+            recent.write_bytes(b'{"run_id":"' + b"f" * 32 + b'","state":"cancelled"}\n')
+            recent_before = recent.read_bytes()
+            with (
+                patch.object(i044a.foundation, "STORAGE", storage),
+                patch.object(i044a.foundation, "ENDPOINT", endpoint),
+                patch.object(i044a.foundation, "POLICY", policy),
+                patch.object(i044a.foundation, "write_state", foundation_worker.write_state),
+                patch.object(i044a, "SNAPSHOT_SOURCE", source),
+            ):
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        i044a.serve(self._ipc_worker(), os.getuid())
+                    except Exception as error:
+                        print(type(error).__name__ + ": " + str(error), file=i044a.sys.stderr, flush=True)
+                    finally:
+                        os._exit(1)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not endpoint.exists():
+                        self.assertLess(time.monotonic(), deadline, "IPC server did not start")
+                        time.sleep(0.01)
+
+                    def raw(value):
+                        with i044a.socket.socket(i044a.socket.AF_UNIX, i044a.socket.SOCK_STREAM) as connection:
+                            connection.settimeout(2)
+                            connection.connect(str(endpoint))
+                            peer = struct.unpack("3i", connection.getsockopt(i044a.socket.SOL_SOCKET, i044a.socket.SO_PEERCRED, 12))
+                            self.assertEqual(peer[:2], (pid, os.getuid()))
+                            connection.sendall(value + b"\n")
+                            response = b""
+                            while not response.endswith(b"\n"):
+                                chunk = connection.recv(8192)
+                                self.assertTrue(chunk, "worker stopped responding")
+                                response += chunk
+                            return json.loads(response)
+
+                    self.assertFalse(raw(b'{"op":"health"}')["active"])
+                    invalid = (
+                        b'{"op":"diagnostic"}', b'{"op":"unknown"}',
+                        b'{"op":"verify"}', b'{"op":"prepare","env":{}}',
+                        b'{"op":"health","op":"diagnostic"}', b'[]', b'not-json',
+                    )
+                    for _ in range(8):
+                        for value in invalid:
+                            self.assertEqual(raw(value), {"error": "invalid_request"})
+                    self.assertFalse(raw(b'{"op":"health"}')["active"])
+                    self.assertFalse((storage / "current.json").exists())
+                    self.assertEqual(recent.read_bytes(), recent_before)
+                    self.assertEqual(list(storage.glob("snapshot-*")), [])
+                    prepared = raw(b'{"op":"prepare"}')
+                    self.assertEqual(prepared["state"], "prepared")
+                    snapshots = list(storage.glob("snapshot-*"))
+                    self.assertEqual(len(snapshots), 1)
+                    snapshot_bytes = (snapshots[0] / "data.txt").read_bytes()
+                    self.assertEqual(raw(b'{"op":"diagnostic"}'), {"error": "invalid_request"})
+                    self.assertTrue(raw(b'{"op":"health"}')["active"])
+                    self.assertEqual((snapshots[0] / "data.txt").read_bytes(), snapshot_bytes)
+                    self.assertFalse((storage / "current.json").exists())
+                    self.assertEqual(recent.read_bytes(), recent_before)
+                    unknown = {"op": "cleanup", "run_id": "e" * 32}
+                    self.assertEqual(raw(json.dumps(unknown).encode()), {"error": "unknown_run"})
+                    self.assertEqual(raw(json.dumps(unknown).encode()), {"error": "unknown_run"})
+                    os.kill(pid, 0)
+                finally:
+                    os.kill(pid, signal.SIGTERM)
+                    os.waitpid(pid, 0)
+                    for snapshot in storage.glob("snapshot-*"):
+                        self.assertTrue(i044a.destroy_snapshot(snapshot))
+
+    def test_b1_serve_repeated_invalid_frames_do_not_reach_dispatch(self):
+        # Provider-free transport fixture; the separate socket test and installed
+        # acceptance prove actual peer credentials on the Ubuntu runner.
+        worker = self._ipc_worker()
+        frames = [b'{"op":"diagnostic"}\n', b'{"op":"unknown"}\n', b'{"op":"verify"}\n'] * 8
+        frames += [b'{"op":"health"}\n']
+
+        class EndOfFixture(Exception):
+            pass
+
+        class Connection:
+            def __init__(self, frame):
+                self.frame = frame
+                self.sent = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def settimeout(self, timeout):
+                pass
+
+            def getsockopt(self, *args):
+                return struct.pack("3i", 101, 123, 456)
+
+            def recvmsg(self, *args):
+                return self.frame, [], 0, None
+
+            def sendall(self, value):
+                self.sent.append(json.loads(value))
+
+        connections = [Connection(frame) for frame in frames]
+
+        class Server:
+            def __enter__(self):
+                self.pending = iter(connections)
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def bind(self, endpoint):
+                pass
+
+            def listen(self, backlog):
+                pass
+
+            def accept(self):
+                try:
+                    return next(self.pending), None
+                except StopIteration:
+                    raise EndOfFixture from None
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = root / "policy.json"
+            policy.write_text('{"client_gid":456}')
+            with (
+                patch.object(i044a.foundation, "ENDPOINT", root / "socket"),
+                patch.object(i044a.foundation, "POLICY", policy),
+                patch.object(i044a.socket, "socket", return_value=Server()),
+                patch.object(i044a.os, "chmod"),
+                patch.object(i044a.os, "chown"),
+                patch.object(i044a.foundation, "write_state") as persist,
+                patch.object(worker, "request", wraps=worker.request) as dispatch,
+                self.assertRaises(EndOfFixture),
+            ):
+                i044a.serve(worker, 123)
+            dispatch.assert_called_once_with({"op": "health"}, 101)
+            persist.assert_not_called()
+            self.assertIsNone(worker.active)
+            self.assertIsNone(worker.pending)
+            self.assertEqual(list(root.iterdir()), [policy])
+        for connection in connections[:-1]:
+            self.assertEqual(connection.sent, [{"error": "invalid_request"}])
+        self.assertFalse(connections[-1].sent[0]["active"])
 
     def test_health_requires_authorized_peer_identity_before_request_decode(self):
         class Connection:

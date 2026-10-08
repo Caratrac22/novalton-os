@@ -163,7 +163,6 @@ def decode(data: bytes, descriptor_count: int) -> dict[str, str]:
     operation = value.get("op")
     fields = {
         "health": {"op"},
-        "diagnostic": {"op"},
         "prepare": {"op"},
         "verify": {"op", "capability"},
         "result": {"op", "run_id"},
@@ -343,41 +342,25 @@ class Worker(foundation.Worker):
                     "reconciled": self.reconciled,
                     "db_mode": False,
                 }
-            if operation in {"diagnostic", "prepare"}:
+            if operation == "prepare":
                 if self.blocked or self.active is not None or self.pending is not None:
                     return {"error": "unavailable" if self.blocked else "busy"}
                 identity = uuid.uuid4().hex
-                if operation == "prepare":
-                    snapshot, source_digest = stage_snapshot(identity)
-                    capability = secrets.token_hex(32)
-                    self.pending = {
-                        "capability": capability,
-                        "expires": time.monotonic() + CAPABILITY_LIFETIME,
-                        "peer_pid": peer_pid,
-                        "snapshot": snapshot,
-                        "source_digest": source_digest,
-                        "run_id": identity,
-                    }
-                    return {
-                        "capability": capability,
-                        "source_digest": source_digest,
-                        "state": "prepared",
-                    }
-                snapshot = None
-                job = {
-                    "run_id": identity,
-                    "cancel": threading.Event(),
-                    "kind": operation,
+                snapshot, source_digest = stage_snapshot(identity)
+                capability = secrets.token_hex(32)
+                self.pending = {
+                    "capability": capability,
+                    "expires": time.monotonic() + CAPABILITY_LIFETIME,
+                    "peer_pid": peer_pid,
                     "snapshot": snapshot,
-                    "source_digest": value.get("source_digest"),
+                    "source_digest": source_digest,
+                    "run_id": identity,
                 }
-                foundation.write_state(
-                    foundation.STORAGE / "current.json", {"run_id": identity}
-                )
-                self.active = job
-                target = self.execute_probe if operation == "verify" else self.execute
-                threading.Thread(target=target, args=(job,), daemon=True).start()
-                return {"run_id": identity, "state": "accepted"}
+                return {
+                    "capability": capability,
+                    "source_digest": source_digest,
+                    "state": "prepared",
+                }
             if operation == "verify":
                 pending = self.pending
                 if (
@@ -400,6 +383,10 @@ class Worker(foundation.Worker):
                 self.active = job
                 threading.Thread(target=self.execute_probe, args=(job,), daemon=True).start()
                 return {"run_id": pending["run_id"], "state": "accepted"}
+            if operation not in {"result", "cancel", "cleanup"}:
+                # Only decoded requests reach dispatch. A decoder/handler drift
+                # is an internal invariant failure, never a client error to hide.
+                raise RuntimeError("unhandled_operation")
             identity = value["run_id"]
             if self.active is not None and identity == self.active["run_id"]:
                 if operation in {"cancel", "cleanup"}:

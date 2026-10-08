@@ -22,9 +22,12 @@ SECURITY_KEYS = frozenset(
     {
         "accepted",
         "arbitrary_fd",
+        "diagnostic",
         "extra_fd",
+        "health_after_invalid",
         "other_pid",
         "replay",
+        "repeated_invalid",
         "wrong_capability",
         "wrong_digest",
     }
@@ -355,6 +358,11 @@ def main() -> None:
         assert health["db_mode"] is False
 
         security = security_response()
+        assert security["diagnostic"] == {"error": "invalid_request"}
+        assert len(security["repeated_invalid"]) == 8
+        assert all(value == {"error": "invalid_request"} for value in security["repeated_invalid"])
+        assert security["health_after_invalid"]["active"] is False
+        assert ctl("show", UNIT, "-p", "MainPID", "--value") == main_pid
         assert security["arbitrary_fd"] == {"error": "invalid_request"}
         assert security["extra_fd"] == {"error": "invalid_request"}
         assert security["wrong_digest"] == {"error": "invalid_request"}
@@ -377,6 +385,8 @@ def main() -> None:
         cancelled = wait_result(identity)
         assert cancelled["state"] == "cancelled" and cancelled["population_empty"]
         assert cancelled["snapshot_destroyed"]
+        assert client("cleanup", identity) == cancelled
+        assert client("cleanup", identity) == cancelled
 
         start = client("start")
         identity = start["run_id"]

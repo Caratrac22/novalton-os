@@ -60,7 +60,10 @@ before the requested operation is sent.
 | `cancel` | No; only an existing run identity | None | Worker | Validated run ID | No |
 | `cleanup` | No; only an existing run identity | None | Worker | Validated run ID | No |
 
-The worker protocol's legacy `diagnostic` request is not exposed by this client.
+The worker rejects the retired `diagnostic` operation at the IPC decoder with
+`invalid_request`, before dispatch or lifecycle mutation. Installed security
+acceptance sends it as the authorized client UID, repeats invalid requests,
+and verifies readiness, no phantom active run, and an unchanged service PID.
 For `verify`, the client requires the terminal result's run ID and source digest
 to match the worker-issued prepare response. The provider-free contract test
 stages a trusted static fixture with the production snapshot code, changes the
@@ -72,10 +75,10 @@ server-owned and the restricted client never gains repository traversal.
 ## Reviewed identities
 
 ```text
-root handoff SHA-256:       2d1142be82e92878a1fa2c9ea6d67c743284110663524beeda30b5e317f88ccd
-immutable installer SHA-256: 7ce947527034dd175be909f1181546131fc61cf6671115e2d15769c2f29f89f8
-bundle SHA-256:             8a56a1e60c9f7365d9931062f57ff536920c7b19738bead2a13c7ed08c7e7f4b
-I-044A input SHA-256:       7d23fe16ce791cfac73b61a2ae3bcf46363e40d9186a7184e15a3212f0eb411e
+root handoff SHA-256:       69302aa4a2f2de636c89684e22f43d7dd5ddea4849565c5c66cdec93a7f67c39
+immutable installer SHA-256: e1fc8f89d7294a1ea5956aeee44a4dec4a5a66d8b48f60789b3d1d3a4f01d645
+bundle SHA-256:             b659f050bc0e44ddf303f2abc11647fa205fdcfb3ba1cc85578a69e19601e0d8
+I-044A input SHA-256:       f45980459fc114a7f2aa6c61c359e8c095a96f166e6393fd6994f74de26ae8df
 foundation input SHA-256:   412f4b3fb41491dc3b7b4cb6eb7f2395ab4bbc3a36afd84d803206742fcb8ec2
 ```
 
@@ -123,9 +126,9 @@ From the repository root, verify the three handoff inputs without privilege:
 
 ```bash
 sha256sum -c <<'EOF'
-2d1142be82e92878a1fa2c9ea6d67c743284110663524beeda30b5e317f88ccd  infra/verification/i044a-v2/root-handoff.sh
-7ce947527034dd175be909f1181546131fc61cf6671115e2d15769c2f29f89f8  infra/verification/i044a-v2/install.py
-8a56a1e60c9f7365d9931062f57ff536920c7b19738bead2a13c7ed08c7e7f4b  infra/verification/i044a-v2/bundle.tar
+69302aa4a2f2de636c89684e22f43d7dd5ddea4849565c5c66cdec93a7f67c39  infra/verification/i044a-v2/root-handoff.sh
+e1fc8f89d7294a1ea5956aeee44a4dec4a5a66d8b48f60789b3d1d3a4f01d645  infra/verification/i044a-v2/install.py
+b659f050bc0e44ddf303f2abc11647fa205fdcfb3ba1cc85578a69e19601e0d8  infra/verification/i044a-v2/bundle.tar
 EOF
 ```
 

@@ -109,6 +109,18 @@ def verify(expected_release: str) -> dict[str, object]:
 
 def security(expected_release: str) -> dict[str, object]:
     health(expected_release)
+    diagnostic = request({"op": "diagnostic"})
+    repeated_invalid = [
+        request(value)
+        for _ in range(2)
+        for value in (
+            {"op": "diagnostic"},
+            {"op": "unknown"},
+            {"op": "verify"},
+            {"op": "prepare", "command": "forbidden"},
+        )
+    ]
+    health_after_invalid = health(expected_release)
     reader, writer = os.pipe()
     try:
         arbitrary = request({"op": "prepare"}, (reader,))
@@ -134,9 +146,12 @@ def security(expected_release: str) -> dict[str, object]:
     return {
         "accepted": accepted,
         "arbitrary_fd": arbitrary,
+        "diagnostic": diagnostic,
         "extra_fd": extra,
+        "health_after_invalid": health_after_invalid,
         "other_pid": other_pid,
         "replay": replay,
+        "repeated_invalid": repeated_invalid,
         "wrong_capability": wrong,
         "wrong_digest": wrong_digest,
     }

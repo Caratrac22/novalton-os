@@ -116,7 +116,7 @@ jobs:
           for destination, source in (installer.FILES | installer.AUXILIARY).items():
               assert hashlib.sha256((root / source).read_bytes()).hexdigest() == manifest[destination]
           assert installer.FOUNDATION_INPUT_SHA256 == "412f4b3fb41491dc3b7b4cb6eb7f2395ab4bbc3a36afd84d803206742fcb8ec2"
-          assert installer.I044A_INPUT_SHA256 == "7d23fe16ce791cfac73b61a2ae3bcf46363e40d9186a7184e15a3212f0eb411e"
+          assert installer.I044A_INPUT_SHA256 == "f45980459fc114a7f2aa6c61c359e8c095a96f166e6393fd6994f74de26ae8df"
           PY
 
       - name: Lint I-044A and sandbox files
@@ -126,6 +126,7 @@ jobs:
             apps/api/src/novalton_api/infrastructure/verification_sandbox.py \
             apps/api/tests/test_verification_sandbox.py \
             infra/verification/i044a-v2/install.py \
+            infra/verification/i044a-v2/client/i044a_client.py \
             infra/verification/i044a-v2/tests/accept_i044a_installed.py \
             infra/verification/i044a-v2/tests/test_i044a_contract.py \
             infra/verification/i044a-v2/tests/test_i044a_seccomp_kernel.py \
@@ -250,7 +251,7 @@ jobs:
           sudo install -d -o root -g root -m 0500 "$stage"
           sudo install -o root -g root -m 0400 infra/verification/i044a-v2/root-handoff.sh "$stage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          2d1142be82e92878a1fa2c9ea6d67c743284110663524beeda30b5e317f88ccd  /run/novalton-i044a-v2-reviewed/root-handoff.sh
+          69302aa4a2f2de636c89684e22f43d7dd5ddea4849565c5c66cdec93a7f67c39  /run/novalton-i044a-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$stage/root-handoff.sh"
 
@@ -266,7 +267,7 @@ jobs:
           metadata = json.loads((release / "release-metadata.json").read_bytes())
           assert foundation["foundation_input_sha256"] == "412f4b3fb41491dc3b7b4cb6eb7f2395ab4bbc3a36afd84d803206742fcb8ec2"
           assert foundation["installed_manifest_sha256"] == hashlib.sha256((base / "installed-manifest.json").read_bytes()).hexdigest()
-          assert metadata["i044a_input_sha256"] == "7d23fe16ce791cfac73b61a2ae3bcf46363e40d9186a7184e15a3212f0eb411e"
+          assert metadata["i044a_input_sha256"] == "f45980459fc114a7f2aa6c61c359e8c095a96f166e6393fd6994f74de26ae8df"
           assert metadata["foundation_input_sha256"] == foundation["foundation_input_sha256"]
           assert metadata["foundation_installed_manifest_sha256"] == foundation["installed_manifest_sha256"]
           assert metadata["installed_manifest_sha256"] == hashlib.sha256((release / "manifest.json").read_bytes()).hexdigest()
