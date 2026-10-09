@@ -147,7 +147,12 @@ async def test_bootstrap_creates_expected_utc_timestamped_scope(database: Databa
     assert result.developer_manager.permissions == []
     assert result.developer_worker.slug == "developer_worker"
     assert result.developer_worker.category == "development"
-    assert result.developer_worker.permissions == []
+    assert result.developer_worker.permissions == [
+        "workspace.list_files",
+        "workspace.read_file",
+        "workspace.search_text",
+        "workspace.replace_text",
+    ]
     assert result.qa_worker.slug == "qa_worker"
     assert result.qa_worker.category == "quality"
     assert result.qa_worker.permissions == []

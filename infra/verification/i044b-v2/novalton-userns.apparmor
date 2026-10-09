@@ -1,0 +1,82 @@
+# No abstractions/includes: reviewed policy bytes are the complete authority.
+# CAP_SYS_ADMIN here is an LSM permission, not a host capability grant.
+@{pid}=[0-9]*
+profile novalton-i044b-userns /opt/novalton-verification/i044b-v2/userns-helper flags=(attach_disconnected,mediate_deleted) {
+  userns create,
+  capability sys_admin,
+  capability sys_resource,
+  /opt/novalton-verification/i044b-v2/userns-helper mr,
+  /proc/@{pid}/cgroup r,
+  /proc/@{pid}/attr/current r,
+  /proc/@{pid}/{uid_map,gid_map} rw,
+  /proc/@{pid}/setgroups w,
+  /proc/@{pid}/ns/user r,
+  # AppArmor resolves the opened anonymous nsfs inode as its filesystem root.
+  / r,
+  /proc/sys/user/max_user_namespaces w,
+  /sys/fs/cgroup/system.slice/novalton-verification.service/run-[0-9a-f]*/cgroup.procs w,
+  mount options=(rprivate) -> /,
+  mount fstype=proc options=(rw,nosuid,nodev,noexec) -> /proc/,
+  unix (getopt) type=seqpacket,
+  unix (send, receive) type=seqpacket peer=(label=unconfined),
+  signal (receive) peer=unconfined,
+  signal (send) set=(chld) peer=unconfined,
+  signal (send, receive) peer=novalton-i044b-userns,
+}
+
+# Attached only to a static entry that validates service origin and fixed argv.
+# The only executable allowed after namespace construction is the probe Python.
+profile novalton-i044a-bwrap /opt/novalton-verification/i044b-v2/bwrap-entry flags=(attach_disconnected,mediate_deleted) {
+  userns create,
+  capability sys_admin,
+  capability setpcap,
+  capability net_admin,
+  network netlink raw,
+  /opt/novalton-verification/i044b-v2/bwrap-entry mr,
+  /opt/novalton-verification/i044b-v2/bwrap-loader mrix,
+  /opt/novalton-verification/i044b-v2/bwrap mr,
+  /opt/novalton-verification/i044b-v2/rootfs/** mr,
+  /opt/novalton-verification/i044a-v2/bwrap mr,
+  /opt/novalton-verification/i044a-v2/rootfs/** mr,
+  /opt/novalton-verification/i044a-v2/seccomp.bpf r,
+  /var/lib/novalton-verification/snapshot-[0-9a-f]*/** r,
+  /{,oldroot/}proc/** r,
+  /{,oldroot/}proc/@{pid}/{uid_map,gid_map,setgroups} w,
+  /{,oldroot/}dev/{null,zero,full,random,urandom,tty} rw,
+  /tmp/ rw,
+  / rw,
+  /newroot/** rw,
+  /tmp/** rw,
+  /oldroot/ r,
+  /runtime/** mr,
+  /runtime/bin/python3.13 ix,
+  /usr/lib/x86_64-linux-gnu/** mr,
+  /lib64/ld-linux-x86-64.so.2 mr,
+  /source/** r,
+  /scratch/** rw,
+  # All mounts require capabilities owned by the newly created user namespace.
+  # AppArmor's path mediation remains a second restriction on trusted setup.
+  mount options=(rw,silent,rslave) -> /,
+  mount options=(rw,silent,rprivate) -> /oldroot/,
+  mount options=(rw,silent,rbind) /tmp/newroot/ -> /tmp/newroot/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) -> /tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) -> /newroot/{dev,scratch}/,
+  mount fstype=proc options=(rw,nosuid,nodev,noexec) -> /newroot/proc/,
+  mount fstype=devpts options=(rw,nosuid,noexec) -> /newroot/dev/pts/,
+  mount options=(rw,silent,rbind) /oldroot/dev/{null,zero,full,random,urandom,tty} -> /newroot/dev/{null,zero,full,random,urandom,tty},
+  mount options=(rw,silent,rbind) /oldroot/opt/novalton-verification/i044a-v2/rootfs/ -> /newroot/,
+  mount options=(rw,silent,rbind) /oldroot/var/lib/novalton-verification/snapshot-[0-9a-f]*/ -> /newroot/source/,
+  # Exact installed bind-mount.c flags: relatime, plus noexec for snapshots.
+  remount options=(ro,bind,remount,silent,nosuid,nodev,relatime) /newroot{,/**},
+  remount options=(ro,bind,remount,silent,nosuid,nodev,noexec,relatime) /newroot{,/**},
+  pivot_root oldroot=/tmp/oldroot/ /tmp/,
+  pivot_root oldroot=/newroot/ /newroot/,
+  umount /{oldroot/,},
+  # glibc if_nametoindex("lo") uses an anonymous AF_UNIX datagram ioctl socket.
+  # No connect, bind, send or receive permission to host Unix endpoints.
+  unix (create, getopt, getattr) type=dgram addr=none,
+  signal (receive) peer=unconfined,
+  signal (send) set=(chld) peer=unconfined,
+  signal (send, receive) peer=novalton-i044a-bwrap,
+  ptrace (read, readby) peer=novalton-i044a-bwrap,
+}
