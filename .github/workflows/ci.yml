@@ -32,6 +32,8 @@ jobs:
       NOVALTON_TEST_DATABASE_URL: postgresql://novalton:novalton_test_only@127.0.0.1:5432/novalton_test
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13.15"
@@ -41,7 +43,28 @@ jobs:
       - run: python -m pip install -e '.[dev]'
       - run: ruff check .
       - run: ruff format --check .
-      - run: pytest
+      - name: Verify disposable database contract
+        run: |
+          test "$NOVALTON_ENV" = test
+          test "${DATABASE_URL##*/}" = novalton_test
+          test "${NOVALTON_TEST_DATABASE_URL##*/}" = novalton_test
+          test ! -e ../../.env.test
+          test "$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc 'SELECT current_database()')" = novalton_test
+
+      - name: Migrate disposable novalton_test database
+        run: alembic -c alembic.ini upgrade head
+
+      - name: Run full API suite on novalton_test
+        run: |
+          set -eu
+          status=0
+          for test_file in $(find tests -maxdepth 1 -type f -name 'test_*.py' | sort); do
+            test "$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc 'SELECT current_database()')" = novalton_test
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+            alembic -c alembic.ini upgrade head
+            python -m pytest -q "$test_file" || status=1
+          done
+          exit "$status"
       - run: pip-audit
   frontend:
     name: Frontend lint and typecheck
