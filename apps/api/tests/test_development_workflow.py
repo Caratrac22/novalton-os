@@ -486,6 +486,238 @@ def test_benign_approval_required_assignment_proceeds_without_manager_authority(
     ]
 
 
+def run_i044_verification_cycle(scope: Scope, root, monkeypatch, *, installed: bool) -> None:
+    """Same governed cycle in unit integration and separately required installed acceptance."""
+    from novalton_api.infrastructure.verification_sandbox import VerificationResult, source_digest
+    from novalton_api.modules.tools import verification
+
+    target = root / "apps/api/src/i044_fixture.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    (root / "apps/api/tests").mkdir(parents=True, exist_ok=True)
+    target.write_text("value = 1\n")
+    (root / "apps/api/tests/test_fixture.py").write_text("assert True\n")
+    monkeypatch.setenv("NOVALTON_WORKSPACE_ROOT", str(root))
+    get_settings.cache_clear()
+    if not installed:
+        monkeypatch.setattr(verification, "WORKSPACE", root)
+
+        class UnitAdapter:
+            def __init__(self, bound):
+                assert bound == root
+
+            def verify(self):
+                failed = "value = (" in target.read_text()
+                return VerificationResult(
+                    run_id=uuid4().hex,
+                    state="passed",
+                    source_digest=source_digest(root),
+                    stale_source=False,
+                    population_empty=True,
+                    scratch_destroyed=True,
+                    snapshot_destroyed=True,
+                    output_truncated=False,
+                    checks={},
+                    verification={
+                        "state": "failed" if failed else "passed",
+                        "checked_files": 2,
+                        "failed_files": int(failed),
+                        "exit_code": int(failed),
+                        "truncated": False,
+                        "diagnostics": [
+                            {
+                                "path": "apps/api/src/i044_fixture.py",
+                                "code": "python_syntax_invalid",
+                            }
+                        ]
+                        if failed
+                        else [],
+                    },
+                )
+
+        monkeypatch.setattr(verification, "VerificationSandboxAdapter", UnitAdapter)
+
+    async def policies():
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                for action, effect in (
+                    ("tool.workspace.read_file", PolicyEffect.ALLOW),
+                    ("tool.workspace.replace_text", PolicyEffect.REQUIRE_CONFIRMATION),
+                    ("tool.verify.backend_syntax", PolicyEffect.ALLOW),
+                ):
+                    await policy_service.create_rule(
+                        session,
+                        data=PolicyRuleCreate(
+                            tenant_id=scope.tenant_id,
+                            workspace_id=scope.workspace_id,
+                            name="I044 exact action",
+                            action_pattern=action,
+                            effect=effect,
+                            actor_type="agent",
+                            resource_type="task",
+                        ),
+                    )
+        finally:
+            await database.dispose()
+
+    async def calls():
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                return list(
+                    await session.scalars(
+                        select(ToolCall)
+                        .where(
+                            ToolCall.tenant_id == scope.tenant_id,
+                        )
+                        .order_by(ToolCall.created_at, ToolCall.id)
+                    )
+                )
+        finally:
+            await database.dispose()
+
+    def proposed(key, name, arguments):
+        return _worker() | {
+            "status": "PARTIAL",
+            "tool_proposals": [
+                {
+                    "call_key": key,
+                    "tool_name": name,
+                    "arguments": arguments,
+                }
+            ],
+        }
+
+    def mutation(key, before, after):
+        return proposed(
+            key,
+            "workspace.replace_text",
+            {
+                "path": "apps/api/src/i044_fixture.py",
+                "search": before,
+                "replacement": after,
+                "expected_matches": 1,
+            },
+        )
+
+    def verify(key):
+        return proposed(
+            key,
+            "verify.backend_syntax",
+            {
+                "command_id": "verify.backend_syntax",
+                "parameters": {},
+            },
+        )
+
+    asyncio.run(policies())
+    provider = QueueProvider(
+        [
+            _manager(),
+            proposed("inspect", "workspace.read_file", {"path": "apps/api/src/i044_fixture.py"}),
+            mutation("mutation", "value = 1", "value = ("),
+            verify("verify-first"),
+            mutation("correction", "value = (", "value = 2"),
+            verify("verify-second"),
+            _worker(),
+            _qa("PASS"),
+        ]
+    )
+    base = f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            created = client.post(
+                f"{base}/projects/{scope.project_id}/tasks/{scope.task_id}/development-workflows",
+                json={
+                    "objective": "Verify a harmless Python fixture.",
+                    "acceptance_criteria": ["The fixture has valid Python syntax."],
+                },
+            )
+            assert created.status_code == 201, created.text
+            run_id = UUID(created.json()["workflow_run"]["id"])
+            advance = f"{base}/workflow-runs/{run_id}/advance"
+            assert client.post(advance).json()["outcome"] == "STEP_COMPLETED"
+            assert client.post(advance).json()["outcome"] == "WAITING_FOR_HUMAN"
+            assert target.read_text() == "value = 1\n"
+            first = [call for call in asyncio.run(calls()) if call.status == "PENDING_APPROVAL"]
+            assert len(first) == 1
+            approved = client.post(f"{base}/approvals/{first[0].approval_request_id}/approve")
+            assert approved.status_code == 200, approved.text
+            assert target.read_text() == "value = (\n"
+            current = asyncio.run(calls())
+            checks = [call for call in current if call.tool_id == "verify.backend_syntax"]
+            assert (
+                len(checks) == 1 and checks[0].result_metadata["verification"]["state"] == "failed"
+            )
+            repair = [call for call in current if call.status == "PENDING_APPROVAL"]
+            assert len(repair) == 1
+            before_replay = len(provider.calls)
+            replay = client.post(f"{base}/approvals/{first[0].approval_request_id}/approve")
+            assert replay.status_code == 200
+            assert len(provider.calls) == before_replay
+            assert target.read_text() == "value = (\n"
+            assert [
+                call.id for call in asyncio.run(calls()) if call.status == "PENDING_APPROVAL"
+            ] == [repair[0].id]
+
+            def approve_again(approval_id):
+                with TestClient(
+                    create_app(provider_registry=ProviderRegistry((provider,)))
+                ) as concurrent_client:
+                    return concurrent_client.post(f"{base}/approvals/{approval_id}/approve")
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                decisions = list(
+                    executor.map(
+                        approve_again, [first[0].approval_request_id, repair[0].approval_request_id]
+                    )
+                )
+            assert all(item.status_code == 200 for item in decisions)
+
+            assert target.read_text() == "value = 2\n"
+            checks = [
+                call for call in asyncio.run(calls()) if call.tool_id == "verify.backend_syntax"
+            ]
+            assert [call.result_metadata["verification"]["state"] for call in checks] == [
+                "failed",
+                "passed",
+            ]
+            assert all(
+                call.result_metadata["workspace_integrity"] == "unchanged" for call in checks
+            )
+            assert (
+                checks[0].result_metadata["source_digest"]
+                != checks[1].result_metadata["source_digest"]
+            )
+            qa = client.post(advance)
+            assert qa.json()["workflow_status"] == "COMPLETED", qa.text
+            assert len(provider.calls) == 8
+            view = client.get(f"{base}/workflow-runs/{run_id}/operator-view").json()
+            tools = [
+                tool
+                for step in view["step_details"]
+                if step["agent_run"]
+                for tool in step["agent_run"]["tool_calls"]
+            ]
+            visible = [tool for tool in tools if tool["tool_name"] == "verify.backend_syntax"]
+            assert [tool["verification"]["state"] for tool in visible] == ["failed", "passed"]
+            assert all(tool["workspace_integrity"] == "unchanged" for tool in visible)
+            assert "UNTRUSTED_DATA:verification" in str(provider.calls[-1])
+            state = asyncio.run(_vertical_state(scope, run_id))
+            assert len(state["model_runs"]) == 8
+            assert [
+                item.recovery_attempt_index
+                for item in state["model_runs"]
+                if item.recovery_attempt_kind == "TOOL_CONTINUATION"
+            ] == [1, 2, 3, 4, 5]
+    finally:
+        get_settings.cache_clear()
+
+
+def test_i044_governed_verify_correct_verify_cycle(scope, tmp_path, monkeypatch):
+    run_i044_verification_cycle(scope, tmp_path, monkeypatch, installed=False)
+
+
 def test_i041_mutation_waits_then_approved_resume_preserves_runs_and_reaches_qa(
     scope: Scope, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

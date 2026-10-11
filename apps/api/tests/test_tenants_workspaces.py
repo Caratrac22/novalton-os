@@ -152,6 +152,7 @@ async def test_bootstrap_creates_expected_utc_timestamped_scope(database: Databa
         "workspace.read_file",
         "workspace.search_text",
         "workspace.replace_text",
+        "verify.backend_syntax",
     ]
     assert result.qa_worker.slug == "qa_worker"
     assert result.qa_worker.category == "quality"

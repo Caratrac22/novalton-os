@@ -53,9 +53,10 @@ def safe_workspace(tmp_path: Path) -> WorkspaceRoot:
     return WorkspaceRoot.approved(tmp_path)
 
 
-def test_registry_contains_only_server_owned_workspace_tools() -> None:
+def test_registry_contains_only_server_owned_tools() -> None:
     definitions = TRUSTED_TOOL_REGISTRY.definitions
     assert [item.tool_id for item in definitions] == [
+        "verify.backend_syntax",
         "workspace.list_files",
         "workspace.read_file",
         "workspace.replace_text",
@@ -734,6 +735,136 @@ async def test_replace_text_changed_preimage_fails_closed(tmp_path: Path) -> Non
         assert result.status == ToolExecutionStatus.FAILED
         assert result.failure_code == "stale_preimage"
         assert path.read_text(encoding="utf-8") == "changed\n"
+    finally:
+        await database.dispose()
+        await _cleanup_gateway(tenant_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("slug", "permission", "permitted", "effect", "failure"),
+    [
+        ("developer_worker", False, True, PolicyEffect.ALLOW, "tool_permission_denied"),
+        ("developer_worker", True, False, PolicyEffect.ALLOW, "tool_permission_denied"),
+        ("developer_manager", True, True, PolicyEffect.ALLOW, "tool_permission_denied"),
+        ("qa_worker", True, True, PolicyEffect.ALLOW, "tool_permission_denied"),
+        ("developer_worker", True, True, PolicyEffect.BLOCK, "tool_policy_blocked"),
+        (
+            "developer_worker",
+            True,
+            True,
+            PolicyEffect.REQUIRE_CONFIRMATION,
+            "verification_policy_requires_allow",
+        ),
+    ],
+)
+async def test_i044_exact_authority_denies_before_execution(
+    safe_workspace,
+    monkeypatch,
+    slug,
+    permission,
+    permitted,
+    effect,
+    failure,
+):
+    from novalton_api.modules.tools.executor import VerificationExecutor
+
+    def forbidden(*args):
+        pytest.fail("denied request reached sandbox")
+
+    monkeypatch.setattr(VerificationExecutor, "execute", forbidden)
+    tenant_id, workspace_id, _, _, run_id = await _seed_gateway(
+        permissions=["verify.backend_syntax"] if permission else []
+    )
+    database = Database.from_settings(Settings())
+    try:
+        async with database.session_factory.begin() as session:
+            run = await session.get(AgentRun, run_id)
+            definition = await session.get(AgentDefinition, run.agent_definition_id)
+            definition.slug = slug
+        await _rule(tenant_id, workspace_id, effect, "tool.verify.backend_syntax")
+        async with database.session_factory() as session:
+            result = await service.execute_proposal(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_run_id=run_id,
+                proposal=ToolProposal(
+                    call_key="verify",
+                    tool_name="verify.backend_syntax",
+                    arguments={"command_id": "verify.backend_syntax", "parameters": {}},
+                ),
+                permitted_tools=["verify.backend_syntax"] if permitted else [],
+                workspace_root=safe_workspace,
+            )
+            assert result.status == ToolExecutionStatus.BLOCKED
+            assert result.failure_code == failure
+            value = await session.get(ToolCall, UUID(result.tool_call_id))
+            assert value.started_at is None and value.approval_request_id is None
+    finally:
+        await database.dispose()
+        await _cleanup_gateway(tenant_id)
+
+
+@pytest.mark.asyncio
+async def test_i044_durable_budget_replay_and_concurrent_requests(safe_workspace, monkeypatch):
+    import asyncio
+
+    from novalton_api.modules.tools.executor import VerificationExecutor
+
+    executions = []
+
+    def bounded(*args):
+        executions.append(1)
+        metadata = {"authority": "UNTRUSTED_DATA", "verification": {"state": "passed"}}
+        return metadata, metadata
+
+    monkeypatch.setattr(VerificationExecutor, "execute", bounded)
+    tenant_id, workspace_id, _, _, run_id = await _seed_gateway(
+        permissions=["verify.backend_syntax"]
+    )
+    database = Database.from_settings(Settings())
+    try:
+        async with database.session_factory.begin() as session:
+            run = await session.get(AgentRun, run_id)
+            definition = await session.get(AgentDefinition, run.agent_definition_id)
+            definition.slug = "developer_worker"
+        await _rule(tenant_id, workspace_id, PolicyEffect.ALLOW, "tool.verify.backend_syntax")
+
+        async def execute(key):
+            async with database.session_factory() as session:
+                return await service.execute_proposal(
+                    session,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    agent_run_id=run_id,
+                    proposal=ToolProposal(
+                        call_key=key,
+                        tool_name="verify.backend_syntax",
+                        arguments={"command_id": "verify.backend_syntax", "parameters": {}},
+                    ),
+                    permitted_tools=["verify.backend_syntax"],
+                    workspace_root=safe_workspace,
+                )
+
+        first = await execute("first")
+        replay = await execute("first")
+        assert replay.tool_call_id == first.tool_call_id
+        assert replay.status == ToolExecutionStatus.SUCCEEDED
+        assert len(executions) == 1
+        concurrent = await asyncio.gather(execute("second"), execute("third"))
+        assert sorted(item.status.value for item in concurrent) == ["BLOCKED", "SUCCEEDED"]
+        assert [
+            item.failure_code for item in concurrent if item.status == ToolExecutionStatus.BLOCKED
+        ] == ["verification_round_limit_exceeded"]
+        assert len(executions) == 2
+        async with database.session_factory() as session:
+            values = list(
+                await session.scalars(select(ToolCall).where(ToolCall.agent_run_id == run_id))
+            )
+            assert len(values) == 3
+            assert len([value for value in values if value.status == "SUCCEEDED"]) == 2
+            assert all(value.completed_at is not None for value in values)
     finally:
         await database.dispose()
         await _cleanup_gateway(tenant_id)

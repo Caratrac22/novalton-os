@@ -1,12 +1,14 @@
 {
   "client/i044a_client.py": "f556ed90b72d27999ea83b26989ea283b7a7f6c3ad9a47cbbafd626869feab9d",
-  "novalton-verification.service": "bc0b23ad459c8c4eda6633c2af2207ab8224c870b4683d33154dce4b2c5f4e56",
-  "rootfs/runtime/i044a_probe.py": "d302e14e94c70447c65bfe026471be4a706561d328afed90c15612d0df1076b4",
+  "novalton-verification.service": "58f46993415e3e400280b7242f2605bb8b4ca2b5a8b6b7f70437d8e35b5fb509",
+  "rootfs/runtime/i044a_backend_syntax.py": "3ef2d6f447f5ac28f19d4420097cc47e35421fbad965ca4f5f2dfa92abd49c31",
+  "rootfs/runtime/i044a_probe.py": "0d89754e5377dc5e914eba4caed3452666096146b687d8625bdb0e4b84a06e3d",
   "tests/accept_i044a_installed.py": "c1294f20b08a443930acffbba6e220370a5a953abcac007476e57e67b29e29ad",
   "tests/fixtures/i044b_worker_contract_shim.py": "237d250106200329435666689f1f8990fcdff4d74da2393004acf937e68f8cae",
+  "tests/test_backend_syntax.py": "9f53a1478ceaca24059217c1fc6c56d51a5043e95f5a75bc8c0e576fff3437b4",
   "tests/test_i044a_contract.py": "6ddce9d43bfa8319495928ea6719318f15403ff60a0c9556909f6261f4f6d502",
   "tests/test_i044a_seccomp_kernel.py": "5ae208276c08a4c2b437bfe153a2a7e7c0e856b76352ca4f737d5a0bbbca0b51",
   "tests/test_i044a_seccomp_staging.py": "3ebde070d755cc4ffac7187680cbf2aea6390ba9fd6e26eba3bc773f6becc748",
-  "worker/i044a.py": "42c88aa8a508c08d8c1fe0b188c0d8bba545c32554b1a945a1b9f3bc5f6e6f74",
+  "worker/i044a.py": "1d35c32dfd0ff404c6d49caa99c08af40e0624403ad5b47837f0307811f8e743",
   "worker/i044a_launch.py": "1f5815ce58e837f53f39ac658160343942cc0cdbb944a0398361583d3e886cb8"
 }

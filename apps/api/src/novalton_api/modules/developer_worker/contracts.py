@@ -27,6 +27,7 @@ DEVELOPER_WORKER_TOOLS = [
     "workspace.read_file",
     "workspace.search_text",
     "workspace.replace_text",
+    "verify.backend_syntax",
 ]
 MAX_PROPOSED_CHANGES = 32
 MAX_ACCEPTANCE_CHECKS = 24
@@ -38,7 +39,7 @@ class DevelopmentAssignmentInput(AgentInput):
     """One trusted bounded assignment with no tool or model override authority."""
 
     expected_output_type: Identifier = DEVELOPER_WORKER_OUTPUT
-    permitted_tools: list[Identifier] = Field(default_factory=list, max_length=4)
+    permitted_tools: list[Identifier] = Field(default_factory=list, max_length=5)
 
     @model_validator(mode="after")
     def validate_worker_input(self) -> Self:

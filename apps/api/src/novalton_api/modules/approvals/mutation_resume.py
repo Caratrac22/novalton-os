@@ -184,6 +184,13 @@ async def approve_and_resume(
             code="approval_resume_context_invalid",
         )
         return approval
+    # A repair cycle can wait for multiple distinct approvals. Claim the
+    # continuation on THIS exact mutation, atomically with the AgentRun CAS;
+    # replaying an earlier approval must never consume a later approval wait.
+    await session.refresh(tool_call, with_for_update=True)
+    if (tool_call.result_metadata or {}).get("continuation_claimed") is True:
+        return approval
+    tool_call.result_metadata = {**(tool_call.result_metadata or {}), "continuation_claimed": True}
     try:
         agent_run = await agent_service.resume_run(
             session,
@@ -194,6 +201,7 @@ async def approve_and_resume(
     except ApplicationError as error:
         if error.code != "agent_run_invalid_transition":
             raise
+        await session.rollback()
         # Another identical approval request already claimed the single continuation.
         return approval
     step_run = await workflow_service.transition_step(
@@ -214,6 +222,17 @@ async def approve_and_resume(
         initial_model_run=initial_model_run,
         evidence=gateway.evidence,
     )
+    if response.status == AgentRunStatus.WAITING_FOR_APPROVAL:
+        await workflow_service.transition_step(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            run_id=workflow_run.id,
+            step_run_id=step_run.id,
+            expected=WorkflowStepRunStatus.RUNNING,
+            target=WorkflowStepRunStatus.WAITING_FOR_APPROVAL,
+        )
+        return approval
     if response.status != AgentRunStatus.SUCCEEDED or response.result is None:
         failure_code = response.error_code or "agent_execution_failed"
         await workflow_service.transition_step(

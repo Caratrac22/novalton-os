@@ -66,6 +66,9 @@ export type OperatorModelRun = Readonly<{
   recovery_attempt_index: number;
 }>;
 export type OperatorToolCall = Readonly<{
+  verification?: Readonly<{ state: "passed" | "failed"; checked_files: number; failed_files: number; exit_code: number | null; failure_code: string | null; truncated: boolean; diagnostics: ReadonlyArray<Readonly<{path: string; code: string}>> }> | null;
+  workspace_integrity?: "unchanged" | null;
+  verified_source_sha256?: string | null;
   id: string;
   tool_name: string;
   status: "PROPOSED" | "PENDING_APPROVAL" | "RUNNING" | "SUCCEEDED" | "FAILED" | "BLOCKED";

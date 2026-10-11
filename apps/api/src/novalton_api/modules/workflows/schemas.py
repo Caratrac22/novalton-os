@@ -21,6 +21,7 @@ from novalton_api.modules.agents.schemas import AgentRunStatus
 from novalton_api.modules.model_usage.schemas import ModelRunStatus
 from novalton_api.modules.policy.schemas import PolicyEffect
 from novalton_api.modules.qa_worker.contracts import QAHumanReviewSummary, QAVerdict
+from novalton_api.modules.tools.verification import SyntaxResult
 
 Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 Summary = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
@@ -287,6 +288,9 @@ class OperatorToolCallResponse(BaseModel):
     after_lines: int | None = None
     diff_preview: str | None = None
     diff_truncated: bool | None = None
+    verification: SyntaxResult | None = None
+    workspace_integrity: Literal["unchanged"] | None = None
+    verified_source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class OperatorAgentRunResponse(BaseModel):

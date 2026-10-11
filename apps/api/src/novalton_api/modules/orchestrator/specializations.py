@@ -46,7 +46,11 @@ FIXED_MANAGER_RESULT_CONSTRAINTS: tuple[ResultShapeConstraint, ...] = (
 # The fixed development workflow needs one evidence source only.  The broader
 # Developer Worker registry remains available to explicitly authorized direct
 # assignments, but this orchestrator never widens that authority.
-_DEVELOPMENT_WORKFLOW_DEVELOPER_TOOLS = ("workspace.read_file", "workspace.replace_text")
+_DEVELOPMENT_WORKFLOW_DEVELOPER_TOOLS = (
+    "workspace.read_file",
+    "workspace.replace_text",
+    "verify.backend_syntax",
+)
 
 
 def _development_workflow_tools() -> list[str]:
@@ -292,6 +296,35 @@ async def persist_next_handoff(
             f"acceptance:{item.criterion_id}:{item.status.value}"
             for item in result.acceptance_checks
         ] + [f"change:{item.kind.value}:{item.path}" for item in result.changes]
+        from pathlib import Path
+
+        from novalton_api.infrastructure.verification_sandbox import (
+            VerificationSandboxError,
+            source_digest,
+        )
+        from novalton_api.modules.tools import repository as tools_repository
+
+        calls = await tools_repository.list_for_agent_runs(
+            session,
+            agent_run_ids=[step_run.agent_run_id] if step_run.agent_run_id else [],
+        )
+        checks = [call for call in calls if call.tool_id == "verify.backend_syntax"][-2:]
+        verification_evidence = []
+        for call in checks:
+            metadata = call.result_metadata or {}
+            state = metadata.get("verification", {}).get("state", "unavailable")
+            if state not in {"passed", "failed"}:
+                state = "unavailable"
+            try:
+                current = source_digest(Path(get_settings().workspace_root or "/nonexistent"))
+                if current != metadata.get("source_digest"):
+                    state = "stale_source"
+            except (OSError, VerificationSandboxError):
+                state = "stale_source"
+            verification_evidence.append(
+                f"UNTRUSTED_DATA:verification:verify.backend_syntax:toolcall:{call.id}:state:{state}"
+            )
+        evidence = verification_evidence + evidence
     else:
         return None
     handoff = WorkflowStepHandoff(

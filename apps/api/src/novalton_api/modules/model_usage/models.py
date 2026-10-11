@@ -59,7 +59,10 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_model_runs_recovery_attempt_kind",
         ),
         CheckConstraint(
-            "recovery_attempt_index BETWEEN 0 AND 1",
+            "(recovery_attempt_kind = 'TOOL_CONTINUATION' "
+            "AND recovery_attempt_index BETWEEN 0 AND 6) "
+            "OR (recovery_attempt_kind <> 'TOOL_CONTINUATION' "
+            "AND recovery_attempt_index BETWEEN 0 AND 1)",
             name="ck_model_runs_recovery_attempt_index",
         ),
         CheckConstraint(

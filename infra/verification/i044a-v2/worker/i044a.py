@@ -496,6 +496,12 @@ class Worker(foundation.Worker):
                     result["checks"] = checks
             except (IndexError, TypeError, ValueError):
                 pass
+            try:
+                verification = json.loads(bytes(stdout).splitlines()[1])["verification"]
+                if isinstance(verification, dict) and len(json.dumps(verification)) <= 1536:
+                    result["verification"] = verification
+            except (IndexError, KeyError, TypeError, ValueError):
+                pass
             if "checks" not in result and termination != "cancelled":
                 failure_code = failure_code or "probe_invalid"
         except foundation.WorkerFailure as error:

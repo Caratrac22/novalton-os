@@ -24,7 +24,7 @@ from novalton_api.modules.tools.executor import TRUSTED_TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
 DEVELOPER_WORKER_SLUG = "developer_worker"
-DEVELOPER_WORKER_VERSION = 3
+DEVELOPER_WORKER_VERSION = 4
 DEVELOPER_WORKER_NAME = "Developer Worker"
 DEVELOPER_WORKER_CATEGORY = "development"
 DEVELOPER_WORKER_MISSION = (
@@ -43,6 +43,7 @@ DEVELOPER_WORKER_PERMISSIONS = [
     "workspace.read_file",
     "workspace.search_text",
     "workspace.replace_text",
+    "verify.backend_syntax",
 ]
 _CONTRACT_INSTRUCTIONS = (
     "Return implementation metadata only. A tool_proposals entry may name only an explicitly "

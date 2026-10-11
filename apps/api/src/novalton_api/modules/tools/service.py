@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.config import get_settings
@@ -41,6 +41,7 @@ from novalton_api.modules.tools.executor import (
     ReplaceTextExecutor,
     ToolExecutionError,
     ToolRegistry,
+    VerificationExecutor,
     WorkspaceRoot,
 )
 from novalton_api.modules.tools.models import ToolCall
@@ -288,6 +289,26 @@ async def execute_proposal(
         agent_run_id=agent_run_id,
         call_key=proposal.call_key,
     )
+    verification_limit = False
+    if existing is None and registered and isinstance(registered.executor, VerificationExecutor):
+        # Serialize budget reservations on the existing AgentRun row. The
+        # subsequently committed ToolCall consumes the slot durably.
+        await session.scalar(select(AgentRun).where(AgentRun.id == run.id).with_for_update())
+        existing = await repository.get_by_key(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            agent_run_id=agent_run_id,
+            call_key=proposal.call_key,
+        )
+        from novalton_api.modules.tools.verification import MAX_VERIFICATIONS
+
+        count = await session.scalar(
+            select(func.count())
+            .select_from(ToolCall)
+            .where(ToolCall.agent_run_id == run.id, ToolCall.tool_id == "verify.backend_syntax")
+        )
+        verification_limit = (count or 0) >= MAX_VERIFICATIONS
     prepared: dict[str, object] | None = None
     if (
         existing is None
@@ -336,6 +357,11 @@ async def execute_proposal(
 
     if registered is None:
         return await _deny(session, value=value, code="unknown_tool_denied")
+    if isinstance(registered.executor, VerificationExecutor):
+        if definition.slug != "developer_worker":
+            return await _deny(session, value=value, code="tool_permission_denied")
+        if verification_limit:
+            return await _deny(session, value=value, code="verification_round_limit_exceeded")
     if parsed_input is None:
         return await _deny(session, value=value, code="invalid_tool_input")
     if prepared is not None and "failure_code" in prepared:
@@ -408,6 +434,14 @@ async def execute_proposal(
                 matched_rule_ids=matched_rule_ids,
             )
         if decision.effect == PolicyEffect.REQUIRE_CONFIRMATION:
+            if isinstance(registered.executor, VerificationExecutor):
+                return await _deny(
+                    session,
+                    value=value,
+                    code="verification_policy_requires_allow",
+                    policy_effect=decision.effect.value,
+                    matched_rule_ids=matched_rule_ids,
+                )
             approval = await approvals_service.create_approval(
                 session,
                 tenant_id=tenant_id,

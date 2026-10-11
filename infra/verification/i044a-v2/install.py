@@ -20,18 +20,21 @@ BASE = Path("/opt/novalton-verification/i044b-v2")
 TARGET = Path("/opt/novalton-verification/i044a-v2")
 UNIT = Path("/etc/systemd/system/novalton-verification.service")
 FOUNDATION_INPUT_SHA256 = "412f4b3fb41491dc3b7b4cb6eb7f2395ab4bbc3a36afd84d803206742fcb8ec2"
-EXPECTED_BUNDLE_DIGEST = "b659f050bc0e44ddf303f2abc11647fa205fdcfb3ba1cc85578a69e19601e0d8"
-EXPECTED_BUNDLE_MANIFEST_DIGEST = "f45980459fc114a7f2aa6c61c359e8c095a96f166e6393fd6994f74de26ae8df"
+EXPECTED_BUNDLE_DIGEST = "b48fa415cdde2abc8d15ad488cb39846c0740862e050dc055d0a6e954a0431a1"
+EXPECTED_BUNDLE_MANIFEST_DIGEST = "342ef562d05652d2d41f82d32895529e78cbf9bda00dd11b730f769412d2fa88"
 I044A_INPUT_SHA256 = EXPECTED_BUNDLE_MANIFEST_DIGEST
+ALLOWED_PREDECESSOR_INPUT_SHA256 = "f45980459fc114a7f2aa6c61c359e8c095a96f166e6393fd6994f74de26ae8df"
 ALLOWED_PREDECESSOR_RELEASE_DIGEST = "71fa6df9100246b5b37a541e808936f87b05b9084b2446200648b256f867fdd2"
 FILES = {
     "client/i044a_client.py": "client/i044a_client.py",
     "novalton-verification.service": "novalton-verification.service",
     "rootfs/runtime/i044a_probe.py": "worker/adversarial_probe.py",
+    "rootfs/runtime/i044a_backend_syntax.py": "worker/backend_syntax.py",
     "worker/i044a.py": "worker/i044a.py",
     "worker/i044a_launch.py": "worker/i044a_launch.py",
 }
 AUXILIARY = {
+    "tests/test_backend_syntax.py": "tests/test_backend_syntax.py",
     "tests/accept_i044a_installed.py": "tests/accept_i044a_installed.py",
     "tests/test_i044a_contract.py": "tests/test_i044a_contract.py",
     "tests/fixtures/i044b_worker_contract_shim.py": "tests/fixtures/i044b_worker_contract_shim.py",
@@ -179,7 +182,8 @@ def exists(path: Path) -> bool:
 
 
 def verify_release(
-    release: Path, expected_digest: str | None = None, *, ownership: bool = True
+    release: Path, expected_digest: str | None = None, *, ownership: bool = True,
+    expected_input: str | None = None
 ) -> dict[str, str]:
     info = release.lstat()
     if (
@@ -215,7 +219,7 @@ def verify_release(
         "schema", "i044a_input_sha256", "foundation_input_sha256",
         "foundation_installed_manifest_sha256", "installed_manifest_sha256",
     } or metadata.get("schema") != "novalton.i044a.release-metadata.v1"
-        or metadata.get("i044a_input_sha256") != I044A_INPUT_SHA256
+        or metadata.get("i044a_input_sha256") != (expected_input or I044A_INPUT_SHA256)
         or metadata.get("foundation_input_sha256") != FOUNDATION_INPUT_SHA256
         or not isinstance(metadata.get("foundation_installed_manifest_sha256"), str)
         or len(metadata["foundation_installed_manifest_sha256"]) != 64
@@ -379,6 +383,13 @@ def verify_unit_bytes(expected: bytes) -> None:
         raise RuntimeError("unit_restore_mismatch")
 
 
+def verify_allowed_predecessor(release: Path) -> dict[str, str]:
+    try:
+        return verify_release(release, ALLOWED_PREDECESSOR_RELEASE_DIGEST)
+    except RuntimeError:
+        return verify_release(release, expected_input=ALLOWED_PREDECESSOR_INPUT_SHA256)
+
+
 def target_state() -> str:
     if not exists(TARGET):
         return "absent"
@@ -386,7 +397,7 @@ def target_state() -> str:
         verify_release(TARGET)
     except RuntimeError as candidate_error:
         try:
-            verify_release(TARGET, ALLOWED_PREDECESSOR_RELEASE_DIGEST)
+            verify_allowed_predecessor(TARGET)
         except RuntimeError:
             raise RuntimeError("target_release_untrusted") from candidate_error
         return "predecessor"
@@ -405,11 +416,11 @@ def restore_unit_and_service(previous_unit: bytes) -> None:
 def recover_unchanged_predecessor(previous_unit: bytes) -> None:
     """Recover a predecessor after a stop attempt without release mutation."""
     try:
-        verify_release(TARGET, ALLOWED_PREDECESSOR_RELEASE_DIGEST)
+        verify_allowed_predecessor(TARGET)
         verify_unit_bytes(previous_unit)
         checked(["/usr/bin/systemctl", "start", "novalton-verification.service"])
         checked(["/usr/bin/systemctl", "is-active", "novalton-verification.service"])
-        verify_release(TARGET, ALLOWED_PREDECESSOR_RELEASE_DIGEST)
+        verify_allowed_predecessor(TARGET)
         verify_unit_bytes(previous_unit)
     except Exception as rollback_error:
         raise RuntimeError("service_rollback_failed") from rollback_error
@@ -419,14 +430,14 @@ def restore_predecessor(previous_unit: bytes, backup: Path) -> None:
     try:
         # Never quarantine TARGET unless the independently revalidated backup
         # proves that an exact predecessor is available for restoration.
-        verify_release(backup, ALLOWED_PREDECESSOR_RELEASE_DIGEST)
+        verify_allowed_predecessor(backup)
         checked(["/usr/bin/systemctl", "stop", "novalton-verification.service"])
         if exists(TARGET):
             failed = reserve_sibling(".i044a-v2-failed-")
             move_sibling(TARGET, failed)
         move_sibling(backup, TARGET)
         restore_unit_and_service(previous_unit)
-        verify_release(TARGET, ALLOWED_PREDECESSOR_RELEASE_DIGEST)
+        verify_allowed_predecessor(TARGET)
         verify_unit_bytes(previous_unit)
     except Exception as rollback_error:
         raise RuntimeError("service_rollback_failed") from rollback_error

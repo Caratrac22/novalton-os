@@ -116,6 +116,15 @@ class WorkspaceReplaceTextArguments(WorkspaceReplaceTextInput):
     """Closed proposal arguments for workspace.replace_text."""
 
 
+class VerificationParameters(ToolContract):
+    """V1 deliberately admits no caller-selected target or execution settings."""
+
+
+class VerificationArguments(ToolContract):
+    command_id: Literal["verify.backend_syntax"]
+    parameters: VerificationParameters
+
+
 class ToolProposal(ToolContract):
     """A model-authored proposal with a closed, tool-specific argument schema."""
 
@@ -125,12 +134,14 @@ class ToolProposal(ToolContract):
         "workspace.read_file",
         "workspace.search_text",
         "workspace.replace_text",
+        "verify.backend_syntax",
     ]
     arguments: (
         WorkspaceListFilesArguments
         | WorkspaceReadFileArguments
         | WorkspaceSearchTextArguments
         | WorkspaceReplaceTextArguments
+        | VerificationArguments
     )
 
     @model_validator(mode="before")
@@ -144,6 +155,7 @@ class ToolProposal(ToolContract):
             "workspace.read_file": WorkspaceReadFileArguments,
             "workspace.search_text": WorkspaceSearchTextArguments,
             "workspace.replace_text": WorkspaceReplaceTextArguments,
+            "verify.backend_syntax": VerificationArguments,
         }
         model = argument_models.get(tool_name)
         if model is None:

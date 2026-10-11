@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - ci/i044a-validation
+      - feature/i044-controlled-verification
   workflow_dispatch:
 
 permissions:
@@ -70,8 +71,12 @@ jobs:
       - name: Run focused sandbox adapter tests
         run: python -m pytest -q apps/api/tests/test_verification_sandbox.py
 
-      - name: Migrate disposable novalton_test database
-        run: alembic -c apps/api/alembic.ini upgrade head
+      - name: Migrate and round-trip the I-044 schema on disposable novalton_test
+        run: |
+          test "$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc 'SELECT current_database()')" = novalton_test
+          alembic -c apps/api/alembic.ini upgrade head
+          alembic -c apps/api/alembic.ini downgrade 20260902_0031
+          alembic -c apps/api/alembic.ini upgrade head
 
       - name: Run full API suite on novalton_test
         run: |
@@ -90,6 +95,7 @@ jobs:
         run: |
           python -I -S -B infra/verification/i044b-v2/tests/test_i044b_contract.py
           python -I -S -B infra/verification/i044a-v2/tests/test_i044a_contract.py
+          python -I -S -B infra/verification/i044a-v2/tests/test_backend_syntax.py
           python -I -S -B infra/verification/i044a-v2/tests/test_i044a_seccomp_staging.py
 
       - name: Verify I-044A bundle closure and reviewed runtime pin
@@ -116,7 +122,7 @@ jobs:
           for destination, source in (installer.FILES | installer.AUXILIARY).items():
               assert hashlib.sha256((root / source).read_bytes()).hexdigest() == manifest[destination]
           assert installer.FOUNDATION_INPUT_SHA256 == "412f4b3fb41491dc3b7b4cb6eb7f2395ab4bbc3a36afd84d803206742fcb8ec2"
-          assert installer.I044A_INPUT_SHA256 == "f45980459fc114a7f2aa6c61c359e8c095a96f166e6393fd6994f74de26ae8df"
+          assert installer.I044A_INPUT_SHA256 == "342ef562d05652d2d41f82d32895529e78cbf9bda00dd11b730f769412d2fa88"
           PY
 
       - name: Lint I-044A and sandbox files
@@ -203,6 +209,31 @@ jobs:
     needs:
       - i044b-foundation
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: novalton_test
+          POSTGRES_USER: novalton_ci
+          POSTGRES_PASSWORD: ci-${{ github.run_id }}-${{ github.run_attempt }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U novalton_ci -d novalton_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NOVALTON_ENV: test
+      DATABASE_URL: postgresql://novalton_ci:ci-${{ github.run_id }}-${{ github.run_attempt }}@127.0.0.1:5432/novalton_test
+      NOVALTON_TEST_DATABASE_URL: postgresql://novalton_ci:ci-${{ github.run_id }}-${{ github.run_attempt }}@127.0.0.1:5432/novalton_test
+      PYTHONNOUSERSITE: "1"
+      GITHUB_TOKEN: ""
+      OPENAI_API_KEY: ""
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -237,11 +268,12 @@ jobs:
           sudo /bin/sh "$bstage/root-handoff.sh"
           # Verify this runner's actual foundation before applying the overlay.
           sudo /opt/novalton-verification/i044b-v2/runtime/bin/python3.13 -I -S -B /opt/novalton-verification/i044b-v2/tests/accept_i044b_installed.py
-          # This root-owned static source is the only path admitted by the
-          # installed I-044A unit.  It is not the checkout and contains no
-          # provider credentials, VCS data, or caller-controlled symlinks.
-          sudo install -d -o root -g root -m 0555 /var/lib/novalton-verification/source/workspace
-          sudo install -o root -g root -m 0444 apps/api/tests/sandbox_fixtures/adversarial_data.txt /var/lib/novalton-verification/source/workspace/reviewed-data.txt
+          # Literal deployment binding: API client can make governed edits;
+          # the worker sees only its read-only bind and immutable snapshots.
+          sudo install -d -o root -g root -m 0755 /srv/novalton
+          sudo install -d -o novalton-verify-client -g novalton-verify-client -m 0755 /srv/novalton/workspace
+          sudo install -d -o root -g root -m 0555 /srv/novalton/workspace/workspace
+          sudo install -o root -g root -m 0444 apps/api/tests/sandbox_fixtures/adversarial_data.txt /srv/novalton/workspace/workspace/reviewed-data.txt
           stage=/run/novalton-i044a-v2-reviewed
           source=/run/novalton-i044a-v2-input
           sudo install -d -o root -g root -m 0500 "$source"
@@ -251,7 +283,7 @@ jobs:
           sudo install -d -o root -g root -m 0500 "$stage"
           sudo install -o root -g root -m 0400 infra/verification/i044a-v2/root-handoff.sh "$stage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          69302aa4a2f2de636c89684e22f43d7dd5ddea4849565c5c66cdec93a7f67c39  /run/novalton-i044a-v2-reviewed/root-handoff.sh
+          f2ea4b18542ce5394708c347990aa2fab026bec16bba3d7aaab15eb3717012a4  /run/novalton-i044a-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$stage/root-handoff.sh"
 
@@ -267,7 +299,7 @@ jobs:
           metadata = json.loads((release / "release-metadata.json").read_bytes())
           assert foundation["foundation_input_sha256"] == "412f4b3fb41491dc3b7b4cb6eb7f2395ab4bbc3a36afd84d803206742fcb8ec2"
           assert foundation["installed_manifest_sha256"] == hashlib.sha256((base / "installed-manifest.json").read_bytes()).hexdigest()
-          assert metadata["i044a_input_sha256"] == "f45980459fc114a7f2aa6c61c359e8c095a96f166e6393fd6994f74de26ae8df"
+          assert metadata["i044a_input_sha256"] == "342ef562d05652d2d41f82d32895529e78cbf9bda00dd11b730f769412d2fa88"
           assert metadata["foundation_input_sha256"] == foundation["foundation_input_sha256"]
           assert metadata["foundation_installed_manifest_sha256"] == foundation["installed_manifest_sha256"]
           assert metadata["installed_manifest_sha256"] == hashlib.sha256((release / "manifest.json").read_bytes()).hexdigest()
@@ -282,6 +314,41 @@ jobs:
 
       - name: Run targeted AppArmor negative and positive acceptance
         run: sudo /opt/novalton-verification/i044b-v2/runtime/bin/python3.13 -I -S -B /opt/novalton-verification/i044b-v2/tests/accept_apparmor_installed.py
+
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.13.15"
+
+      - name: Prepare unprivileged I-044 application acceptance
+        run: |
+          set -eu
+          test "$NOVALTON_ENV" = test
+          test "${DATABASE_URL##*/}" = novalton_test
+          test "${NOVALTON_TEST_DATABASE_URL##*/}" = novalton_test
+          test ! -e .env.test
+          test "$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc 'SELECT current_database()')" = novalton_test
+          test ! -e /tmp/i044-api-test
+          mkdir -p /tmp/i044-api-test/apps/api /tmp/i044-api-test/infra
+          cp -r apps/api/src apps/api/tests apps/api/provider_tests apps/api/pyproject.toml apps/api/alembic.ini /tmp/i044-api-test/apps/api/
+          cp -r infra/migrations /tmp/i044-api-test/infra/
+          python -m venv /tmp/i044-api-venv
+          /tmp/i044-api-venv/bin/python -m pip install '/tmp/i044-api-test/apps/api[dev]'
+          /tmp/i044-api-venv/bin/alembic -c /tmp/i044-api-test/apps/api/alembic.ini upgrade head
+
+      - name: Run installed governed verify-correct-verify acceptance
+        timeout-minutes: 3
+        run: |
+          set -eu
+          cd /tmp/i044-api-test/apps/api
+          sudo -u novalton-verify-client /usr/bin/env -i \
+            PATH=/tmp/i044-api-venv/bin:/usr/bin:/bin \
+            NOVALTON_ENV=test \
+            DATABASE_URL="$DATABASE_URL" \
+            NOVALTON_TEST_DATABASE_URL="$NOVALTON_TEST_DATABASE_URL" \
+            NOVALTON_WORKSPACE_ROOT=/srv/novalton/workspace \
+            NOVALTON_I044_INSTALLED_ACCEPTANCE=1 \
+            PYTHONPATH=/tmp/i044-api-test/apps/api/tests \
+            /tmp/i044-api-venv/bin/python -B -m pytest -p no:cacheprovider -q provider_tests/test_i044_installed_workflow.py
 
       - name: Report bounded installed acceptance diagnostics
         if: ${{ failure() }}

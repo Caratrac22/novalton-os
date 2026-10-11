@@ -7,13 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from novalton_api.infrastructure.providers.contracts import ExecutionTargetClass
 from novalton_api.modules.policy.schemas import RiskLevel
 from novalton_api.modules.tools.contracts import (
     SideEffectClass,
     ToolDefinition,
+    VerificationArguments,
     WorkspaceListFilesInput,
     WorkspaceReadFileInput,
     WorkspaceReplaceTextInput,
@@ -371,6 +372,39 @@ class RegisteredTool:
     executor: Executor
 
 
+class VerificationExecutor:
+    input_model = VerificationArguments
+
+    def execute(self, root: WorkspaceRoot, data: BaseModel) -> tuple[dict, dict]:
+        from novalton_api.infrastructure.verification_sandbox import VerificationSandboxError
+        from novalton_api.modules.tools.verification import execute
+
+        assert isinstance(data, VerificationArguments)
+        try:
+            return execute(root.path)
+        except VerificationSandboxError as error:
+            # Only closed server errors cross this boundary. Never persist a
+            # raw worker error, process output, path or connection exception.
+            allowed = {
+                "unexpected_workspace_mutation",
+                "verification_workspace_not_bound",
+                "snapshot_workspace_mismatch",
+                "stale_source",
+                "adapter_timeout",
+                "sandbox_unavailable",
+                "verification_sandbox_failed",
+                "verification_timeout",
+                "verification_source_missing",
+                "verification_source_empty",
+                "verification_source_type",
+                "verification_source_bound",
+            }
+            code = str(error) if str(error) in allowed else "verification_unavailable"
+            raise ToolExecutionError(code) from None
+        except (OSError, ValidationError):
+            raise ToolExecutionError("verification_unavailable") from None
+
+
 class ToolRegistry:
     """Exact lookup of three immutable, server-owned read-only tools."""
 
@@ -394,13 +428,14 @@ def _registered(
     *,
     side_effect: SideEffectClass = SideEffectClass.READ_ONLY,
     risk: RiskLevel = RiskLevel.LOW,
+    output_max_bytes: int = 131_072,
 ) -> RegisteredTool:
     return RegisteredTool(
         definition=ToolDefinition(
             tool_id=tool_id,
             description=description,
             input_schema=executor.input_model.model_json_schema(),
-            output_max_bytes=131_072,
+            output_max_bytes=output_max_bytes,
             risk_class=risk,
             execution_locality=ExecutionTargetClass.LOCAL,
             required_permission=tool_id,
@@ -413,6 +448,13 @@ def _registered(
 
 TRUSTED_TOOL_REGISTRY = ToolRegistry(
     (
+        _registered(
+            "verify.backend_syntax",
+            "Check Python syntax in fixed backend roots inside the verification sandbox; "
+            "no tests are executed.",
+            VerificationExecutor(),
+            output_max_bytes=4096,
+        ),
         _registered(
             "workspace.list_files", "List bounded safe workspace paths.", ListFilesExecutor()
         ),
