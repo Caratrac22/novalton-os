@@ -368,6 +368,10 @@ jobs:
 
           value = json.loads(Path("/var/lib/novalton-verification/recent.json").read_bytes())
           checks = value.get("checks")
+          verification = value.get("verification")
+          verification_fields = (
+              "state", "checked_files", "failed_files", "exit_code", "failure_code", "truncated"
+          )
           safe = {
               "failure_code": value.get("failure_code"),
               "failed_checks": sorted(
@@ -380,6 +384,9 @@ jobs:
               "state": value.get("state"),
               "stderr_truncated": value.get("stderr_truncated"),
               "termination": value.get("termination"),
+              "verification": {
+                  key: verification.get(key) for key in verification_fields
+              } if isinstance(verification, dict) else "missing",
           }
           print(json.dumps(safe, sort_keys=True))
           # Read-only, bounded host-policy evidence. Never print raw audit logs.
