@@ -646,9 +646,12 @@ def run_i044_verification_cycle(scope: Scope, root, monkeypatch, *, installed: b
             assert target.read_text() == "value = (\n"
             current = asyncio.run(calls())
             checks = [call for call in current if call.tool_id == "verify.backend_syntax"]
-            assert (
-                len(checks) == 1 and checks[0].result_metadata["verification"]["state"] == "failed"
+            assert len(checks) == 1
+            assert "verification" in (checks[0].result_metadata or {}), (
+                checks[0].status,
+                checks[0].failure_code,
             )
+            assert checks[0].result_metadata["verification"]["state"] == "failed"
             repair = [call for call in current if call.status == "PENDING_APPROVAL"]
             assert len(repair) == 1
             before_replay = len(provider.calls)

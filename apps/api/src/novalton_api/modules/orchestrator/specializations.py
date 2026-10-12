@@ -316,8 +316,10 @@ async def persist_next_handoff(
             if state not in {"passed", "failed"}:
                 state = "unavailable"
             try:
-                current = source_digest(Path(get_settings().workspace_root or "/nonexistent"))
-                if current != metadata.get("source_digest"):
+                current_digest = source_digest(
+                    Path(get_settings().workspace_root or "/nonexistent")
+                )
+                if current_digest != metadata.get("source_digest"):
                     state = "stale_source"
             except (OSError, VerificationSandboxError):
                 state = "stale_source"
