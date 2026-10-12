@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
@@ -211,6 +211,22 @@ def test_i044_immutable_verification_authority_round_trip():
 
     tenant_id, workspace_id, old_id = asyncio.run(seed())
 
+    async def inspect_index(expected_columns: str) -> None:
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                definition = await session.scalar(
+                    text(
+                        "SELECT pg_get_indexdef('uq_model_runs_agent_tool_continuation'::regclass)"
+                    )
+                )
+                assert definition is not None
+                assert f"({expected_columns})" in definition
+                assert "recovery_attempt_kind" in definition
+                assert "TOOL_CONTINUATION" in definition
+        finally:
+            await database.dispose()
+
     async def inspect(expected_status, historical_run=None):
         database = Database.from_settings(Settings.from_environment())
         try:
@@ -252,11 +268,15 @@ def test_i044_immutable_verification_authority_round_trip():
             await database.dispose()
 
     try:
+        asyncio.run(inspect_index("agent_run_id"))
         command.upgrade(config, "head")
+        asyncio.run(inspect_index("agent_run_id, recovery_attempt_index"))
         retained = asyncio.run(inspect("ENABLED"))
         command.downgrade(config, "20260902_0031")
+        asyncio.run(inspect_index("agent_run_id"))
         asyncio.run(inspect("ARCHIVED", retained))
         command.upgrade(config, "head")
+        asyncio.run(inspect_index("agent_run_id, recovery_attempt_index"))
         asyncio.run(inspect("ENABLED", retained))
     finally:
         command.upgrade(config, "head")

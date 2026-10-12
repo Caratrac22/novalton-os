@@ -1,5 +1,6 @@
 """Immutable Developer verification authority and bounded continuation accounting."""
 
+import sqlalchemy as sa
 from alembic import op
 from sqlalchemy import text
 
@@ -18,6 +19,16 @@ def upgrade() -> None:
         "model_runs",
         "(recovery_attempt_kind = 'TOOL_CONTINUATION' AND recovery_attempt_index BETWEEN 0 AND 6) "
         "OR (recovery_attempt_kind <> 'TOOL_CONTINUATION' AND recovery_attempt_index BETWEEN 0 AND 1)",
+    )
+    # I-041 admitted only one continuation per AgentRun. Keep that protection
+    # per ordinal while allowing the finite I-044 correction sequence.
+    op.drop_index("uq_model_runs_agent_tool_continuation", table_name="model_runs")
+    op.create_index(
+        "uq_model_runs_agent_tool_continuation",
+        "model_runs",
+        ["agent_run_id", "recovery_attempt_index"],
+        unique=True,
+        postgresql_where=sa.text("recovery_attempt_kind = 'TOOL_CONTINUATION'"),
     )
     op.execute("""
         INSERT INTO agent_definitions (
@@ -64,6 +75,14 @@ def downgrade() -> None:
         )
     ):
         raise RuntimeError("i044_downgrade_has_continuation_history")
+    op.drop_index("uq_model_runs_agent_tool_continuation", table_name="model_runs")
+    op.create_index(
+        "uq_model_runs_agent_tool_continuation",
+        "model_runs",
+        ["agent_run_id"],
+        unique=True,
+        postgresql_where=sa.text("recovery_attempt_kind = 'TOOL_CONTINUATION'"),
+    )
     op.drop_constraint(CONSTRAINT, "model_runs", type_="check")
     op.create_check_constraint(
         CONSTRAINT, "model_runs", "recovery_attempt_index BETWEEN 0 AND 1"

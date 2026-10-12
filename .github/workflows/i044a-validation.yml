@@ -78,6 +78,13 @@ jobs:
           alembic -c apps/api/alembic.ini downgrade 20260902_0031
           alembic -c apps/api/alembic.ini upgrade head
 
+      - name: Run focused I-044 database regression first
+        run: |
+          test "$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc 'SELECT current_database()')" = novalton_test
+          python -m pytest -q \
+            apps/api/tests/test_development_workflow.py::test_i044_governed_verify_correct_verify_cycle \
+            apps/api/tests/test_migrations.py::test_i044_immutable_verification_authority_round_trip
+
       - name: Run full API suite on novalton_test
         run: |
           set -eu

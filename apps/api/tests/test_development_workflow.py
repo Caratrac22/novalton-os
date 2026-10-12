@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from novalton_api.core.config import Settings, get_settings
@@ -710,6 +710,35 @@ def run_i044_verification_cycle(scope: Scope, root, monkeypatch, *, installed: b
                 for item in state["model_runs"]
                 if item.recovery_attempt_kind == "TOOL_CONTINUATION"
             ] == [1, 2, 3, 4, 5]
+            # The database itself rejects duplicate ordinals, while distinct
+            # bounded continuations above remain possible in one AgentRun.
+            original = next(
+                item
+                for item in state["model_runs"]
+                if item.recovery_attempt_kind == "TOOL_CONTINUATION"
+            )
+            columns = [column.name for column in ModelRun.__table__.columns if column.name != "id"]
+            column_names = ", ".join(columns)
+            clone = text(
+                f"INSERT INTO model_runs (id, {column_names}) "
+                f"SELECT :new_id, {column_names} FROM model_runs WHERE id = :original_id"
+            )
+
+            async def duplicate_ordinal_is_denied():
+                database = Database.from_settings(Settings.from_environment())
+                try:
+                    async with database.session_factory() as session:
+                        with pytest.raises(
+                            IntegrityError, match="uq_model_runs_agent_tool_continuation"
+                        ):
+                            async with session.begin_nested():
+                                await session.execute(
+                                    clone, {"new_id": uuid4(), "original_id": original.id}
+                                )
+                finally:
+                    await database.dispose()
+
+            asyncio.run(duplicate_ordinal_is_denied())
     finally:
         get_settings.cache_clear()
 

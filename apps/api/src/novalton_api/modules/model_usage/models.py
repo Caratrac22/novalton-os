@@ -186,6 +186,7 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index(
             "uq_model_runs_agent_tool_continuation",
             "agent_run_id",
+            "recovery_attempt_index",
             unique=True,
             postgresql_where=text("recovery_attempt_kind = 'TOOL_CONTINUATION'"),
         ),
