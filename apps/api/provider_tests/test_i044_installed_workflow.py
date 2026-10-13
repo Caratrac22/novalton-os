@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 from pathlib import Path
 
 from test_development_workflow import _cleanup, _seed, run_i044_verification_cycle
@@ -24,11 +25,30 @@ def test_installed_governed_verify_correct_verify(monkeypatch):
     )
     from novalton_api.core.config import Settings
     from novalton_api.core.database import verify_database_identity
+    from novalton_api.infrastructure.verification_sandbox import (
+        VerificationSandboxAdapter,
+        VerificationSandboxError,
+    )
 
     asyncio.run(verify_database_identity(Settings.from_environment()))
     root = Path("/srv/novalton/workspace")
     assert root.is_dir() and not root.is_symlink()
     assert root.stat().st_uid == os.geteuid()
+    # Fail at the actual adapter boundary, rather than reporting a stale
+    # recent.json left by the preceding standalone containment acceptance.
+    VerificationSandboxAdapter(root).health()
+    original_verify = VerificationSandboxAdapter.verify
+
+    def diagnostic_verify(adapter):
+        try:
+            return original_verify(adapter)
+        except VerificationSandboxError as error:
+            code = str(error)
+            assert re.fullmatch(r"[a-z0-9_]{1,64}", code), "unsafe_adapter_error"
+            print("installed_adapter_failure=" + code)
+            raise
+
+    monkeypatch.setattr(VerificationSandboxAdapter, "verify", diagnostic_verify)
     scope = asyncio.run(_seed())
     try:
         run_i044_verification_cycle(scope, root, monkeypatch, installed=True)

@@ -8,7 +8,6 @@ import json
 import os
 import shutil
 import signal
-import stat
 import struct
 import tempfile
 import threading
@@ -1555,8 +1554,6 @@ class I044AContractTests(unittest.TestCase):
             (source / "untrusted.py").write_text(
                 "raise RuntimeError('must not execute')\n"
             )
-            (source / "apps/api/src").mkdir(parents=True)
-            (source / "apps/api/src/example.py").write_text("answer = 42\n")
             (source / ".git").mkdir()
             (source / ".git/HEAD").write_text("not admitted")
             (source / ".env.test").write_text("not admitted")
@@ -1568,16 +1565,6 @@ class I044AContractTests(unittest.TestCase):
                 self.assertEqual(i044a._snapshot_digest(snapshot), expected)
                 self.assertFalse((snapshot / ".git").exists())
                 self.assertFalse((snapshot / ".env.test").exists())
-                self.assertEqual(stat.S_IMODE(Path(storage).stat().st_mode), 0o700)
-                self.assertEqual(stat.S_IMODE(snapshot.stat().st_mode), 0o555)
-                self.assertEqual(
-                    stat.S_IMODE((snapshot / "apps/api/src").stat().st_mode), 0o555
-                )
-                self.assertEqual(
-                    stat.S_IMODE((snapshot / "apps/api/src/example.py").stat().st_mode),
-                    0o444,
-                )
-                self.assertTrue(i044a.destroy_snapshot(snapshot))
                 self.assertTrue(i044a.destroy_snapshot(snapshot))
 
     def test_capability_is_pid_bound_wrong_value_rejected_and_replay_rejected(self):

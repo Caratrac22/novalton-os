@@ -129,7 +129,7 @@ jobs:
           for destination, source in (installer.FILES | installer.AUXILIARY).items():
               assert hashlib.sha256((root / source).read_bytes()).hexdigest() == manifest[destination]
           assert installer.FOUNDATION_INPUT_SHA256 == "412f4b3fb41491dc3b7b4cb6eb7f2395ab4bbc3a36afd84d803206742fcb8ec2"
-          assert installer.I044A_INPUT_SHA256 == "4e6226e0f8a58f367dfac66131fac33c5d1624fde8089c1c1287f8d12a67ff0f"
+          assert installer.I044A_INPUT_SHA256 == "342ef562d05652d2d41f82d32895529e78cbf9bda00dd11b730f769412d2fa88"
           PY
 
       - name: Lint I-044A and sandbox files
@@ -290,7 +290,7 @@ jobs:
           sudo install -d -o root -g root -m 0500 "$stage"
           sudo install -o root -g root -m 0400 infra/verification/i044a-v2/root-handoff.sh "$stage/root-handoff.sh"
           sudo sha256sum -c <<'EOF'
-          31165bc2371304be16f40d915dab87355dc37d7fe56b70c6d7a11e71bcae5d55  /run/novalton-i044a-v2-reviewed/root-handoff.sh
+          f2ea4b18542ce5394708c347990aa2fab026bec16bba3d7aaab15eb3717012a4  /run/novalton-i044a-v2-reviewed/root-handoff.sh
           EOF
           sudo /bin/sh "$stage/root-handoff.sh"
 
@@ -306,7 +306,7 @@ jobs:
           metadata = json.loads((release / "release-metadata.json").read_bytes())
           assert foundation["foundation_input_sha256"] == "412f4b3fb41491dc3b7b4cb6eb7f2395ab4bbc3a36afd84d803206742fcb8ec2"
           assert foundation["installed_manifest_sha256"] == hashlib.sha256((base / "installed-manifest.json").read_bytes()).hexdigest()
-          assert metadata["i044a_input_sha256"] == "4e6226e0f8a58f367dfac66131fac33c5d1624fde8089c1c1287f8d12a67ff0f"
+          assert metadata["i044a_input_sha256"] == "342ef562d05652d2d41f82d32895529e78cbf9bda00dd11b730f769412d2fa88"
           assert metadata["foundation_input_sha256"] == foundation["foundation_input_sha256"]
           assert metadata["foundation_installed_manifest_sha256"] == foundation["installed_manifest_sha256"]
           assert metadata["installed_manifest_sha256"] == hashlib.sha256((release / "manifest.json").read_bytes()).hexdigest()
