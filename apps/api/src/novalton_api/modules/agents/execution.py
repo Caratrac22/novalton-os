@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from math import ceil
 from uuid import UUID
 
@@ -86,6 +87,7 @@ _MAX_DIAGNOSTIC_ITEMS = 8
 _MAX_DIAGNOSTIC_PATH_PARTS = 8
 _MAX_DIAGNOSTIC_TEXT = 80
 _KNOWN_CAPABILITIES = {capability.value: capability for capability in ModelCapability}
+_GOVERNED_CONTINUATION_TIMEOUT_SECONDS = 300
 
 
 class MemoryContextRequest(BaseModel):
@@ -747,21 +749,34 @@ async def _continue_with_tool_evidence_once[AgentResultT: AgentResult](
     )
     provider_options = _qualified_provider_options(strategy, initial_model_run)
     try:
-        continuation = await provider.complete(
-            _generation_request(
-                definition,
-                data,
-                provider_model_id=initial_model_run.provider_model_id,
-                profile=profile,
-                strategy=strategy,
-                max_output_tokens=budget,
-                contract_instructions=contract_instructions,
-                provider_options=provider_options,
-                trusted_tools=trusted_tools,
-                tool_evidence=evidence,
-                allow_tool_continuation=allow_proposals,
-            )
+        generation_request = _generation_request(
+            definition,
+            data,
+            provider_model_id=initial_model_run.provider_model_id,
+            profile=profile,
+            strategy=strategy,
+            max_output_tokens=budget,
+            contract_instructions=contract_instructions,
+            provider_options=provider_options,
+            trusted_tools=trusted_tools,
+            tool_evidence=evidence,
+            allow_tool_continuation=allow_proposals,
         )
+        if (
+            definition.slug == "developer_worker"
+            and "verify.backend_syntax" in definition.permissions
+        ):
+            try:
+                continuation = await asyncio.wait_for(
+                    provider.complete(generation_request),
+                    timeout=_GOVERNED_CONTINUATION_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                raise ProviderError(
+                    ProviderFailure.TIMEOUT, provider_id=initial_model_run.provider_id
+                ) from None
+        else:
+            continuation = await provider.complete(generation_request)
         if (continuation.provider_id, continuation.model_id) != (
             initial_model_run.provider_id,
             initial_model_run.provider_model_id,
@@ -898,6 +913,7 @@ async def execute[AgentResultT: AgentResult](
     contract_instructions: str | None = None,
     result_shape_constraints: tuple[ResultShapeConstraint, ...] = (),
     memory_context_request: MemoryContextRequest | None = None,
+    on_run_created: Callable[[AgentRun], Awaitable[None]] | None = None,
 ) -> AgentExecutionResponse:
     """Execute one governed Agent run with at most one explicit read-only tool round-trip."""
     profile = compile_contract(
@@ -926,6 +942,10 @@ async def execute[AgentResultT: AgentResult](
             task_id=task_id,
         ),
     )
+    if on_run_created is not None:
+        # Server-owned workflow linkage must precede all provider/tool work so
+        # a crashed first tool remains attributable to its persisted step.
+        await on_run_created(run)
     run = await service.start_run(
         session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run.id
     )

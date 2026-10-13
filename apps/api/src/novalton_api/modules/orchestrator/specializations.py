@@ -10,6 +10,7 @@ from novalton_api.infrastructure.providers.contracts import ContractEnforcementG
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.modules.agents.contract_execution import ResultShapeConstraint
 from novalton_api.modules.agents.contracts import AgentResult, ModelRequirementHints
+from novalton_api.modules.agents.models import AgentRun
 from novalton_api.modules.agents.schemas import AgentExecutionResponse
 from novalton_api.modules.developer_manager import service as manager_service
 from novalton_api.modules.developer_manager.contracts import DeveloperManagerResult
@@ -24,6 +25,7 @@ from novalton_api.modules.qa_worker import service as qa_service
 from novalton_api.modules.qa_worker.contracts import ValidationCriterion
 from novalton_api.modules.qa_worker.schemas import QAWorkerValidationRequest
 from novalton_api.modules.workflows import repository
+from novalton_api.modules.workflows import service as workflow_service
 from novalton_api.modules.workflows.models import (
     WorkflowRun,
     WorkflowStep,
@@ -177,12 +179,24 @@ async def dispatch(
             result_shape_constraints=FIXED_MANAGER_RESULT_CONSTRAINTS,
         )
     elif role == "developer_worker":
+
+        async def link_created_agent(agent_run: AgentRun) -> None:
+            await workflow_service.link_agent_run(
+                session,
+                tenant_id=run.tenant_id,
+                workspace_id=run.workspace_id,
+                run_id=run.id,
+                step_run_id=step_run.id,
+                agent_run_id=agent_run.id,
+            )
+
         response = await developer_service.execute_assignment(
             session,
             registry=registry,
             tenant_id=run.tenant_id,
             workspace_id=run.workspace_id,
             data=DeveloperWorkerExecutionRequest(**common),
+            on_run_created=link_created_agent,
         )
     else:
         response = await qa_service.validate(

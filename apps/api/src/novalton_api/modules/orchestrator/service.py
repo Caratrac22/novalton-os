@@ -239,6 +239,24 @@ async def advance(
             reason_code=run.failure_code or "workflow_failed",
         )
 
+    # A prior HTTP worker may have died after atomically claiming a governed
+    # continuation. Aged claims fail closed; no provider or mutation is retried.
+    from novalton_api.modules.approvals.mutation_resume import reconcile_stale_continuation
+
+    if await reconcile_stale_continuation(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        workflow_run_id=run.id,
+    ):
+        await session.refresh(run)
+        return await _result(
+            session,
+            run,
+            OrchestrationOutcome.WORKFLOW_FAILED,
+            reason_code="tool_continuation_interrupted",
+        )
+
     ordered = await repository.ordered_step_runs(session, run_id=run.id)
     if ordered and all(step_run.status == "COMPLETED" for step_run, _ in ordered):
         run = await workflow_service.complete_run(
@@ -424,14 +442,22 @@ async def advance(
             reason_code="agent_execution_cancelled",
         )
 
-    step_run = await workflow_service.link_agent_run(
-        session,
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-        run_id=run.id,
-        step_run_id=step_run.id,
-        agent_run_id=executed.agent_run_id,
-    )
+    await session.refresh(step_run)
+    if step_run.agent_run_id is None:
+        step_run = await workflow_service.link_agent_run(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            run_id=run.id,
+            step_run_id=step_run.id,
+            agent_run_id=executed.agent_run_id,
+        )
+    elif step_run.agent_run_id != executed.agent_run_id:
+        raise ApplicationError(
+            "workflow_step_agent_link_conflict",
+            "Workflow Agent Run link conflicted",
+            status_code=409,
+        )
     if executed.status == AgentRunStatus.WAITING_FOR_APPROVAL:
         step_run = await workflow_service.transition_step(
             session,

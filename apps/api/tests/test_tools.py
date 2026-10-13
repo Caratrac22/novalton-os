@@ -1116,3 +1116,75 @@ def test_atomic_replace_fifo_does_not_block(tmp_path):
     data = executor.input_model(path="fixture.py", search="1", replacement="2")
     with pytest.raises(ToolExecutionError, match="workspace_file_type_denied"):
         executor.prepare(WorkspaceRoot.approved(tmp_path), data)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt_at", ["after_reservation", "after_approval_creation"])
+async def test_tool_reservation_and_approval_link_are_atomic(
+    safe_workspace: WorkspaceRoot, monkeypatch: pytest.MonkeyPatch, interrupt_at: str
+) -> None:
+    tenant_id, workspace_id, _, _, run_id = await _seed_gateway()
+    await _rule(tenant_id, workspace_id, PolicyEffect.REQUIRE_CONFIRMATION)
+    database = Database.from_settings(Settings())
+    proposal = ToolProposal(
+        call_key="interrupted_read",
+        tool_name="workspace.read_file",
+        arguments={"path": "src/fixture.txt"},
+    )
+    if interrupt_at == "after_reservation":
+        original = service.repository.create
+
+        async def interrupt_create(*args, **kwargs):
+            await original(*args, **kwargs)
+            raise RuntimeError("injected_after_reservation")
+
+        monkeypatch.setattr(service.repository, "create", interrupt_create)
+    else:
+        original = service.repository.set_state
+
+        async def interrupt_link(*args, **kwargs):
+            if kwargs.get("status") == "PENDING_APPROVAL":
+                raise RuntimeError("injected_after_approval_creation")
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(service.repository, "set_state", interrupt_link)
+    try:
+        async with database.session_factory() as session:
+            with pytest.raises(RuntimeError, match="injected_after_"):
+                await service.execute_proposal(
+                    session,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    agent_run_id=run_id,
+                    proposal=proposal,
+                    permitted_tools=["workspace.read_file"],
+                    workspace_root=safe_workspace,
+                )
+        async with database.session_factory() as session:
+            assert not list(
+                await session.scalars(select(ToolCall).where(ToolCall.agent_run_id == run_id))
+            )
+            assert not list(
+                await session.scalars(
+                    select(ApprovalRequest).where(ApprovalRequest.tenant_id == tenant_id)
+                )
+            )
+            assert not list(
+                await session.scalars(select(AuditRecord).where(AuditRecord.tenant_id == tenant_id))
+            )
+        monkeypatch.undo()
+        async with database.session_factory() as session:
+            result = await service.execute_proposal(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_run_id=run_id,
+                proposal=proposal,
+                permitted_tools=["workspace.read_file"],
+                workspace_root=safe_workspace,
+            )
+            assert result.status == ToolExecutionStatus.PENDING_APPROVAL
+            assert result.approval_id is not None
+    finally:
+        await database.dispose()
+        await _cleanup_gateway(tenant_id)

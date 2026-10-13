@@ -1,6 +1,7 @@
 """Scoped Developer Worker definition and I-022 execution integration."""
 
 import logging
+from collections.abc import Awaitable, Callable
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -82,6 +83,7 @@ async def execute_assignment(
     tenant_id: UUID,
     workspace_id: UUID,
     data: DeveloperWorkerExecutionRequest,
+    on_run_created: Callable[[AgentRun], Awaitable[None]] | None = None,
 ) -> DeveloperWorkerExecutionResponse:
     definition = await resolve_definition(session, tenant_id=tenant_id, workspace_id=workspace_id)
     response = await execution.execute(
@@ -94,6 +96,7 @@ async def execute_assignment(
         result_contract=DeveloperWorkerResult,
         continuation_result_contract=DeveloperWorkerTerminalResult,
         contract_instructions=_CONTRACT_INSTRUCTIONS,
+        on_run_created=on_run_created,
     )
     result = response.result
     if result is not None:

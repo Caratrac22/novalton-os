@@ -83,6 +83,14 @@ jobs:
           test "$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc 'SELECT current_database()')" = novalton_test
           python -m pytest -q \
             apps/api/tests/test_development_workflow.py::test_i044_governed_verify_correct_verify_cycle \
+            apps/api/tests/test_tools.py::test_tool_reservation_and_approval_link_are_atomic \
+            apps/api/tests/test_development_workflow.py::test_i044_interrupted_continuation_fails_closed \
+            apps/api/tests/test_development_workflow.py::test_i044_interrupted_pending_proposal_fails_closed \
+            apps/api/tests/test_development_workflow.py::test_i044_interrupted_after_exact_mutation_fails_closed \
+            apps/api/tests/test_development_workflow.py::test_i044_interrupted_approval_denial_fails_closed \
+            apps/api/tests/test_development_workflow.py::test_i044_reconciliation_cannot_authorize_late_provider_proposal \
+            apps/api/tests/test_development_workflow.py::test_i044_interrupted_first_tool_fails_closed \
+            apps/api/tests/test_development_workflow.py::test_i044_audited_concurrent_approval_resumes_apply_once \
             apps/api/tests/test_migrations.py::test_i044_immutable_verification_authority_round_trip
 
       - name: Run full API suite on novalton_test

@@ -53,7 +53,7 @@ plus the gateway duration field. All evidence is labelled `UNTRUSTED_DATA`.
 
 ## Lifecycle and repair
 
-ToolCall supplies REQUESTED/RUNNING/SUCCEEDED/FAILED/BLOCKED state, scoped linkage,
+ToolCall supplies PROPOSED/RUNNING/SUCCEEDED/FAILED/BLOCKED state, scoped linkage,
 timestamps, safe definition/parameter fingerprint, snapshot digest, bounded syntax
 result, integrity outcome and duration. SUCCEEDED means verification completed;
 its syntax result can still be `failed`. No CommandRun table is needed.
@@ -73,6 +73,20 @@ Every mutation/correction retains I-041 Policy and exact human approval. An atom
 per-mutation continuation claim prevents an old approval replay from consuming a
 later correction wait. A crash after claiming fails closed; no automatic provider
 retry or reapplication occurs. Syntax output never grants another permission.
+
+The trusted workflow links the Developer AgentRun before provider/tool work.
+Tool reservation, approval linkage and their Policy/audit records commit in one
+transaction. An interrupted pending proposal, running/finished first tool, applied
+mutation, denial or claimed continuation is failed closed on a later explicit
+`advance` after the fixed one-hour lease. Active continuations are not reclaimed
+before that lease; each governed provider continuation has a 300-second deadline.
+This recovery starts at durable tool activity, not generic pre-tool provider runs.
+
+Approved replacement preserves existing ordinary mode/group so the separate
+verification UID can still read admitted source. Foreign ownership, privileged
+bits and extended attributes fail closed. Reads and replacement use pinned
+directory descriptors, reject symlinks and recheck the approved parent. This does
+not claim filesystem compare-and-swap against a hostile concurrent same-UID writer.
 
 QA receives bounded server-derived ToolCall references and passed/failed/stale
 classification, not authority or raw process logs. Operator Console renders readonly
