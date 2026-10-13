@@ -295,9 +295,13 @@ def stage_snapshot(identity: str) -> tuple[Path, str]:
         if budget[0] == 0:
             raise foundation.WorkerFailure("snapshot_empty")
         snapshot_digest = _snapshot_digest(destination)
+        # bwrap's child has a user-namespace UID, not necessarily the worker's
+        # in-namespace file owner. The service-owned 0700 STORAGE parent keeps
+        # these bytes private on the host; the child sees only this read-only
+        # bind and needs ordinary DAC read/traverse without dac_override.
         for item in destination.rglob("*"):
-            item.chmod(0o500 if item.is_dir() else 0o400)
-        destination.chmod(0o500)
+            item.chmod(0o555 if item.is_dir() else 0o444)
+        destination.chmod(0o555)
         return destination, snapshot_digest
     except Exception:
         destroy_snapshot(destination)

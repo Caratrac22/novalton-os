@@ -6,9 +6,9 @@
   "tests/accept_i044a_installed.py": "c1294f20b08a443930acffbba6e220370a5a953abcac007476e57e67b29e29ad",
   "tests/fixtures/i044b_worker_contract_shim.py": "237d250106200329435666689f1f8990fcdff4d74da2393004acf937e68f8cae",
   "tests/test_backend_syntax.py": "9f53a1478ceaca24059217c1fc6c56d51a5043e95f5a75bc8c0e576fff3437b4",
-  "tests/test_i044a_contract.py": "6ddce9d43bfa8319495928ea6719318f15403ff60a0c9556909f6261f4f6d502",
+  "tests/test_i044a_contract.py": "528a4d4ce80638e01dbfe5b7883567596c7536b0d2e1cc4d2fd5a1cba5585808",
   "tests/test_i044a_seccomp_kernel.py": "5ae208276c08a4c2b437bfe153a2a7e7c0e856b76352ca4f737d5a0bbbca0b51",
   "tests/test_i044a_seccomp_staging.py": "3ebde070d755cc4ffac7187680cbf2aea6390ba9fd6e26eba3bc773f6becc748",
-  "worker/i044a.py": "1d35c32dfd0ff404c6d49caa99c08af40e0624403ad5b47837f0307811f8e743",
+  "worker/i044a.py": "b6544383699a5315b59220dcf832f43c538f2aa2d1e30d08849cdb6d12edd03b",
   "worker/i044a_launch.py": "1f5815ce58e837f53f39ac658160343942cc0cdbb944a0398361583d3e886cb8"
 }
