@@ -1,4 +1,5 @@
 import os
+import stat
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -868,3 +869,250 @@ async def test_i044_durable_budget_replay_and_concurrent_requests(safe_workspace
     finally:
         await database.dispose()
         await _cleanup_gateway(tenant_id)
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o640, 0o644, 0o755])
+def test_atomic_replace_preserves_existing_mode_and_group(tmp_path: Path, mode: int) -> None:
+    path = tmp_path / "fixture.py"
+    path.write_text("value = 1\n")
+    path.chmod(mode)
+    original = path.stat()
+    root = WorkspaceRoot.approved(tmp_path)
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+    result = executor.apply(root, data, prepared)
+    assert result["already_applied"] is False
+    assert path.read_text() == "value = 2\n"
+    assert stat.S_IMODE(path.stat().st_mode) == mode
+    assert path.stat().st_gid == original.st_gid
+    assert executor.apply(root, data, prepared)["already_applied"] is True
+
+
+@pytest.mark.parametrize("mode", [0o4644, 0o2644, 0o1644])
+def test_atomic_replace_rejects_privileged_mode(tmp_path: Path, mode: int) -> None:
+    path = tmp_path / "fixture.py"
+    path.write_text("value = 1\n")
+    root = WorkspaceRoot.approved(tmp_path)
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+    path.chmod(mode)
+    with pytest.raises(ToolExecutionError, match="workspace_privileged_mode_denied"):
+        executor.prepare(root, data)
+    with pytest.raises(ToolExecutionError, match="workspace_privileged_mode_denied"):
+        executor.apply(root, data, prepared)
+    assert path.read_text() == "value = 1\n"
+    assert not list(tmp_path.glob(".novalton-i041-*"))
+
+
+@pytest.mark.parametrize("phase", ["prepare", "apply"])
+@pytest.mark.parametrize("metadata", ["owner", "xattr", "inspection_failed"])
+def test_atomic_replace_rejects_unsupported_metadata(tmp_path, monkeypatch, phase, metadata):
+    path = tmp_path / "fixture.py"
+    path.write_text("value = 1\n")
+    root = WorkspaceRoot.approved(tmp_path)
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+    if metadata == "owner":
+        uid = os.geteuid()
+        monkeypatch.setattr(os, "geteuid", lambda: uid + 1)
+        code = "workspace_file_owner_denied"
+    elif metadata == "xattr":
+        os.setxattr(path, "user.novalton-test", b"preserve me")
+        code = "workspace_file_attributes_denied"
+    else:
+
+        def unavailable(*args):
+            raise OSError("attribute inspection unavailable")
+
+        monkeypatch.setattr(os, "listxattr", unavailable)
+        code = "workspace_mutation_failed"
+    with pytest.raises(ToolExecutionError, match=code):
+        if phase == "prepare":
+            executor.prepare(root, data)
+        else:
+            executor.apply(root, data, prepared)
+    assert path.read_text() == "value = 1\n"
+    assert not list(tmp_path.glob(".novalton-i041-*"))
+
+
+@pytest.mark.parametrize("phase", ["prepare", "apply"])
+def test_atomic_replace_parent_symlink_denied(tmp_path, phase):
+    root_path = tmp_path / "workspace"
+    root_path.mkdir()
+    source = root_path / "src"
+    source.mkdir()
+    (source / "fixture.py").write_text("value = 1\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "fixture.py"
+    target.write_text("value = 1\n")
+    executor = ReplaceTextExecutor()
+    root = WorkspaceRoot.approved(root_path)
+    data = executor.input_model(path="src/fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+    source.rename(root_path / "moved")
+    source.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ToolExecutionError, match="workspace_mutation_failed"):
+        if phase == "prepare":
+            executor.prepare(root, data)
+        else:
+            executor.apply(root, data, prepared)
+    assert target.read_text() == "value = 1\n"
+
+
+@pytest.mark.parametrize("phase", ["prepare", "apply"])
+@pytest.mark.parametrize("move_outside", [False, True])
+def test_atomic_replace_parent_substitution_fails_closed(
+    tmp_path, monkeypatch, phase, move_outside
+):
+    root_path = tmp_path / "workspace"
+    root_path.mkdir()
+    source = root_path / "src"
+    source.mkdir()
+    (source / "fixture.py").write_text("value = 1\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = outside / "fixture.py"
+    external.write_text("value = 1\n")
+    executor = ReplaceTextExecutor()
+    root = WorkspaceRoot.approved(root_path)
+    data = executor.input_model(path="src/fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+    opened = os.open
+    substituted = False
+    moved = (tmp_path if move_outside else root_path) / "moved"
+
+    def substitute(path, flags, *args, **kwargs):
+        nonlocal substituted
+        descriptor = opened(path, flags, *args, **kwargs)
+        if path == "src" and flags & os.O_DIRECTORY and not substituted:
+            substituted = True
+            source.rename(moved)
+            source.symlink_to(outside, target_is_directory=True)
+        return descriptor
+
+    monkeypatch.setattr(os, "open", substitute)
+    with pytest.raises(ToolExecutionError, match="workspace_parent_changed"):
+        if phase == "prepare":
+            executor.prepare(root, data)
+        else:
+            executor.apply(root, data, prepared)
+    assert (moved / "fixture.py").read_text() == "value = 1\n"
+    assert substituted
+    assert external.read_text() == "value = 1\n"
+    assert not list(root_path.rglob(".novalton-i041-*"))
+    assert not list(outside.glob(".novalton-i041-*"))
+
+
+def test_atomic_replace_parent_moves_during_write_cleans_original_directory(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "src"
+    source.mkdir()
+    (source / "fixture.py").write_text("value = 1\n")
+    external = tmp_path / "outside"
+    external.mkdir()
+    (external / "fixture.py").write_text("outside\n")
+    moved = tmp_path / "moved"
+    executor = ReplaceTextExecutor()
+    root = WorkspaceRoot.approved(workspace)
+    data = executor.input_model(path="src/fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+    fsync = os.fsync
+
+    def move_parent(fd):
+        fsync(fd)
+        source.rename(moved)
+        source.symlink_to(external, target_is_directory=True)
+
+    monkeypatch.setattr(os, "fsync", move_parent)
+    with pytest.raises(ToolExecutionError, match="workspace_parent_changed"):
+        executor.apply(root, data, prepared)
+    assert (moved / "fixture.py").read_text() == "value = 1\n"
+    assert (external / "fixture.py").read_text() == "outside\n"
+    assert not list(moved.glob(".novalton-i041-*"))
+    assert not list(external.glob(".novalton-i041-*"))
+
+
+@pytest.mark.parametrize("operation", ["fchmod", "replace"])
+def test_atomic_replace_failed_write_cleans_pinned_temporary(tmp_path, monkeypatch, operation):
+    path = tmp_path / "fixture.py"
+    path.write_text("value = 1\n")
+    root = WorkspaceRoot.approved(tmp_path)
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+
+    def fail(*args, **kwargs):
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(os, operation, fail)
+    with pytest.raises(ToolExecutionError, match="workspace_mutation_failed"):
+        executor.apply(root, data, prepared)
+    assert path.read_text() == "value = 1\n"
+    assert not list(tmp_path.glob(".novalton-i041-*"))
+
+
+def test_atomic_replace_rejects_inherited_temporary_attributes(tmp_path, monkeypatch):
+    path = tmp_path / "fixture.py"
+    path.write_text("value = 1\n")
+    root = WorkspaceRoot.approved(tmp_path)
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+    original_inode = path.stat().st_ino
+    monkeypatch.setattr(
+        os,
+        "listxattr",
+        lambda fd: [] if os.fstat(fd).st_ino == original_inode else ["system.posix_acl_access"],
+    )
+    with pytest.raises(ToolExecutionError, match="workspace_file_attributes_denied"):
+        executor.apply(root, data, prepared)
+    assert path.read_text() == "value = 1\n"
+    assert not list(tmp_path.glob(".novalton-i041-*"))
+
+
+def test_atomic_replace_prepare_bounds_read_even_when_file_grows(tmp_path, monkeypatch):
+    from novalton_api.modules.tools import executor as module
+
+    path = tmp_path / "fixture.py"
+    path.write_text("value = 1\n")
+    root = WorkspaceRoot.approved(tmp_path)
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.py", search="1", replacement="2")
+    fdopen = os.fdopen
+    requests = []
+
+    class GrowingReader:
+        def __init__(self, fd, mode):
+            self.reader = fdopen(fd, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.reader.close()
+
+        def fileno(self):
+            return self.reader.fileno()
+
+        def read(self, size):
+            requests.append(size)
+            path.write_bytes(b"x" * (module._MAX_MUTATION_FILE_BYTES * 2))
+            return self.reader.read(size)
+
+    monkeypatch.setattr(os, "fdopen", GrowingReader)
+    with pytest.raises(ToolExecutionError, match="oversized_file_denied"):
+        executor.prepare(root, data)
+    assert requests == [module._MAX_MUTATION_FILE_BYTES + 1]
+
+
+def test_atomic_replace_fifo_does_not_block(tmp_path):
+    os.mkfifo(tmp_path / "fixture.py")
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.py", search="1", replacement="2")
+    with pytest.raises(ToolExecutionError, match="workspace_file_type_denied"):
+        executor.prepare(WorkspaceRoot.approved(tmp_path), data)

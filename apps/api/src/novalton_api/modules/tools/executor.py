@@ -2,7 +2,9 @@
 
 import hashlib
 import os
-import tempfile
+import secrets
+import stat
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -255,19 +257,105 @@ class SearchTextExecutor:
         return evidence, metadata
 
 
+@contextmanager
+def _mutation_parent(root: WorkspaceRoot, relative: str):
+    """Pin each directory before resolving its child; never follow a symlink."""
+    pure = PurePosixPath(relative)
+    if "\\" in relative or pure.is_absolute() or "\x00" in relative:
+        raise ToolExecutionError("invalid_relative_path")
+    if not pure.parts or ".." in pure.parts:
+        raise ToolExecutionError("path_traversal_denied")
+    if _denied(pure.parts):
+        raise ToolExecutionError("sensitive_path_denied")
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        descriptor = os.open("/", flags)
+        for part in (*root.path.parts[1:], *pure.parts[:-1]):
+            child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        yield descriptor, pure.name, pure.as_posix()
+    except OSError:
+        raise ToolExecutionError("workspace_mutation_failed") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _mutation_metadata(descriptor: int) -> os.stat_result:
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode):
+        raise ToolExecutionError("workspace_file_type_denied")
+    if info.st_uid != os.geteuid():
+        raise ToolExecutionError("workspace_file_owner_denied")
+    if info.st_mode & 0o7000:
+        raise ToolExecutionError("workspace_privileged_mode_denied")
+    # Replacing an inode would discard ACLs, labels and other security metadata.
+    # Unsupported/failed inspection is also an error, never permission to proceed.
+    if os.listxattr(descriptor):
+        raise ToolExecutionError("workspace_file_attributes_denied")
+    return info
+
+
+def _check_mutation_parent(root: WorkspaceRoot, relative: str, parent: int) -> None:
+    """Reject moved parents instead of reporting a mutation at a stale path.
+
+    This is a fail-closed recheck, not a filesystem compare-and-swap against
+    another same-UID writer racing the final rename.
+    """
+    try:
+        with _mutation_parent(root, relative) as (current, _, _):
+            original_info = os.fstat(parent)
+            current_info = os.fstat(current)
+            if (current_info.st_dev, current_info.st_ino) != (
+                original_info.st_dev,
+                original_info.st_ino,
+            ):
+                raise ToolExecutionError("workspace_parent_changed")
+    except ToolExecutionError:
+        raise ToolExecutionError("workspace_parent_changed") from None
+
+
+def _mutation_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _read_mutation_file(parent: int, name: str) -> tuple[bytes, os.stat_result]:
+    descriptor = os.open(
+        name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=parent
+    )
+    with os.fdopen(descriptor, "rb") as reader:
+        original = _mutation_metadata(reader.fileno())
+        if original.st_size > _MAX_MUTATION_FILE_BYTES:
+            raise ToolExecutionError("oversized_file_denied")
+        raw = reader.read(_MAX_MUTATION_FILE_BYTES + 1)
+        if len(raw) > _MAX_MUTATION_FILE_BYTES:
+            raise ToolExecutionError("oversized_file_denied")
+        if _mutation_identity(_mutation_metadata(reader.fileno())) != _mutation_identity(original):
+            raise ToolExecutionError("stale_preimage")
+    return raw, original
+
+
 class ReplaceTextExecutor:
     input_model = WorkspaceReplaceTextInput
 
     def prepare(
         self, root: WorkspaceRoot, data: WorkspaceReplaceTextInput
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        path = root.resolve(data.path, allow_directory=False)
-        try:
-            before = path.read_bytes()
-        except OSError:
-            raise ToolExecutionError("workspace_read_failed") from None
-        if len(before) > _MAX_MUTATION_FILE_BYTES:
-            raise ToolExecutionError("oversized_file_denied")
+        with _mutation_parent(root, data.path) as (parent, name, relative):
+            before, _ = _read_mutation_file(parent, name)
+            _check_mutation_parent(root, relative, parent)
+        path = root.path / relative
         if b"\x00" in before:
             raise ToolExecutionError("binary_file_denied")
         try:
@@ -325,45 +413,69 @@ class ReplaceTextExecutor:
     def apply(
         self, root: WorkspaceRoot, data: WorkspaceReplaceTextInput, prepared: dict[str, Any]
     ) -> dict[str, Any]:
-        path = root.resolve(data.path, allow_directory=False)
-        try:
-            current = path.read_bytes()
-        except OSError:
-            raise ToolExecutionError("workspace_read_failed") from None
-        current_sha = hashlib.sha256(current).hexdigest()
-        if current_sha == prepared["candidate_sha256"]:
-            return {"path": root.relative(path), "already_applied": True}
-        if current_sha != prepared["preimage_sha256"]:
-            raise ToolExecutionError("stale_preimage")
-        try:
-            current_text = current.decode("utf-8", errors="strict")
-            search = str(prepared["search"])
-            replacement = str(prepared["replacement"])
-            expected_matches = int(prepared["expected_matches"])
-        except (UnicodeDecodeError, KeyError, TypeError, ValueError):
-            raise ToolExecutionError("prepared_mutation_invalid") from None
-        if current_text.count(search) != expected_matches:
-            raise ToolExecutionError("stale_preimage")
-        candidate = current_text.replace(search, replacement).encode("utf-8")
-        candidate_sha = hashlib.sha256(candidate).hexdigest()
-        mutation_sha = hashlib.sha256(
-            (root.relative(path) + "\0" + current_sha + "\0" + candidate_sha).encode()
-        ).hexdigest()
-        if candidate_sha != prepared.get("candidate_sha256") or mutation_sha != prepared.get(
-            "mutation_fingerprint"
-        ):
-            raise ToolExecutionError("mutation_fingerprint_mismatch")
-        fd, temporary = tempfile.mkstemp(prefix=".novalton-i041-", dir=str(path.parent))
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(candidate)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-        return {"path": root.relative(path), "already_applied": False}
+        with _mutation_parent(root, data.path) as (parent, name, relative):
+            current, original = _read_mutation_file(parent, name)
+            _check_mutation_parent(root, relative, parent)
+            current_sha = hashlib.sha256(current).hexdigest()
+            if current_sha == prepared["candidate_sha256"]:
+                return {"path": relative, "already_applied": True}
+            if current_sha != prepared["preimage_sha256"]:
+                raise ToolExecutionError("stale_preimage")
+            try:
+                current_text = current.decode("utf-8", errors="strict")
+                search = str(prepared["search"])
+                replacement = str(prepared["replacement"])
+                expected_matches = int(prepared["expected_matches"])
+            except (UnicodeDecodeError, KeyError, TypeError, ValueError):
+                raise ToolExecutionError("prepared_mutation_invalid") from None
+            if current_text.count(search) != expected_matches:
+                raise ToolExecutionError("stale_preimage")
+            candidate = current_text.replace(search, replacement).encode("utf-8")
+            if len(candidate) > _MAX_MUTATION_FILE_BYTES:
+                raise ToolExecutionError("oversized_candidate_denied")
+            candidate_sha = hashlib.sha256(candidate).hexdigest()
+            mutation_sha = hashlib.sha256(
+                (relative + "\0" + current_sha + "\0" + candidate_sha).encode()
+            ).hexdigest()
+            if candidate_sha != prepared.get("candidate_sha256") or mutation_sha != prepared.get(
+                "mutation_fingerprint"
+            ):
+                raise ToolExecutionError("mutation_fingerprint_mismatch")
+            temporary = ".novalton-i041-" + secrets.token_hex(16)
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=parent,
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    # Reject inherited default ACLs/security labels too: chmod
+                    # must not silently erase restrictions on the replacement.
+                    _mutation_metadata(handle.fileno())
+                    handle.write(candidate)
+                    handle.flush()
+                    os.fchown(handle.fileno(), -1, original.st_gid)
+                    os.fchmod(handle.fileno(), stat.S_IMODE(original.st_mode))
+                    replacement = _mutation_metadata(handle.fileno())
+                    if (replacement.st_uid, replacement.st_gid, replacement.st_mode) != (
+                        original.st_uid,
+                        original.st_gid,
+                        original.st_mode,
+                    ):
+                        raise ToolExecutionError("workspace_file_metadata_mismatch")
+                    os.fsync(handle.fileno())
+                latest, identity = _read_mutation_file(parent, name)
+                if latest != current or (
+                    _mutation_identity(identity) != _mutation_identity(original)
+                ):
+                    raise ToolExecutionError("stale_preimage")
+                _check_mutation_parent(root, relative, parent)
+                os.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+            finally:
+                with suppress(FileNotFoundError):
+                    os.unlink(temporary, dir_fd=parent)
+            return {"path": relative, "already_applied": False}
 
 
 @dataclass(frozen=True)
