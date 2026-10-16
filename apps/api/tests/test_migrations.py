@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
@@ -19,20 +19,20 @@ from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.workspaces.models import Workspace
 
 
-def test_alembic_configuration_loads_i043_github_publication() -> None:
+def test_alembic_configuration_loads_i044_controlled_verification() -> None:
     api_root = Path(__file__).parents[1]
     config = Config(api_root / "alembic.ini")
     scripts = ScriptDirectory.from_config(config)
 
     head = scripts.get_current_head()
     revision = scripts.get_revision(head)
-    predecessor = scripts.get_revision("20260902_0030")
+    predecessor = scripts.get_revision("20260902_0031")
 
-    assert head == "20260902_0031"
+    assert head == "20261011_0032"
     assert revision is not None
-    assert revision.down_revision == "20260902_0030"
+    assert revision.down_revision == "20260902_0031"
     assert predecessor is not None
-    assert predecessor.down_revision == "20260901_0029"
+    assert predecessor.down_revision == "20260902_0030"
 
 
 def test_postgres_migration_downgrades_to_i023_and_reupgrades() -> None:
@@ -168,5 +168,115 @@ def test_i041_developer_v3_downgrade_retains_historical_agent_run_and_reupgrades
                 await database.dispose()
 
         asyncio.run(verify_reupgrade())
+    finally:
+        command.upgrade(config, "head")
+
+
+def test_i044_immutable_verification_authority_round_trip():
+    config = Config(Path(__file__).parents[1] / "alembic.ini")
+    command.downgrade(config, "20260902_0031")
+
+    async def seed():
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory.begin() as session:
+                tenant = Tenant(name="I044 migration", slug=f"i044-{uuid4().hex[:12]}")
+                session.add(tenant)
+                await session.flush()
+                workspace = Workspace(tenant_id=tenant.id, name="I044 migration", slug="i044")
+                session.add(workspace)
+                await session.flush()
+                old = AgentDefinition(
+                    tenant_id=tenant.id,
+                    workspace_id=workspace.id,
+                    name="Developer Worker",
+                    slug="developer_worker",
+                    version=3,
+                    status="ENABLED",
+                    category="development",
+                    mission="Retain immutable authority",
+                    capabilities=["code_reasoning"],
+                    permissions=[
+                        "workspace.list_files",
+                        "workspace.read_file",
+                        "workspace.search_text",
+                        "workspace.replace_text",
+                    ],
+                )
+                session.add(old)
+                await session.flush()
+                return tenant.id, workspace.id, old.id
+        finally:
+            await database.dispose()
+
+    tenant_id, workspace_id, old_id = asyncio.run(seed())
+
+    async def inspect_index(expected_columns: str) -> None:
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                definition = await session.scalar(
+                    text(
+                        "SELECT pg_get_indexdef('uq_model_runs_agent_tool_continuation'::regclass)"
+                    )
+                )
+                assert definition is not None
+                assert f"({expected_columns})" in definition
+                assert "recovery_attempt_kind" in definition
+                assert "TOOL_CONTINUATION" in definition
+        finally:
+            await database.dispose()
+
+    async def inspect(expected_status, historical_run=None):
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                old = await session.get(AgentDefinition, old_id)
+                assert old.permissions == [
+                    "workspace.list_files",
+                    "workspace.read_file",
+                    "workspace.search_text",
+                    "workspace.replace_text",
+                ]
+                current = await session.scalar(
+                    select(AgentDefinition).where(
+                        AgentDefinition.tenant_id == tenant_id,
+                        AgentDefinition.workspace_id == workspace_id,
+                        AgentDefinition.slug == "developer_worker",
+                        AgentDefinition.version == 4,
+                    )
+                )
+                assert current.status == expected_status
+                assert current.permissions == [
+                    "workspace.list_files",
+                    "workspace.read_file",
+                    "workspace.search_text",
+                    "workspace.replace_text",
+                    "verify.backend_syntax",
+                ]
+                if historical_run is None:
+                    run = await agents_service.create_run(
+                        session,
+                        tenant_id=tenant_id,
+                        workspace_id=workspace_id,
+                        data=AgentRunCreate(agent_definition_id=current.id),
+                    )
+                    return run.id, current.id
+                run = await session.get(AgentRun, historical_run[0])
+                assert run.agent_definition_id == current.id == historical_run[1]
+        finally:
+            await database.dispose()
+
+    try:
+        asyncio.run(inspect_index("agent_run_id"))
+        command.upgrade(config, "head")
+        asyncio.run(inspect_index("agent_run_id, recovery_attempt_index"))
+        retained = asyncio.run(inspect("ENABLED"))
+        command.downgrade(config, "20260902_0031")
+        asyncio.run(inspect_index("agent_run_id"))
+        asyncio.run(inspect("ARCHIVED", retained))
+        command.upgrade(config, "head")
+        asyncio.run(inspect_index("agent_run_id, recovery_attempt_index"))
+        asyncio.run(inspect("ENABLED", retained))
     finally:
         command.upgrade(config, "head")

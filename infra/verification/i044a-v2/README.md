@@ -6,7 +6,13 @@ fixed systemd `BindReadOnlyPaths` source. Clients cannot supply a path, digest,
 or descriptor. A 256-bit server capability is single-use, expires after two
 seconds, is bound to the preparing peer PID, and starts only that server-created
 snapshot. The sandbox executes only the release-owned probe at
-`/runtime/i044a_probe.py`; `/source` is untrusted read-only data.
+`/runtime/i044a_probe.py`, which also invokes the fixed release-owned
+`/runtime/i044a_backend_syntax.py` checker; `/source` is untrusted read-only data.
+The checker compiles Python syntax without executing project code. Its explicit
+result is independent of the probe's deliberate containment timeout. The source
+binding is `/srv/novalton/workspace`, shared with the API deployment through a
+read-only service bind; no IPC path authority is added. See
+`docs/15-controlled-verification.md` for the application contract.
 
 The x86_64 seccomp program allows ordinary `clone` child creation but returns
 `EPERM` when any known `CLONE_NEW*` bit is present. `clone3` is denied outright,
@@ -75,10 +81,10 @@ server-owned and the restricted client never gains repository traversal.
 ## Reviewed identities
 
 ```text
-root handoff SHA-256:       69302aa4a2f2de636c89684e22f43d7dd5ddea4849565c5c66cdec93a7f67c39
-immutable installer SHA-256: e1fc8f89d7294a1ea5956aeee44a4dec4a5a66d8b48f60789b3d1d3a4f01d645
-bundle SHA-256:             b659f050bc0e44ddf303f2abc11647fa205fdcfb3ba1cc85578a69e19601e0d8
-I-044A input SHA-256:       f45980459fc114a7f2aa6c61c359e8c095a96f166e6393fd6994f74de26ae8df
+root handoff SHA-256:       f2ea4b18542ce5394708c347990aa2fab026bec16bba3d7aaab15eb3717012a4
+immutable installer SHA-256: b964bdd4af1053d8347d42828069c8c4a8a46324599a48760b2e89c7e0ccc522
+bundle SHA-256:             b48fa415cdde2abc8d15ad488cb39846c0740862e050dc055d0a6e954a0431a1
+I-044A input SHA-256:       342ef562d05652d2d41f82d32895529e78cbf9bda00dd11b730f769412d2fa88
 foundation input SHA-256:   412f4b3fb41491dc3b7b4cb6eb7f2395ab4bbc3a36afd84d803206742fcb8ec2
 ```
 
@@ -126,9 +132,9 @@ From the repository root, verify the three handoff inputs without privilege:
 
 ```bash
 sha256sum -c <<'EOF'
-69302aa4a2f2de636c89684e22f43d7dd5ddea4849565c5c66cdec93a7f67c39  infra/verification/i044a-v2/root-handoff.sh
-e1fc8f89d7294a1ea5956aeee44a4dec4a5a66d8b48f60789b3d1d3a4f01d645  infra/verification/i044a-v2/install.py
-b659f050bc0e44ddf303f2abc11647fa205fdcfb3ba1cc85578a69e19601e0d8  infra/verification/i044a-v2/bundle.tar
+f2ea4b18542ce5394708c347990aa2fab026bec16bba3d7aaab15eb3717012a4  infra/verification/i044a-v2/root-handoff.sh
+b964bdd4af1053d8347d42828069c8c4a8a46324599a48760b2e89c7e0ccc522  infra/verification/i044a-v2/install.py
+b48fa415cdde2abc8d15ad488cb39846c0740862e050dc055d0a6e954a0431a1  infra/verification/i044a-v2/bundle.tar
 EOF
 ```
 

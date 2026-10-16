@@ -55,10 +55,12 @@ class ModelRunStart(BaseModel):
     recovery_attempt_kind: str = Field(
         default="INITIAL", pattern=r"^(INITIAL|TRUNCATION|CONTRACT_REPAIR|TOOL_CONTINUATION)$"
     )
-    recovery_attempt_index: int = Field(default=0, ge=0, le=1)
+    recovery_attempt_index: int = Field(default=0, ge=0, le=6)
 
     @model_validator(mode="after")
     def validate_estimate(self) -> "ModelRunStart":
+        if self.recovery_attempt_kind != "TOOL_CONTINUATION" and self.recovery_attempt_index > 1:
+            raise ValueError("recovery round limit exceeded")
         if self.model_definition_id is None and (
             self.provider_id is None or self.provider_model_id is None
         ):

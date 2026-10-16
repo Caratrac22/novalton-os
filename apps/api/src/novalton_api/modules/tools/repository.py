@@ -36,7 +36,7 @@ async def get_for_approval(
         ToolCall.approval_request_id == approval_request_id,
     )
     if for_update:
-        statement = statement.with_for_update()
+        statement = statement.with_for_update().execution_options(populate_existing=True)
     return await session.scalar(statement)
 
 

@@ -128,6 +128,15 @@ async def get_operator_view(
             OperatorToolCallResponse(
                 id=item.id,
                 tool_name=item.tool_id,
+                verification=metadata.get("verification")
+                if item.tool_id == "verify.backend_syntax"
+                else None,
+                workspace_integrity=metadata.get("workspace_integrity")
+                if item.tool_id == "verify.backend_syntax"
+                else None,
+                verified_source_sha256=metadata.get("source_digest")
+                if item.tool_id == "verify.backend_syntax"
+                else None,
                 status=item.status,
                 policy_effect=item.policy_effect,
                 approval_request_id=item.approval_request_id,

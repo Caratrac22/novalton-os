@@ -16,7 +16,7 @@ from typing import Any, Final
 _ENDPOINT: Final = "/run/novalton-verification/control.sock"
 _DEFINITION: Final = "repository-probe-v1"
 _FOUNDATION_INPUT_SHA256: Final = "412f4b3fb41491dc3b7b4cb6eb7f2395ab4bbc3a36afd84d803206742fcb8ec2"
-_I044A_INPUT_SHA256: Final = "f45980459fc114a7f2aa6c61c359e8c095a96f166e6393fd6994f74de26ae8df"
+_I044A_INPUT_SHA256: Final = "342ef562d05652d2d41f82d32895529e78cbf9bda00dd11b730f769412d2fa88"
 _MAX_REQUEST_BYTES: Final = 1024
 _MAX_RESPONSE_BYTES: Final = 8192
 _MAX_FILES: Final = 4096
@@ -101,6 +101,7 @@ class VerificationResult:
     output_truncated: bool
     checks: dict[str, bool]
     failure_code: str | None = None
+    verification: dict[str, Any] | None = None
 
 
 def _excluded(relative: PurePosixPath) -> bool:
@@ -251,6 +252,8 @@ class VerificationSandboxAdapter:
             or re.fullmatch(r"[0-9a-f]{64}", snapshot_digest) is None
         ):
             raise VerificationSandboxError("invalid_response")
+        if source_digest(self._workspace_root) != snapshot_digest:
+            raise VerificationSandboxError("snapshot_workspace_mismatch")
         accepted = self._request({"op": "verify", "capability": capability})
         run_id = accepted.get("run_id")
         if (
@@ -304,4 +307,7 @@ class VerificationSandboxAdapter:
             output_truncated=value.get("output_truncated") is True,
             checks=checks,
             failure_code=failure_code,
+            verification=value.get("verification")
+            if isinstance(value.get("verification"), dict)
+            else None,
         )

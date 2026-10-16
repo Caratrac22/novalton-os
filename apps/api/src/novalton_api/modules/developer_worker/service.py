@@ -1,6 +1,7 @@
 """Scoped Developer Worker definition and I-022 execution integration."""
 
 import logging
+from collections.abc import Awaitable, Callable
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,7 +25,7 @@ from novalton_api.modules.tools.executor import TRUSTED_TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
 DEVELOPER_WORKER_SLUG = "developer_worker"
-DEVELOPER_WORKER_VERSION = 3
+DEVELOPER_WORKER_VERSION = 4
 DEVELOPER_WORKER_NAME = "Developer Worker"
 DEVELOPER_WORKER_CATEGORY = "development"
 DEVELOPER_WORKER_MISSION = (
@@ -43,6 +44,7 @@ DEVELOPER_WORKER_PERMISSIONS = [
     "workspace.read_file",
     "workspace.search_text",
     "workspace.replace_text",
+    "verify.backend_syntax",
 ]
 _CONTRACT_INSTRUCTIONS = (
     "Return implementation metadata only. A tool_proposals entry may name only an explicitly "
@@ -81,6 +83,7 @@ async def execute_assignment(
     tenant_id: UUID,
     workspace_id: UUID,
     data: DeveloperWorkerExecutionRequest,
+    on_run_created: Callable[[AgentRun], Awaitable[None]] | None = None,
 ) -> DeveloperWorkerExecutionResponse:
     definition = await resolve_definition(session, tenant_id=tenant_id, workspace_id=workspace_id)
     response = await execution.execute(
@@ -93,6 +96,7 @@ async def execute_assignment(
         result_contract=DeveloperWorkerResult,
         continuation_result_contract=DeveloperWorkerTerminalResult,
         contract_instructions=_CONTRACT_INSTRUCTIONS,
+        on_run_created=on_run_created,
     )
     result = response.result
     if result is not None:

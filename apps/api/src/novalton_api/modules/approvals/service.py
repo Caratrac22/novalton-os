@@ -104,7 +104,7 @@ async def create_approval(
 ) -> ApprovalRequest:
     """Re-evaluate and persist authority only when policy requires confirmation."""
     request = _evaluation_request(tenant_id=tenant_id, workspace_id=workspace_id, data=data)
-    result = await policy_service.evaluate(session, request=request)
+    result = await policy_service.evaluate(session, request=request, commit=commit)
     if result.effect == PolicyEffect.BLOCK:
         raise _invalid("Blocked actions cannot request approval")
     if result.effect != PolicyEffect.REQUIRE_CONFIRMATION:
@@ -214,6 +214,11 @@ async def _decide(
         if approval is None:
             raise _not_found()
         if approval.status == target.value:
+            # The idempotent decision still acquired a row lock. Release it
+            # before a caller resumes an approval-linked tool in a separate
+            # transaction; otherwise concurrent replays can retain locks
+            # across the mutation and its AgentRun/ToolCall transitions.
+            await session.commit()
             return approval
         if approval.status != ApprovalStatus.PENDING.value:
             raise _conflict("Approval has already reached a terminal decision")
@@ -301,6 +306,7 @@ async def is_approval_satisfied(
     approval_id: UUID,
     request: PolicyEvaluationRequest,
     mutation_fingerprint: str | None = None,
+    commit: bool = True,
 ) -> bool:
     """Check exact prior authority and re-evaluate so a later BLOCK always wins."""
     approval = await repository.get_scoped_approval(
@@ -317,5 +323,5 @@ async def is_approval_satisfied(
         approval.policy_reasons, list
     ):
         return False
-    current = await policy_service.evaluate(session, request=request)
+    current = await policy_service.evaluate(session, request=request, commit=commit)
     return current.effect != PolicyEffect.BLOCK

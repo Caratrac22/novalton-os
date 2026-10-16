@@ -97,7 +97,7 @@ async def _validate_evaluation_scope(
 
 
 async def evaluate(
-    session: AsyncSession, *, request: PolicyEvaluationRequest
+    session: AsyncSession, *, request: PolicyEvaluationRequest, commit: bool = True
 ) -> PolicyEvaluationResult:
     """Evaluate effective tenant/workspace rules and audit non-silent outcomes."""
     result = await evaluate_decision(session, request=request)
@@ -121,7 +121,7 @@ async def evaluate(
                     "matched_rule_count": len(result.matched_rule_ids),
                 },
             ),
-            commit=True,
+            commit=commit,
         )
     return result
 

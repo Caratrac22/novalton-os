@@ -65,17 +65,18 @@ async def _bootstrap_agent_definition(
     mission: str,
     capabilities: list[str],
     permissions: list[str],
+    version: int = 1,
 ) -> AgentDefinition:
     definition = await session.scalar(
         select(AgentDefinition).where(
             AgentDefinition.tenant_id == tenant_id,
             AgentDefinition.workspace_id == workspace_id,
             AgentDefinition.slug == slug,
-            AgentDefinition.version == 1,
+            AgentDefinition.version == version,
         )
     )
-    target_version = 1
-    if definition is not None and definition.permissions == [] and permissions:
+    target_version = version
+    if version == 1 and definition is not None and definition.permissions == [] and permissions:
         legacy = (
             definition.name,
             definition.status,
@@ -184,6 +185,7 @@ async def bootstrap_local_scope(session: AsyncSession, settings: Settings) -> Bo
         mission=DEVELOPER_WORKER_MISSION,
         capabilities=DEVELOPER_WORKER_CAPABILITIES,
         permissions=DEVELOPER_WORKER_PERMISSIONS,
+        version=4,
     )
     qa_worker = await _bootstrap_agent_definition(
         session,

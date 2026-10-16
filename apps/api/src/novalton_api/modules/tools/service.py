@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.config import get_settings
@@ -41,6 +41,7 @@ from novalton_api.modules.tools.executor import (
     ReplaceTextExecutor,
     ToolExecutionError,
     ToolRegistry,
+    VerificationExecutor,
     WorkspaceRoot,
 )
 from novalton_api.modules.tools.models import ToolCall
@@ -112,11 +113,14 @@ async def _load_authority(
     proposal_model_run_id: UUID | None,
 ) -> tuple[AgentRun, AgentDefinition]:
     run = await session.scalar(
-        select(AgentRun).where(
+        select(AgentRun)
+        .where(
             AgentRun.id == agent_run_id,
             AgentRun.tenant_id == tenant_id,
             AgentRun.workspace_id == workspace_id,
         )
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if run is None:
         raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
@@ -288,6 +292,26 @@ async def execute_proposal(
         agent_run_id=agent_run_id,
         call_key=proposal.call_key,
     )
+    verification_limit = False
+    if existing is None and registered and isinstance(registered.executor, VerificationExecutor):
+        # Serialize budget reservations on the existing AgentRun row. The
+        # subsequently committed ToolCall consumes the slot durably.
+        await session.scalar(select(AgentRun).where(AgentRun.id == run.id).with_for_update())
+        existing = await repository.get_by_key(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            agent_run_id=agent_run_id,
+            call_key=proposal.call_key,
+        )
+        from novalton_api.modules.tools.verification import MAX_VERIFICATIONS
+
+        count = await session.scalar(
+            select(func.count())
+            .select_from(ToolCall)
+            .where(ToolCall.agent_run_id == run.id, ToolCall.tool_id == "verify.backend_syntax")
+        )
+        verification_limit = (count or 0) >= MAX_VERIFICATIONS
     prepared: dict[str, object] | None = None
     if (
         existing is None
@@ -332,10 +356,25 @@ async def execute_proposal(
             else None,
             prepared_mutation=prepared,
         )
-        await session.commit()
+        # Keep the reservation and its first durable state in one transaction.
+        # An interruption during Policy or approval creation must not leave a
+        # committed PROPOSED ToolCall without a continuation marker.
+
+    # A stale provider response must not reserve a new tool after a concurrent
+    # terminal transition. The AgentRun lock from _load_authority is held
+    # through policy and the next durable ToolCall state.
+    if run.status != "RUNNING":
+        raise ApplicationError(
+            "tool_agent_run_inactive", "Agent run is not active", status_code=409
+        )
 
     if registered is None:
         return await _deny(session, value=value, code="unknown_tool_denied")
+    if isinstance(registered.executor, VerificationExecutor):
+        if definition.slug != "developer_worker":
+            return await _deny(session, value=value, code="tool_permission_denied")
+        if verification_limit:
+            return await _deny(session, value=value, code="verification_round_limit_exceeded")
     if parsed_input is None:
         return await _deny(session, value=value, code="invalid_tool_input")
     if prepared is not None and "failure_code" in prepared:
@@ -355,7 +394,7 @@ async def execute_proposal(
     if value.status == "PENDING_APPROVAL":
         if approval_id is None or value.approval_request_id != approval_id:
             return _result(value, failure_code="approval_not_satisfied")
-        decision = await policy_service.evaluate(session, request=request)
+        decision = await policy_service.evaluate(session, request=request, commit=False)
         policy_effect = decision.effect
         matched_rule_ids = [str(rule_id) for rule_id in decision.matched_rule_ids]
         if decision.effect == PolicyEffect.BLOCK:
@@ -382,10 +421,11 @@ async def execute_proposal(
             approval_id=approval_id,
             request=request,
             mutation_fingerprint=value.mutation_fingerprint,
+            commit=False,
         ):
             return _result(value, failure_code="approval_not_satisfied")
     else:
-        decision = await policy_service.evaluate(session, request=request)
+        decision = await policy_service.evaluate(session, request=request, commit=False)
         policy_effect = decision.effect
         matched_rule_ids = [str(rule_id) for rule_id in decision.matched_rule_ids]
         if decision.effect == PolicyEffect.BLOCK:
@@ -408,6 +448,14 @@ async def execute_proposal(
                 matched_rule_ids=matched_rule_ids,
             )
         if decision.effect == PolicyEffect.REQUIRE_CONFIRMATION:
+            if isinstance(registered.executor, VerificationExecutor):
+                return await _deny(
+                    session,
+                    value=value,
+                    code="verification_policy_requires_allow",
+                    policy_effect=decision.effect.value,
+                    matched_rule_ids=matched_rule_ids,
+                )
             approval = await approvals_service.create_approval(
                 session,
                 tenant_id=tenant_id,
@@ -423,6 +471,7 @@ async def execute_proposal(
                     context=request.context,
                     mutation_fingerprint=value.mutation_fingerprint,
                 ),
+                commit=False,
             )
             value = await repository.set_state(
                 session,
@@ -448,6 +497,12 @@ async def execute_proposal(
         started_at=started,
     )
     await session.commit()
+    # The sandbox runs outside the database; keep the run lock while the
+    # bounded execution finishes, so reconciliation cannot terminalize the
+    # workflow and then accept a late tool effect as successful evidence.
+    await session.refresh(run, with_for_update=True)
+    if run.status != "RUNNING":
+        return await _deny(session, value=value, code="tool_agent_run_inactive")
     timer = perf_counter()
     try:
         if isinstance(registered.executor, ReplaceTextExecutor):
@@ -509,6 +564,26 @@ async def resume_prepared_mutation(
     registry: ToolRegistry = TRUSTED_TOOL_REGISTRY,
 ) -> tuple[ToolGatewayResult, AgentRun]:
     """Apply the exact locked prepared mutation without accepting caller-authored authority."""
+    observed = await repository.get_for_approval(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        approval_request_id=approval_id,
+    )
+    if observed is None:
+        raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
+    run = await session.scalar(
+        select(AgentRun)
+        .where(
+            AgentRun.id == observed.agent_run_id,
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.workspace_id == workspace_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if run is None:
+        raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
     value = await repository.get_for_approval(
         session,
         tenant_id=tenant_id,
@@ -517,17 +592,6 @@ async def resume_prepared_mutation(
         for_update=True,
     )
     if value is None:
-        raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
-    run = await session.scalar(
-        select(AgentRun)
-        .where(
-            AgentRun.id == value.agent_run_id,
-            AgentRun.tenant_id == tenant_id,
-            AgentRun.workspace_id == workspace_id,
-        )
-        .with_for_update()
-    )
-    if run is None:
         raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
     if value.status == "SUCCEEDED":
         return _result(
@@ -586,7 +650,7 @@ async def resume_prepared_mutation(
         tool_call_id=value.id,
         risk_level=registered.definition.risk_class.value,
     )
-    decision = await policy_service.evaluate(session, request=request)
+    decision = await policy_service.evaluate(session, request=request, commit=False)
     matched_rule_ids = [str(rule_id) for rule_id in decision.matched_rule_ids]
     if decision.effect == PolicyEffect.BLOCK:
         return (
@@ -606,6 +670,7 @@ async def resume_prepared_mutation(
             approval_id=approval_id,
             request=request,
             mutation_fingerprint=value.mutation_fingerprint,
+            commit=False,
         )
     ):
         return await _deny(session, value=value, code="approval_not_satisfied"), run
@@ -667,6 +732,26 @@ async def reject_prepared_mutation(
     workspace_id: UUID,
     approval_id: UUID,
 ) -> AgentRun:
+    observed = await repository.get_for_approval(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        approval_request_id=approval_id,
+    )
+    if observed is None:
+        raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
+    run = await session.scalar(
+        select(AgentRun)
+        .where(
+            AgentRun.id == observed.agent_run_id,
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.workspace_id == workspace_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if run is None:
+        raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
     value = await repository.get_for_approval(
         session,
         tenant_id=tenant_id,
@@ -675,17 +760,6 @@ async def reject_prepared_mutation(
         for_update=True,
     )
     if value is None:
-        raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
-    run = await session.scalar(
-        select(AgentRun)
-        .where(
-            AgentRun.id == value.agent_run_id,
-            AgentRun.tenant_id == tenant_id,
-            AgentRun.workspace_id == workspace_id,
-        )
-        .with_for_update()
-    )
-    if run is None:
         raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
     if value.status == "PENDING_APPROVAL":
         await _deny(session, value=value, code="approval_rejected")

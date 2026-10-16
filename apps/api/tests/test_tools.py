@@ -1,4 +1,5 @@
 import os
+import stat
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -53,9 +54,10 @@ def safe_workspace(tmp_path: Path) -> WorkspaceRoot:
     return WorkspaceRoot.approved(tmp_path)
 
 
-def test_registry_contains_only_server_owned_workspace_tools() -> None:
+def test_registry_contains_only_server_owned_tools() -> None:
     definitions = TRUSTED_TOOL_REGISTRY.definitions
     assert [item.tool_id for item in definitions] == [
+        "verify.backend_syntax",
         "workspace.list_files",
         "workspace.read_file",
         "workspace.replace_text",
@@ -734,6 +736,455 @@ async def test_replace_text_changed_preimage_fails_closed(tmp_path: Path) -> Non
         assert result.status == ToolExecutionStatus.FAILED
         assert result.failure_code == "stale_preimage"
         assert path.read_text(encoding="utf-8") == "changed\n"
+    finally:
+        await database.dispose()
+        await _cleanup_gateway(tenant_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("slug", "permission", "permitted", "effect", "failure"),
+    [
+        ("developer_worker", False, True, PolicyEffect.ALLOW, "tool_permission_denied"),
+        ("developer_worker", True, False, PolicyEffect.ALLOW, "tool_permission_denied"),
+        ("developer_manager", True, True, PolicyEffect.ALLOW, "tool_permission_denied"),
+        ("qa_worker", True, True, PolicyEffect.ALLOW, "tool_permission_denied"),
+        ("developer_worker", True, True, PolicyEffect.BLOCK, "tool_policy_blocked"),
+        (
+            "developer_worker",
+            True,
+            True,
+            PolicyEffect.REQUIRE_CONFIRMATION,
+            "verification_policy_requires_allow",
+        ),
+    ],
+)
+async def test_i044_exact_authority_denies_before_execution(
+    safe_workspace,
+    monkeypatch,
+    slug,
+    permission,
+    permitted,
+    effect,
+    failure,
+):
+    from novalton_api.modules.tools.executor import VerificationExecutor
+
+    def forbidden(*args):
+        pytest.fail("denied request reached sandbox")
+
+    monkeypatch.setattr(VerificationExecutor, "execute", forbidden)
+    tenant_id, workspace_id, _, _, run_id = await _seed_gateway(
+        permissions=["verify.backend_syntax"] if permission else []
+    )
+    database = Database.from_settings(Settings())
+    try:
+        async with database.session_factory.begin() as session:
+            run = await session.get(AgentRun, run_id)
+            definition = await session.get(AgentDefinition, run.agent_definition_id)
+            definition.slug = slug
+        await _rule(tenant_id, workspace_id, effect, "tool.verify.backend_syntax")
+        async with database.session_factory() as session:
+            result = await service.execute_proposal(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_run_id=run_id,
+                proposal=ToolProposal(
+                    call_key="verify",
+                    tool_name="verify.backend_syntax",
+                    arguments={"command_id": "verify.backend_syntax", "parameters": {}},
+                ),
+                permitted_tools=["verify.backend_syntax"] if permitted else [],
+                workspace_root=safe_workspace,
+            )
+            assert result.status == ToolExecutionStatus.BLOCKED
+            assert result.failure_code == failure
+            value = await session.get(ToolCall, UUID(result.tool_call_id))
+            assert value.started_at is None and value.approval_request_id is None
+    finally:
+        await database.dispose()
+        await _cleanup_gateway(tenant_id)
+
+
+@pytest.mark.asyncio
+async def test_i044_durable_budget_replay_and_concurrent_requests(safe_workspace, monkeypatch):
+    import asyncio
+
+    from novalton_api.modules.tools.executor import VerificationExecutor
+
+    executions = []
+
+    def bounded(*args):
+        executions.append(1)
+        metadata = {"authority": "UNTRUSTED_DATA", "verification": {"state": "passed"}}
+        return metadata, metadata
+
+    monkeypatch.setattr(VerificationExecutor, "execute", bounded)
+    tenant_id, workspace_id, _, _, run_id = await _seed_gateway(
+        permissions=["verify.backend_syntax"]
+    )
+    database = Database.from_settings(Settings())
+    try:
+        async with database.session_factory.begin() as session:
+            run = await session.get(AgentRun, run_id)
+            definition = await session.get(AgentDefinition, run.agent_definition_id)
+            definition.slug = "developer_worker"
+        await _rule(tenant_id, workspace_id, PolicyEffect.ALLOW, "tool.verify.backend_syntax")
+
+        async def execute(key):
+            async with database.session_factory() as session:
+                return await service.execute_proposal(
+                    session,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    agent_run_id=run_id,
+                    proposal=ToolProposal(
+                        call_key=key,
+                        tool_name="verify.backend_syntax",
+                        arguments={"command_id": "verify.backend_syntax", "parameters": {}},
+                    ),
+                    permitted_tools=["verify.backend_syntax"],
+                    workspace_root=safe_workspace,
+                )
+
+        first = await execute("first")
+        replay = await execute("first")
+        assert replay.tool_call_id == first.tool_call_id
+        assert replay.status == ToolExecutionStatus.SUCCEEDED
+        assert len(executions) == 1
+        concurrent = await asyncio.gather(execute("second"), execute("third"))
+        assert sorted(item.status.value for item in concurrent) == ["BLOCKED", "SUCCEEDED"]
+        assert [
+            item.failure_code for item in concurrent if item.status == ToolExecutionStatus.BLOCKED
+        ] == ["verification_round_limit_exceeded"]
+        assert len(executions) == 2
+        async with database.session_factory() as session:
+            values = list(
+                await session.scalars(select(ToolCall).where(ToolCall.agent_run_id == run_id))
+            )
+            assert len(values) == 3
+            assert len([value for value in values if value.status == "SUCCEEDED"]) == 2
+            assert all(value.completed_at is not None for value in values)
+    finally:
+        await database.dispose()
+        await _cleanup_gateway(tenant_id)
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o640, 0o644, 0o755])
+def test_atomic_replace_preserves_existing_mode_and_group(tmp_path: Path, mode: int) -> None:
+    path = tmp_path / "fixture.py"
+    path.write_text("value = 1\n")
+    path.chmod(mode)
+    original = path.stat()
+    root = WorkspaceRoot.approved(tmp_path)
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+    result = executor.apply(root, data, prepared)
+    assert result["already_applied"] is False
+    assert path.read_text() == "value = 2\n"
+    assert stat.S_IMODE(path.stat().st_mode) == mode
+    assert path.stat().st_gid == original.st_gid
+    assert executor.apply(root, data, prepared)["already_applied"] is True
+
+
+@pytest.mark.parametrize("mode", [0o4644, 0o2644, 0o1644])
+def test_atomic_replace_rejects_privileged_mode(tmp_path: Path, mode: int) -> None:
+    path = tmp_path / "fixture.py"
+    path.write_text("value = 1\n")
+    root = WorkspaceRoot.approved(tmp_path)
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+    path.chmod(mode)
+    with pytest.raises(ToolExecutionError, match="workspace_privileged_mode_denied"):
+        executor.prepare(root, data)
+    with pytest.raises(ToolExecutionError, match="workspace_privileged_mode_denied"):
+        executor.apply(root, data, prepared)
+    assert path.read_text() == "value = 1\n"
+    assert not list(tmp_path.glob(".novalton-i041-*"))
+
+
+@pytest.mark.parametrize("phase", ["prepare", "apply"])
+@pytest.mark.parametrize("metadata", ["owner", "xattr", "inspection_failed"])
+def test_atomic_replace_rejects_unsupported_metadata(tmp_path, monkeypatch, phase, metadata):
+    path = tmp_path / "fixture.py"
+    path.write_text("value = 1\n")
+    root = WorkspaceRoot.approved(tmp_path)
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+    if metadata == "owner":
+        uid = os.geteuid()
+        monkeypatch.setattr(os, "geteuid", lambda: uid + 1)
+        code = "workspace_file_owner_denied"
+    elif metadata == "xattr":
+        os.setxattr(path, "user.novalton-test", b"preserve me")
+        code = "workspace_file_attributes_denied"
+    else:
+
+        def unavailable(*args):
+            raise OSError("attribute inspection unavailable")
+
+        monkeypatch.setattr(os, "listxattr", unavailable)
+        code = "workspace_mutation_failed"
+    with pytest.raises(ToolExecutionError, match=code):
+        if phase == "prepare":
+            executor.prepare(root, data)
+        else:
+            executor.apply(root, data, prepared)
+    assert path.read_text() == "value = 1\n"
+    assert not list(tmp_path.glob(".novalton-i041-*"))
+
+
+@pytest.mark.parametrize("phase", ["prepare", "apply"])
+def test_atomic_replace_parent_symlink_denied(tmp_path, phase):
+    root_path = tmp_path / "workspace"
+    root_path.mkdir()
+    source = root_path / "src"
+    source.mkdir()
+    (source / "fixture.py").write_text("value = 1\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "fixture.py"
+    target.write_text("value = 1\n")
+    executor = ReplaceTextExecutor()
+    root = WorkspaceRoot.approved(root_path)
+    data = executor.input_model(path="src/fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+    source.rename(root_path / "moved")
+    source.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ToolExecutionError, match="workspace_mutation_failed"):
+        if phase == "prepare":
+            executor.prepare(root, data)
+        else:
+            executor.apply(root, data, prepared)
+    assert target.read_text() == "value = 1\n"
+
+
+@pytest.mark.parametrize("phase", ["prepare", "apply"])
+@pytest.mark.parametrize("move_outside", [False, True])
+def test_atomic_replace_parent_substitution_fails_closed(
+    tmp_path, monkeypatch, phase, move_outside
+):
+    root_path = tmp_path / "workspace"
+    root_path.mkdir()
+    source = root_path / "src"
+    source.mkdir()
+    (source / "fixture.py").write_text("value = 1\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = outside / "fixture.py"
+    external.write_text("value = 1\n")
+    executor = ReplaceTextExecutor()
+    root = WorkspaceRoot.approved(root_path)
+    data = executor.input_model(path="src/fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+    opened = os.open
+    substituted = False
+    moved = (tmp_path if move_outside else root_path) / "moved"
+
+    def substitute(path, flags, *args, **kwargs):
+        nonlocal substituted
+        descriptor = opened(path, flags, *args, **kwargs)
+        if path == "src" and flags & os.O_DIRECTORY and not substituted:
+            substituted = True
+            source.rename(moved)
+            source.symlink_to(outside, target_is_directory=True)
+        return descriptor
+
+    monkeypatch.setattr(os, "open", substitute)
+    with pytest.raises(ToolExecutionError, match="workspace_parent_changed"):
+        if phase == "prepare":
+            executor.prepare(root, data)
+        else:
+            executor.apply(root, data, prepared)
+    assert (moved / "fixture.py").read_text() == "value = 1\n"
+    assert substituted
+    assert external.read_text() == "value = 1\n"
+    assert not list(root_path.rglob(".novalton-i041-*"))
+    assert not list(outside.glob(".novalton-i041-*"))
+
+
+def test_atomic_replace_parent_moves_during_write_cleans_original_directory(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "src"
+    source.mkdir()
+    (source / "fixture.py").write_text("value = 1\n")
+    external = tmp_path / "outside"
+    external.mkdir()
+    (external / "fixture.py").write_text("outside\n")
+    moved = tmp_path / "moved"
+    executor = ReplaceTextExecutor()
+    root = WorkspaceRoot.approved(workspace)
+    data = executor.input_model(path="src/fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+    fsync = os.fsync
+
+    def move_parent(fd):
+        fsync(fd)
+        source.rename(moved)
+        source.symlink_to(external, target_is_directory=True)
+
+    monkeypatch.setattr(os, "fsync", move_parent)
+    with pytest.raises(ToolExecutionError, match="workspace_parent_changed"):
+        executor.apply(root, data, prepared)
+    assert (moved / "fixture.py").read_text() == "value = 1\n"
+    assert (external / "fixture.py").read_text() == "outside\n"
+    assert not list(moved.glob(".novalton-i041-*"))
+    assert not list(external.glob(".novalton-i041-*"))
+
+
+@pytest.mark.parametrize("operation", ["fchmod", "replace"])
+def test_atomic_replace_failed_write_cleans_pinned_temporary(tmp_path, monkeypatch, operation):
+    path = tmp_path / "fixture.py"
+    path.write_text("value = 1\n")
+    root = WorkspaceRoot.approved(tmp_path)
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+
+    def fail(*args, **kwargs):
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(os, operation, fail)
+    with pytest.raises(ToolExecutionError, match="workspace_mutation_failed"):
+        executor.apply(root, data, prepared)
+    assert path.read_text() == "value = 1\n"
+    assert not list(tmp_path.glob(".novalton-i041-*"))
+
+
+def test_atomic_replace_rejects_inherited_temporary_attributes(tmp_path, monkeypatch):
+    path = tmp_path / "fixture.py"
+    path.write_text("value = 1\n")
+    root = WorkspaceRoot.approved(tmp_path)
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.py", search="1", replacement="2")
+    _, prepared = executor.prepare(root, data)
+    original_inode = path.stat().st_ino
+    monkeypatch.setattr(
+        os,
+        "listxattr",
+        lambda fd: [] if os.fstat(fd).st_ino == original_inode else ["system.posix_acl_access"],
+    )
+    with pytest.raises(ToolExecutionError, match="workspace_file_attributes_denied"):
+        executor.apply(root, data, prepared)
+    assert path.read_text() == "value = 1\n"
+    assert not list(tmp_path.glob(".novalton-i041-*"))
+
+
+def test_atomic_replace_prepare_bounds_read_even_when_file_grows(tmp_path, monkeypatch):
+    from novalton_api.modules.tools import executor as module
+
+    path = tmp_path / "fixture.py"
+    path.write_text("value = 1\n")
+    root = WorkspaceRoot.approved(tmp_path)
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.py", search="1", replacement="2")
+    fdopen = os.fdopen
+    requests = []
+
+    class GrowingReader:
+        def __init__(self, fd, mode):
+            self.reader = fdopen(fd, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.reader.close()
+
+        def fileno(self):
+            return self.reader.fileno()
+
+        def read(self, size):
+            requests.append(size)
+            path.write_bytes(b"x" * (module._MAX_MUTATION_FILE_BYTES * 2))
+            return self.reader.read(size)
+
+    monkeypatch.setattr(os, "fdopen", GrowingReader)
+    with pytest.raises(ToolExecutionError, match="oversized_file_denied"):
+        executor.prepare(root, data)
+    assert requests == [module._MAX_MUTATION_FILE_BYTES + 1]
+
+
+def test_atomic_replace_fifo_does_not_block(tmp_path):
+    os.mkfifo(tmp_path / "fixture.py")
+    executor = ReplaceTextExecutor()
+    data = executor.input_model(path="fixture.py", search="1", replacement="2")
+    with pytest.raises(ToolExecutionError, match="workspace_file_type_denied"):
+        executor.prepare(WorkspaceRoot.approved(tmp_path), data)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt_at", ["after_reservation", "after_approval_creation"])
+async def test_tool_reservation_and_approval_link_are_atomic(
+    safe_workspace: WorkspaceRoot, monkeypatch: pytest.MonkeyPatch, interrupt_at: str
+) -> None:
+    tenant_id, workspace_id, _, _, run_id = await _seed_gateway()
+    await _rule(tenant_id, workspace_id, PolicyEffect.REQUIRE_CONFIRMATION)
+    database = Database.from_settings(Settings())
+    proposal = ToolProposal(
+        call_key="interrupted_read",
+        tool_name="workspace.read_file",
+        arguments={"path": "src/fixture.txt"},
+    )
+    if interrupt_at == "after_reservation":
+        original = service.repository.create
+
+        async def interrupt_create(*args, **kwargs):
+            await original(*args, **kwargs)
+            raise RuntimeError("injected_after_reservation")
+
+        monkeypatch.setattr(service.repository, "create", interrupt_create)
+    else:
+        original = service.repository.set_state
+
+        async def interrupt_link(*args, **kwargs):
+            if kwargs.get("status") == "PENDING_APPROVAL":
+                raise RuntimeError("injected_after_approval_creation")
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(service.repository, "set_state", interrupt_link)
+    try:
+        async with database.session_factory() as session:
+            with pytest.raises(RuntimeError, match="injected_after_"):
+                await service.execute_proposal(
+                    session,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    agent_run_id=run_id,
+                    proposal=proposal,
+                    permitted_tools=["workspace.read_file"],
+                    workspace_root=safe_workspace,
+                )
+        async with database.session_factory() as session:
+            assert not list(
+                await session.scalars(select(ToolCall).where(ToolCall.agent_run_id == run_id))
+            )
+            assert not list(
+                await session.scalars(
+                    select(ApprovalRequest).where(ApprovalRequest.tenant_id == tenant_id)
+                )
+            )
+            assert not list(
+                await session.scalars(select(AuditRecord).where(AuditRecord.tenant_id == tenant_id))
+            )
+        monkeypatch.undo()
+        async with database.session_factory() as session:
+            result = await service.execute_proposal(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_run_id=run_id,
+                proposal=proposal,
+                permitted_tools=["workspace.read_file"],
+                workspace_root=safe_workspace,
+            )
+            assert result.status == ToolExecutionStatus.PENDING_APPROVAL
+            assert result.approval_id is not None
     finally:
         await database.dispose()
         await _cleanup_gateway(tenant_id)

@@ -1,13 +1,15 @@
 import asyncio
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from novalton_api.core.config import Settings, get_settings
@@ -19,6 +21,7 @@ from novalton_api.infrastructure.providers.contracts import (
 )
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.main import create_app
+from novalton_api.modules.agents import service as agent_service
 from novalton_api.modules.agents.models import AgentDefinition, AgentRun
 from novalton_api.modules.approvals.models import ApprovalRequest
 from novalton_api.modules.audit.models import AuditRecord
@@ -45,6 +48,7 @@ from novalton_api.modules.workflows.models import (
     WorkflowStepHandoff,
     WorkflowStepRun,
 )
+from novalton_api.modules.workflows.schemas import WorkflowStepRunStatus
 from novalton_api.modules.workspaces.models import Workspace
 
 
@@ -484,6 +488,675 @@ def test_benign_approval_required_assignment_proceeds_without_manager_authority(
         "Remain within the fixed persisted workflow step",
         "Requested actions are proposals only",
     ]
+
+
+def run_i044_verification_cycle(
+    scope: Scope, root, monkeypatch, *, installed: bool, interrupt_at: str | None = None
+) -> None:
+    """Same governed cycle in unit integration and separately required installed acceptance."""
+    from novalton_api.infrastructure.verification_sandbox import VerificationResult, source_digest
+    from novalton_api.modules.tools import verification
+
+    target = root / "apps/api/src/i044_fixture.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    (root / "apps/api/tests").mkdir(parents=True, exist_ok=True)
+    target.write_text("value = 1\n")
+    (root / "apps/api/tests/test_fixture.py").write_text("assert True\n")
+    monkeypatch.setenv("NOVALTON_WORKSPACE_ROOT", str(root))
+    get_settings.cache_clear()
+    if not installed:
+        monkeypatch.setattr(verification, "WORKSPACE", root)
+
+        class UnitAdapter:
+            def __init__(self, bound):
+                assert bound == root
+
+            def verify(self):
+                failed = "value = (" in target.read_text()
+                return VerificationResult(
+                    run_id=uuid4().hex,
+                    state="passed",
+                    source_digest=source_digest(root),
+                    stale_source=False,
+                    population_empty=True,
+                    scratch_destroyed=True,
+                    snapshot_destroyed=True,
+                    output_truncated=False,
+                    checks={},
+                    verification={
+                        "state": "failed" if failed else "passed",
+                        "checked_files": 2,
+                        "failed_files": int(failed),
+                        "exit_code": int(failed),
+                        "truncated": False,
+                        "diagnostics": [
+                            {
+                                "path": "apps/api/src/i044_fixture.py",
+                                "code": "python_syntax_invalid",
+                            }
+                        ]
+                        if failed
+                        else [],
+                    },
+                )
+
+        monkeypatch.setattr(verification, "VerificationSandboxAdapter", UnitAdapter)
+
+    async def policies():
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                for action, effect in (
+                    ("tool.workspace.read_file", PolicyEffect.ALLOW),
+                    ("tool.workspace.replace_text", PolicyEffect.REQUIRE_CONFIRMATION),
+                    ("tool.verify.backend_syntax", PolicyEffect.ALLOW),
+                ):
+                    await policy_service.create_rule(
+                        session,
+                        data=PolicyRuleCreate(
+                            tenant_id=scope.tenant_id,
+                            workspace_id=scope.workspace_id,
+                            name="I044 exact action",
+                            action_pattern=action,
+                            effect=effect,
+                            actor_type="agent",
+                            resource_type="task",
+                        ),
+                    )
+        finally:
+            await database.dispose()
+
+    async def calls():
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                return list(
+                    await session.scalars(
+                        select(ToolCall)
+                        .where(
+                            ToolCall.tenant_id == scope.tenant_id,
+                        )
+                        .order_by(ToolCall.created_at, ToolCall.id)
+                    )
+                )
+        finally:
+            await database.dispose()
+
+    def proposed(key, name, arguments):
+        return _worker() | {
+            "status": "PARTIAL",
+            "tool_proposals": [
+                {
+                    "call_key": key,
+                    "tool_name": name,
+                    "arguments": arguments,
+                }
+            ],
+        }
+
+    def mutation(key, before, after):
+        return proposed(
+            key,
+            "workspace.replace_text",
+            {
+                "path": "apps/api/src/i044_fixture.py",
+                "search": before,
+                "replacement": after,
+                "expected_matches": 1,
+            },
+        )
+
+    def verify(key):
+        return proposed(
+            key,
+            "verify.backend_syntax",
+            {
+                "command_id": "verify.backend_syntax",
+                "parameters": {},
+            },
+        )
+
+    asyncio.run(policies())
+    provider = QueueProvider(
+        [
+            _manager(),
+            proposed("inspect", "workspace.read_file", {"path": "apps/api/src/i044_fixture.py"}),
+            mutation("mutation", "value = 1", "value = ("),
+            verify("verify-first"),
+            mutation("correction", "value = (", "value = 2"),
+            verify("verify-second"),
+            _worker(),
+            _qa("PASS"),
+        ]
+    )
+    base = f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            created = client.post(
+                f"{base}/projects/{scope.project_id}/tasks/{scope.task_id}/development-workflows",
+                json={
+                    "objective": "Verify a harmless Python fixture.",
+                    "acceptance_criteria": ["The fixture has valid Python syntax."],
+                },
+            )
+            assert created.status_code == 201, created.text
+            run_id = UUID(created.json()["workflow_run"]["id"])
+            advance = f"{base}/workflow-runs/{run_id}/advance"
+            assert client.post(advance).json()["outcome"] == "STEP_COMPLETED"
+            if interrupt_at in {"after_first_tool_running", "after_first_tool_terminal"}:
+                from novalton_api.modules.approvals import mutation_resume
+                from novalton_api.modules.tools import service as gateway_service
+                from novalton_api.modules.tools.executor import ReadFileExecutor
+
+                def interrupt_read(*args, **kwargs):
+                    raise RuntimeError("injected_after_first_tool_running")
+
+                if interrupt_at == "after_first_tool_running":
+                    monkeypatch.setattr(ReadFileExecutor, "execute", interrupt_read)
+                else:
+                    original_gateway = gateway_service.execute_proposal
+
+                    async def interrupt_after_result(*args, **kwargs):
+                        await original_gateway(*args, **kwargs)
+                        raise RuntimeError("injected_after_first_tool_terminal")
+
+                    monkeypatch.setattr(gateway_service, "execute_proposal", interrupt_after_result)
+                interrupted = client.post(advance)
+                assert interrupted.status_code == 500, interrupted.text
+                orphaned = asyncio.run(calls())
+                assert len(orphaned) == 1
+                expected = "RUNNING" if interrupt_at == "after_first_tool_running" else "SUCCEEDED"
+                assert orphaned[0].status == expected
+                assert orphaned[0].approval_request_id is None
+                assert not (orphaned[0].result_metadata or {}).get("continuation_claimed")
+                calls_before = len(provider.calls)
+                assert client.post(advance).json()["outcome"] == "WAITING_FOR_HUMAN"
+                assert len(provider.calls) == calls_before
+                monkeypatch.setattr(mutation_resume, "_CONTINUATION_LEASE", timedelta(0))
+                assert client.post(advance).json()["outcome"] == "WORKFLOW_FAILED"
+                assert client.post(advance).json()["outcome"] == "WORKFLOW_FAILED"
+                terminal = asyncio.run(_vertical_state(scope, run_id))
+                assert terminal["run"].failure_code == "tool_continuation_interrupted"
+                assert asyncio.run(calls())[0].status == (
+                    "FAILED" if expected == "RUNNING" else "SUCCEEDED"
+                )
+                assert all(model.status != "RUNNING" for model in terminal["model_runs"])
+                assert len(provider.calls) == calls_before
+                assert target.read_text() == "value = 1\n"
+                return
+            assert client.post(advance).json()["outcome"] == "WAITING_FOR_HUMAN"
+            assert target.read_text() == "value = 1\n"
+            first = [call for call in asyncio.run(calls()) if call.status == "PENDING_APPROVAL"]
+            assert len(first) == 1
+            if interrupt_at == "concurrent_same_approval":
+                from novalton_api.modules.approvals import service as approval_service
+                from novalton_api.modules.tools.executor import ReplaceTextExecutor
+
+                entered = threading.Event()
+                released = threading.Event()
+                second_entered = threading.Event()
+                applications = []
+                approval_entries = []
+                original_apply = ReplaceTextExecutor.apply
+                original_approve = approval_service.approve
+
+                async def observed_approve(*args, **kwargs):
+                    approval_entries.append(True)
+                    if len(approval_entries) == 2:
+                        second_entered.set()
+                    return await original_approve(*args, **kwargs)
+
+                def delayed_apply(executor, *args, **kwargs):
+                    applications.append(True)
+                    entered.set()
+                    assert released.wait(15)
+                    return original_apply(executor, *args, **kwargs)
+
+                monkeypatch.setattr(ReplaceTextExecutor, "apply", delayed_apply)
+                monkeypatch.setattr(approval_service, "approve", observed_approve)
+
+                def approve_same():
+                    with TestClient(
+                        create_app(provider_registry=ProviderRegistry((provider,)))
+                    ) as parallel:
+                        return parallel.post(
+                            f"{base}/approvals/{first[0].approval_request_id}/approve"
+                        )
+
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    first_decision = executor.submit(approve_same)
+                    assert entered.wait(15)
+                    second_decision = executor.submit(approve_same)
+                    try:
+                        assert second_entered.wait(15)
+                    finally:
+                        released.set()
+                    results = [
+                        first_decision.result(timeout=20),
+                        second_decision.result(timeout=20),
+                    ]
+                assert all(response.status_code == 200 for response in results)
+                assert len(applications) == 1
+                assert len(provider.calls) == 5
+                assert target.read_text() == "value = (\n"
+                current = asyncio.run(calls())
+                assert len([call for call in current if call.status == "PENDING_APPROVAL"]) == 1
+                assert (
+                    len([call for call in current if call.tool_id == "verify.backend_syntax"]) == 1
+                )
+                return
+            if interrupt_at == "after_apply":
+                from novalton_api.modules.approvals import mutation_resume
+                from novalton_api.modules.orchestrator import specializations
+
+                async def interrupt_before_claim(*args, **kwargs):
+                    raise RuntimeError("injected_after_apply")
+
+                monkeypatch.setattr(
+                    specializations, "developer_assignment_for_resume", interrupt_before_claim
+                )
+                interrupted = client.post(
+                    f"{base}/approvals/{first[0].approval_request_id}/approve"
+                )
+                assert interrupted.status_code == 500, interrupted.text
+                assert target.read_text() == "value = (\n"
+                state = asyncio.run(_vertical_state(scope, run_id))
+                assert state["rows"][1][0].status == "WAITING_FOR_APPROVAL"
+                assert not [
+                    call for call in asyncio.run(calls()) if call.status == "PENDING_APPROVAL"
+                ]
+                approved_call = next(
+                    call for call in asyncio.run(calls()) if call.id == first[0].id
+                )
+                assert approved_call.status == "SUCCEEDED"
+                assert not (approved_call.result_metadata or {}).get("continuation_claimed")
+                calls_before = len(provider.calls)
+                monkeypatch.setattr(mutation_resume, "_CONTINUATION_LEASE", timedelta(0))
+                assert client.post(advance).json()["outcome"] == "WORKFLOW_FAILED"
+                assert client.post(advance).json()["outcome"] == "WORKFLOW_FAILED"
+                assert len(provider.calls) == calls_before
+                assert target.read_text() == "value = (\n"
+                return
+            if interrupt_at in {"after_pending", "after_suspend"}:
+                from novalton_api.modules.approvals import mutation_resume
+                from novalton_api.modules.workflows import service as workflow_service
+
+                if interrupt_at == "after_pending":
+
+                    async def interrupt_suspend(*args, **kwargs):
+                        raise RuntimeError("injected_after_pending")
+
+                    monkeypatch.setattr(agent_service, "suspend_run", interrupt_suspend)
+                else:
+                    original_transition = workflow_service.transition_step
+
+                    async def interrupt_step(*args, **kwargs):
+                        if kwargs.get("target") == WorkflowStepRunStatus.WAITING_FOR_APPROVAL:
+                            raise RuntimeError("injected_after_suspend")
+                        return await original_transition(*args, **kwargs)
+
+                    monkeypatch.setattr(workflow_service, "transition_step", interrupt_step)
+                interrupted = client.post(
+                    f"{base}/approvals/{first[0].approval_request_id}/approve"
+                )
+                assert interrupted.status_code == 500, interrupted.text
+                assert target.read_text() == "value = (\n"
+                orphaned = asyncio.run(_vertical_state(scope, run_id))
+                assert orphaned["rows"][1][0].status == "RUNNING"
+                assert any(call.status == "PENDING_APPROVAL" for call in asyncio.run(calls()))
+                pending = next(
+                    call for call in asyncio.run(calls()) if call.status == "PENDING_APPROVAL"
+                )
+                if interrupt_at == "after_pending":
+                    assert (
+                        next(
+                            agent
+                            for agent in orphaned["agent_runs"]
+                            if agent.id == orphaned["rows"][1][0].agent_run_id
+                        ).status
+                        == "RUNNING"
+                    )
+                stale_approval = client.post(
+                    f"{base}/approvals/{pending.approval_request_id}/approve"
+                )
+                assert stale_approval.status_code == 409, stale_approval.text
+                calls_before = len(provider.calls)
+                monkeypatch.setattr(mutation_resume, "_CONTINUATION_LEASE", timedelta(0))
+                assert client.post(advance).json()["outcome"] == "WORKFLOW_FAILED"
+                assert client.post(advance).json()["outcome"] == "WORKFLOW_FAILED"
+                terminal = asyncio.run(_vertical_state(scope, run_id))
+                assert terminal["run"].status == "FAILED"
+                assert terminal["run"].failure_code == "tool_continuation_interrupted"
+                assert (
+                    next(call for call in asyncio.run(calls()) if call.id == pending.id).status
+                    == "BLOCKED"
+                )
+                assert all(model.status != "RUNNING" for model in terminal["model_runs"])
+                assert len(provider.calls) == calls_before
+                assert target.read_text() == "value = (\n"
+                return
+            approved = client.post(f"{base}/approvals/{first[0].approval_request_id}/approve")
+            assert approved.status_code == 200, approved.text
+            assert target.read_text() == "value = (\n"
+            current = asyncio.run(calls())
+            checks = [call for call in current if call.tool_id == "verify.backend_syntax"]
+            assert len(checks) == 1
+            assert "verification" in (checks[0].result_metadata or {}), (
+                checks[0].status,
+                checks[0].failure_code,
+            )
+            assert checks[0].result_metadata["verification"]["state"] == "failed"
+            repair = [call for call in current if call.status == "PENDING_APPROVAL"]
+            assert len(repair) == 1
+            before_replay = len(provider.calls)
+            replay = client.post(f"{base}/approvals/{first[0].approval_request_id}/approve")
+            assert replay.status_code == 200
+            assert len(provider.calls) == before_replay
+            assert target.read_text() == "value = (\n"
+            assert [
+                call.id for call in asyncio.run(calls()) if call.status == "PENDING_APPROVAL"
+            ] == [repair[0].id]
+
+            if interrupt_at == "concurrent_reconciliation":
+                from novalton_api.modules.approvals import mutation_resume
+
+                entered = threading.Event()
+                released = threading.Event()
+                original_complete = provider.complete
+
+                async def delayed_complete(request):
+                    entered.set()
+                    assert await asyncio.to_thread(released.wait, 15)
+                    return await original_complete(request)
+
+                monkeypatch.setattr(provider, "complete", delayed_complete)
+                before_ids = {call.id for call in asyncio.run(calls())}
+
+                def approve_in_parallel():
+                    with TestClient(
+                        create_app(provider_registry=ProviderRegistry((provider,)))
+                    ) as concurrent_client:
+                        return concurrent_client.post(
+                            f"{base}/approvals/{repair[0].approval_request_id}/approve"
+                        )
+
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(approve_in_parallel)
+                    assert entered.wait(15)
+                    try:
+                        monkeypatch.setattr(mutation_resume, "_CONTINUATION_LEASE", timedelta(0))
+                        assert client.post(advance).json()["outcome"] == "WORKFLOW_FAILED"
+                    finally:
+                        released.set()
+                    response = future.result(timeout=20)
+                assert response.status_code in {409, 500}, response.text
+                terminal = asyncio.run(_vertical_state(scope, run_id))
+                assert terminal["run"].status == "FAILED"
+                assert {call.id for call in asyncio.run(calls())} == before_ids
+                assert all(model.status != "RUNNING" for model in terminal["model_runs"])
+                assert target.read_text() == "value = 2\n"
+                return
+
+            if interrupt_at == "after_denial":
+                from novalton_api.modules.approvals import mutation_resume
+
+                async def block_repair():
+                    database = Database.from_settings(Settings.from_environment())
+                    try:
+                        async with database.session_factory() as session:
+                            await session.execute(
+                                update(PolicyRule)
+                                .where(
+                                    PolicyRule.tenant_id == scope.tenant_id,
+                                    PolicyRule.action_pattern == "tool.workspace.replace_text",
+                                )
+                                .values(effect="BLOCK")
+                            )
+                            await session.commit()
+                    finally:
+                        await database.dispose()
+
+                async def interrupt_after_denial(*args, **kwargs):
+                    raise RuntimeError("injected_after_denial")
+
+                asyncio.run(block_repair())
+                monkeypatch.setattr(mutation_resume, "_fail_waiting", interrupt_after_denial)
+                interrupted = client.post(
+                    f"{base}/approvals/{repair[0].approval_request_id}/approve"
+                )
+                assert interrupted.status_code == 500, interrupted.text
+                assert target.read_text() == "value = (\n"
+                before = asyncio.run(_vertical_state(scope, run_id))
+                assert before["rows"][1][0].status == "WAITING_FOR_APPROVAL"
+                assert not [
+                    call for call in asyncio.run(calls()) if call.status == "PENDING_APPROVAL"
+                ]
+                assert (
+                    next(call for call in asyncio.run(calls()) if call.id == repair[0].id).status
+                    == "BLOCKED"
+                )
+                provider_calls = len(provider.calls)
+                monkeypatch.setattr(mutation_resume, "_CONTINUATION_LEASE", timedelta(0))
+                assert client.post(advance).json()["outcome"] == "WORKFLOW_FAILED"
+                assert client.post(advance).json()["outcome"] == "WORKFLOW_FAILED"
+                terminal = asyncio.run(_vertical_state(scope, run_id))
+                assert terminal["run"].failure_code == "tool_continuation_interrupted"
+                assert all(model.status != "RUNNING" for model in terminal["model_runs"])
+                assert len(provider.calls) == provider_calls
+                assert target.read_text() == "value = (\n"
+                return
+
+            if interrupt_at is not None:
+                from novalton_api.modules.approvals.mutation_resume import (
+                    reconcile_stale_continuation,
+                )
+
+                if interrupt_at == "after_claim":
+
+                    async def interrupt_continuation(*args, **kwargs):
+                        raise RuntimeError("injected_after_claim")
+
+                    monkeypatch.setattr(
+                        developer_service, "continue_assignment", interrupt_continuation
+                    )
+                elif interrupt_at == "after_model_start":
+
+                    async def interrupt_provider(request):
+                        provider.calls.append(request)
+                        raise RuntimeError("injected_after_model_start")
+
+                    monkeypatch.setattr(provider, "complete", interrupt_provider)
+                else:
+                    raise AssertionError("unknown interruption point")
+                interrupted = client.post(
+                    f"{base}/approvals/{repair[0].approval_request_id}/approve"
+                )
+                assert interrupted.status_code == 500, interrupted.text
+                assert target.read_text() == "value = 2\n"
+                before = asyncio.run(_vertical_state(scope, run_id))
+                assert before["run"].status == "RUNNING"
+                assert before["rows"][1][0].status == "RUNNING"
+                assert not [
+                    call for call in asyncio.run(calls()) if call.status == "PENDING_APPROVAL"
+                ]
+                calls_before = len(provider.calls)
+
+                async def reconcile():
+                    database = Database.from_settings(Settings.from_environment())
+                    try:
+                        async with database.session_factory() as session:
+                            return await reconcile_stale_continuation(
+                                session,
+                                tenant_id=scope.tenant_id,
+                                workspace_id=scope.workspace_id,
+                                workflow_run_id=run_id,
+                                now=datetime.now(UTC) + timedelta(hours=2),
+                            )
+                    finally:
+                        await database.dispose()
+
+                assert asyncio.run(reconcile()) is True
+                assert asyncio.run(reconcile()) is False
+                terminal = asyncio.run(_vertical_state(scope, run_id))
+                assert terminal["run"].status == "FAILED"
+                assert terminal["run"].failure_code == "tool_continuation_interrupted"
+                assert terminal["rows"][1][0].status == "FAILED"
+                assert (
+                    next(
+                        agent
+                        for agent in terminal["agent_runs"]
+                        if agent.id == before["rows"][1][0].agent_run_id
+                    ).status
+                    == "FAILED"
+                )
+                assert all(model.status != "RUNNING" for model in terminal["model_runs"])
+                replay_interrupted = client.post(
+                    f"{base}/approvals/{repair[0].approval_request_id}/approve"
+                )
+                assert replay_interrupted.status_code == 200, replay_interrupted.text
+                assert client.post(advance).json()["outcome"] == "WORKFLOW_FAILED"
+                assert len(provider.calls) == calls_before
+                assert target.read_text() == "value = 2\n"
+                return
+
+            def approve_again(approval_id):
+                with TestClient(
+                    create_app(provider_registry=ProviderRegistry((provider,)))
+                ) as concurrent_client:
+                    return concurrent_client.post(f"{base}/approvals/{approval_id}/approve")
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                decisions = list(
+                    executor.map(
+                        approve_again, [first[0].approval_request_id, repair[0].approval_request_id]
+                    )
+                )
+            assert all(item.status_code == 200 for item in decisions)
+
+            assert target.read_text() == "value = 2\n"
+            checks = [
+                call for call in asyncio.run(calls()) if call.tool_id == "verify.backend_syntax"
+            ]
+            assert [call.result_metadata["verification"]["state"] for call in checks] == [
+                "failed",
+                "passed",
+            ]
+            assert all(
+                call.result_metadata["workspace_integrity"] == "unchanged" for call in checks
+            )
+            assert (
+                checks[0].result_metadata["source_digest"]
+                != checks[1].result_metadata["source_digest"]
+            )
+            qa = client.post(advance)
+            assert qa.json()["workflow_status"] == "COMPLETED", qa.text
+            assert len(provider.calls) == 8
+            view = client.get(f"{base}/workflow-runs/{run_id}/operator-view").json()
+            tools = [
+                tool
+                for step in view["step_details"]
+                if step["agent_run"]
+                for tool in step["agent_run"]["tool_calls"]
+            ]
+            visible = [tool for tool in tools if tool["tool_name"] == "verify.backend_syntax"]
+            assert [tool["verification"]["state"] for tool in visible] == ["failed", "passed"]
+            assert all(tool["workspace_integrity"] == "unchanged" for tool in visible)
+            assert "UNTRUSTED_DATA:verification" in str(provider.calls[-1])
+            state = asyncio.run(_vertical_state(scope, run_id))
+            assert len(state["model_runs"]) == 8
+            assert [
+                item.recovery_attempt_index
+                for item in state["model_runs"]
+                if item.recovery_attempt_kind == "TOOL_CONTINUATION"
+            ] == [1, 2, 3, 4, 5]
+            # The database itself rejects duplicate ordinals, while distinct
+            # bounded continuations above remain possible in one AgentRun.
+            original = next(
+                item
+                for item in state["model_runs"]
+                if item.recovery_attempt_kind == "TOOL_CONTINUATION"
+            )
+            columns = [column.name for column in ModelRun.__table__.columns if column.name != "id"]
+            column_names = ", ".join(columns)
+            clone = text(
+                f"INSERT INTO model_runs (id, {column_names}) "
+                f"SELECT :new_id, {column_names} FROM model_runs WHERE id = :original_id"
+            )
+
+            async def duplicate_ordinal_is_denied():
+                database = Database.from_settings(Settings.from_environment())
+                try:
+                    async with database.session_factory() as session:
+                        with pytest.raises(
+                            IntegrityError, match="uq_model_runs_agent_tool_continuation"
+                        ):
+                            async with session.begin_nested():
+                                await session.execute(
+                                    clone, {"new_id": uuid4(), "original_id": original.id}
+                                )
+                finally:
+                    await database.dispose()
+
+            asyncio.run(duplicate_ordinal_is_denied())
+    finally:
+        get_settings.cache_clear()
+
+
+def test_i044_governed_verify_correct_verify_cycle(scope, tmp_path, monkeypatch):
+    run_i044_verification_cycle(scope, tmp_path, monkeypatch, installed=False)
+
+
+@pytest.mark.parametrize("interrupt_at", ["after_claim", "after_model_start"])
+def test_i044_interrupted_continuation_fails_closed(scope, tmp_path, monkeypatch, interrupt_at):
+    run_i044_verification_cycle(
+        scope, tmp_path, monkeypatch, installed=False, interrupt_at=interrupt_at
+    )
+
+
+@pytest.mark.parametrize("interrupt_at", ["after_pending", "after_suspend"])
+def test_i044_interrupted_pending_proposal_fails_closed(scope, tmp_path, monkeypatch, interrupt_at):
+    run_i044_verification_cycle(
+        scope, tmp_path, monkeypatch, installed=False, interrupt_at=interrupt_at
+    )
+
+
+def test_i044_interrupted_approval_denial_fails_closed(scope, tmp_path, monkeypatch):
+    run_i044_verification_cycle(
+        scope, tmp_path, monkeypatch, installed=False, interrupt_at="after_denial"
+    )
+
+
+def test_i044_interrupted_after_exact_mutation_fails_closed(scope, tmp_path, monkeypatch):
+    run_i044_verification_cycle(
+        scope, tmp_path, monkeypatch, installed=False, interrupt_at="after_apply"
+    )
+
+
+def test_i044_reconciliation_cannot_authorize_late_provider_proposal(scope, tmp_path, monkeypatch):
+    run_i044_verification_cycle(
+        scope,
+        tmp_path,
+        monkeypatch,
+        installed=False,
+        interrupt_at="concurrent_reconciliation",
+    )
+
+
+@pytest.mark.parametrize("interrupt_at", ["after_first_tool_running", "after_first_tool_terminal"])
+def test_i044_interrupted_first_tool_fails_closed(scope, tmp_path, monkeypatch, interrupt_at):
+    run_i044_verification_cycle(
+        scope,
+        tmp_path,
+        monkeypatch,
+        installed=False,
+        interrupt_at=interrupt_at,
+    )
+
+
+def test_i044_audited_concurrent_approval_resumes_apply_once(scope, tmp_path, monkeypatch):
+    run_i044_verification_cycle(
+        scope, tmp_path, monkeypatch, installed=False, interrupt_at="concurrent_same_approval"
+    )
 
 
 def test_i041_mutation_waits_then_approved_resume_preserves_runs_and_reaches_qa(

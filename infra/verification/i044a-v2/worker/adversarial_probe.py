@@ -8,6 +8,7 @@ import platform
 import resource
 import signal
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -180,6 +181,23 @@ for _ in range(2):
 
 checks["descendants_started"] = True
 print(json.dumps(checks, sort_keys=True), flush=True)
+# Fixed release-owned static check. No project module is imported or evaluated;
+# neither the IPC client nor the snapshot supplies executable/argv authority.
+try:
+    checked = subprocess.run(
+        ["/runtime/bin/python3.13", "-I", "-S", "-B", "/runtime/i044a_backend_syntax.py"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env={}, cwd="/scratch", close_fds=True, timeout=2, check=False,
+    )
+    verification = json.loads(checked.stdout) if len(checked.stdout) <= 1536 else {}
+    if not isinstance(verification, dict):
+        raise ValueError("invalid_checker_result")
+    verification["exit_code"] = checked.returncode
+except subprocess.TimeoutExpired:
+    verification = {"state": "failed", "failure_code": "verification_timeout", "exit_code": None}
+except (subprocess.SubprocessError, OSError, ValueError):
+    verification = {"state": "failed", "failure_code": "verification_unavailable", "exit_code": None}
+print(json.dumps({"verification": verification}, sort_keys=True), flush=True)
 if Path("/source/apps/api/tests/sandbox_fixtures/output_flood").exists():
     print("x" * 32_768, flush=True)
 time.sleep(60)
