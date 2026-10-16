@@ -214,6 +214,11 @@ async def _decide(
         if approval is None:
             raise _not_found()
         if approval.status == target.value:
+            # The idempotent decision still acquired a row lock. Release it
+            # before a caller resumes an approval-linked tool in a separate
+            # transaction; otherwise concurrent replays can retain locks
+            # across the mutation and its AgentRun/ToolCall transitions.
+            await session.commit()
             return approval
         if approval.status != ApprovalStatus.PENDING.value:
             raise _conflict("Approval has already reached a terminal decision")
