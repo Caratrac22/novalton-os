@@ -1709,17 +1709,33 @@ def _advance_fresh(provider: QueueProvider, url: str) -> dict[str, object]:
     return response.json()
 
 
+def _inject_worker_loss(provider, monkeypatch):
+    """Interrupt failure persistence, outside the provider exception handler.
+
+    A provider RuntimeError alone is an ordinary handled provider failure, not
+    a worker crash. Losing persistence here leaves the actual initial committed
+    AgentRun/ModelRun unchanged, as when the process dies during its invocation.
+    """
+    from novalton_api.modules.model_usage import service as usage_service
+
+    async def provider_failure(request):
+        provider.calls.append(request)
+        raise RuntimeError("injected_initial_provider_failure")
+
+    async def worker_lost(*args, **kwargs):
+        raise RuntimeError("injected_worker_loss_before_failure_persistence")
+
+    monkeypatch.setattr(provider, "complete", provider_failure)
+    monkeypatch.setattr(usage_service, "mark_failed", worker_lost)
+
+
 def _interrupt_initial_developer(scope, monkeypatch):
     """Leave a real committed AgentRun/ModelRun with no ToolCalls, as on worker death."""
     provider = QueueProvider([_manager(), _worker()])
     created, advance = _create_vertical(scope, provider)
     assert _advance_fresh(provider, advance)["step_key"] == "manager_plan"
 
-    async def crash(request):
-        provider.calls.append(request)
-        raise RuntimeError("injected_initial_provider_crash")
-
-    monkeypatch.setattr(provider, "complete", crash)
+    _inject_worker_loss(provider, monkeypatch)
     with TestClient(
         create_app(provider_registry=ProviderRegistry((provider,))), raise_server_exceptions=False
     ) as client:
@@ -1826,11 +1842,7 @@ def test_every_specialized_provider_crash_has_durable_workflow_link(scope, monke
     for _ in range(position):
         assert _advance_fresh(provider, advance)["outcome"] == "STEP_COMPLETED"
 
-    async def crash(request):
-        provider.calls.append(request)
-        raise RuntimeError("injected_specialized_provider_crash")
-
-    monkeypatch.setattr(provider, "complete", crash)
+    _inject_worker_loss(provider, monkeypatch)
     with TestClient(
         create_app(provider_registry=ProviderRegistry((provider,))), raise_server_exceptions=False
     ) as client:

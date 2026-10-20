@@ -599,6 +599,7 @@ def test_simultaneous_advance_cannot_duplicate_agent_or_model_run(scope: Scope) 
 
 def test_generic_agent_provider_crash_is_linked_before_dispatch_and_reclaimed(scope, monkeypatch):
     from novalton_api.modules.approvals import mutation_resume
+    from novalton_api.modules.model_usage import service as usage_service
 
     run_id = asyncio.run(_run(scope, [_agent_step(scope, "crash")]))
 
@@ -608,6 +609,11 @@ def test_generic_agent_provider_crash_is_linked_before_dispatch_and_reclaimed(sc
             raise RuntimeError("injected_generic_provider_crash")
 
     provider = CrashingProvider(_result().model_dump_json())
+
+    async def worker_lost(*args, **kwargs):
+        raise RuntimeError("injected_worker_loss_before_failure_persistence")
+
+    monkeypatch.setattr(usage_service, "mark_failed", worker_lost)
     url = _url(scope, run_id)
     with TestClient(
         create_app(provider_registry=ProviderRegistry((provider,))), raise_server_exceptions=False
