@@ -338,6 +338,7 @@ def test_durable_dispatch_downgrade_preserves_enqueued_history():
 
         asyncio.run(preserved())
     finally:
+
         async def cleanup():
             database = Database.from_settings(Settings.from_environment())
             try:

@@ -904,3 +904,14 @@ def test_old_generation_cannot_finalize_or_reserve_under_a_new_owner(scope):
     assert persisted.owner == new.owner
     assert len(attempts) == 2
     assert len(models) == len(provider.calls) == 1
+
+
+def test_heartbeat_never_shortens_a_lease_and_cannot_extend_the_deadline(scope):
+    provider = QueueProvider([])
+    row, _, _ = enqueue(scope, provider)
+    claimed = claim(scope)
+    before = snapshot(scope, row.id)[0]
+    assert db_call(lambda session: repository.heartbeat(session, claimed, lease_seconds=60))
+    after = snapshot(scope, row.id)[0]
+    assert before.lease_expires_at <= after.lease_expires_at <= after.deadline
+    assert after.generation == before.generation

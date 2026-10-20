@@ -346,7 +346,8 @@ async def heartbeat(
         )
         .values(
             lease_expires_at=func.least(
-                now + timedelta(seconds=lease_seconds), TaskDispatch.deadline
+                func.greatest(TaskDispatch.lease_expires_at, now + timedelta(seconds=lease_seconds)),
+                TaskDispatch.deadline,
             ),
             updated_at=now,
         )
@@ -404,10 +405,7 @@ async def finish(
         )
         if step_id is None:
             target = ("BLOCKED", "dispatch_result_scope_mismatch")
-    if (
-        target is None and result is not None
-        and result.workflow_status.value != status
-    ):
+    if target is None and result is not None and result.workflow_status.value != status:
         target = ("BLOCKED", "dispatch_result_state_mismatch")
     if target is None:
         if result is None:
