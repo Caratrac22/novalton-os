@@ -244,16 +244,18 @@ def test_controlled_multi_task_loop_skips_exhausted_task_across_fresh_sessions(s
     stopped, _, _ = enqueue(other_task(scope), provider, priority=50, max_attempts=0)
     active, _, _ = enqueue(scope, provider, priority=10, max_attempts=3, max_model_calls=3)
     assert [tick(scope, provider).outcome.value for _ in range(3)] == [
-        "STEP_COMPLETED", "STEP_COMPLETED", "WORKFLOW_COMPLETED"
+        "STEP_COMPLETED",
+        "STEP_COMPLETED",
+        "WORKFLOW_COMPLETED",
     ]
     blocked, blocked_attempts, _ = snapshot(scope, stopped.id)
     completed, attempts, models = snapshot(scope, active.id)
     assert (blocked.status, blocked.stop_reason, blocked_attempts) == (
-        "BLOCKED", "dispatch_attempt_budget_exhausted", []
+        "BLOCKED",
+        "dispatch_attempt_budget_exhausted",
+        [],
     )
-    assert (completed.status, len(attempts), len(models), len(provider.calls)) == (
-        "DONE", 3, 3, 3
-    )
+    assert (completed.status, len(attempts), len(models), len(provider.calls)) == ("DONE", 3, 3, 3)
     assert tick(scope, provider) is None
 
 
@@ -276,6 +278,45 @@ def test_operator_credential_permissions_and_scope_fail_closed(scope, monkeypatc
             "dispatch.read", tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
         )
     reader = authenticate_operator(_TEST_OPERATOR_KEY)
+    request = DispatchRequest(
+        workflow_run_id=uuid4(),
+        request_key=uuid4().hex,
+        deadline=datetime.now(UTC) + timedelta(hours=1),
+    )
+    with pytest.raises(ApplicationError) as denied_enqueue:
+        db_call(
+            lambda session: service.enqueue(
+                session,
+                operator=reader,
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                data=request,
+            )
+        )
+    assert denied_enqueue.value.status_code == 403
+    with pytest.raises(ApplicationError) as denied_cancel:
+        db_call(
+            lambda session: service.cancel_dispatch(
+                session,
+                operator=reader,
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                dispatch_id=uuid4(),
+            )
+        )
+    assert denied_cancel.value.status_code == 403
+    with pytest.raises(ApplicationError) as denied_resolve:
+        db_call(
+            lambda session: service.resolve_blocked(
+                session,
+                operator=reader,
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                blocked_id=uuid4(),
+                data=request,
+            )
+        )
+    assert denied_resolve.value.status_code == 403
     with pytest.raises(ApplicationError) as forbidden:
         db_call(
             lambda session: service.configure_workspace(
@@ -455,18 +496,16 @@ def test_bounded_capacity_claims_are_unique_and_lost_workers_never_replay(scope,
     assert [tuple(state) for state in states] == [("BLOCKED", 1, "BLOCKED")] * len(rows)
     assert claim(scope) is None
     assert provider.calls == []
-    print(
-        json.dumps(
-            {
-                "dispatches": len(rows),
-                "workers": 6,
-                "claim_seconds": round(claim_seconds, 3),
-                "collisions": len(rows) - len({item.dispatch_id for item in claims}),
-                "recovered_blocked": changed,
-            }
-        )
-    )
-    assert '"collisions": 0' in capsys.readouterr().out
+    measurement = {
+        "dispatches": len(rows),
+        "workers": 6,
+        "claim_seconds": round(claim_seconds, 3),
+        "collisions": len(rows) - len({item.dispatch_id for item in claims}),
+        "recovered_blocked": changed,
+    }
+    assert measurement["collisions"] == 0
+    with capsys.disabled():
+        print("dispatch_capacity " + json.dumps(measurement, sort_keys=True), flush=True)
 
 
 def test_priority_aging_bounds_starvation_against_new_high_priority_work(scope):
