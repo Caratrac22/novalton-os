@@ -524,12 +524,16 @@ async def approve_and_resume(
         workspace_id=workspace_id,
         approval_id=approval_id,
     )
-    await require_agent_workflow(
-        session,
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-        agent_run_id=tool_call.agent_run_id,
+    # A historical decision is evidence, not authority. Do not hold AgentRun
+    # locks while recording concurrent human decisions; the gateway and the
+    # continuation reservation below fence the actual effects.
+    status = await session.scalar(
+        select(WorkflowRun.status).where(WorkflowRun.id == workflow_run.id)
     )
+    if status == "CANCELLED":
+        raise ApplicationError(
+            "workflow_execution_cancelled", "Workflow execution was cancelled", status_code=409
+        )
     previous = await approval_service.get_approval(
         session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
     )
@@ -607,9 +611,6 @@ async def approve_and_resume(
             code="approval_resume_context_invalid",
         )
         return approval
-    await require_agent_workflow(
-        session, tenant_id=tenant_id, workspace_id=workspace_id, agent_run_id=agent_run.id
-    )
     # A repair cycle can wait for multiple distinct approvals. Claim the
     # continuation on THIS exact mutation, atomically with the AgentRun CAS;
     # replaying an earlier approval must never consume a later approval wait.
@@ -623,6 +624,9 @@ async def approve_and_resume(
             workflow_run_id=workflow_run.id,
         )
         return approval
+    await require_agent_workflow(
+        session, tenant_id=tenant_id, workspace_id=workspace_id, agent_run_id=agent_run.id
+    )
     instant = datetime.now(UTC)
     tool_call.result_metadata = {
         **(tool_call.result_metadata or {}),

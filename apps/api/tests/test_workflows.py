@@ -18,6 +18,7 @@ from novalton_api.modules.agents.schemas import AgentDefinitionCreate, AgentRunC
 from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.model_usage.models import ModelRun
 from novalton_api.modules.projects.models import Project
+from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.workflows import repository, service
@@ -107,6 +108,7 @@ async def _cleanup(scopes: tuple[Scope, Scope]) -> None:
                 delete(AgentDefinition).where(AgentDefinition.tenant_id.in_(tenant_ids))
             )
             await session.execute(delete(AuditRecord).where(AuditRecord.tenant_id.in_(tenant_ids)))
+            await session.execute(delete(RuntimeEvent).where(RuntimeEvent.tenant_id.in_(tenant_ids)))
             for scope in scopes:
                 await session.execute(delete(Task).where(Task.id == scope.task_id))
                 await session.execute(delete(Project).where(Project.id == scope.project_id))
