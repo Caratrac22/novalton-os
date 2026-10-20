@@ -2867,8 +2867,9 @@ def test_cancel_during_approved_continuation_preserves_real_effects(
         return await original_complete(request)
 
     try:
+        body, advance = _create_vertical(scope, provider)
+        run_id = UUID(body["workflow_run"]["id"])
         with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
-            run_id, advance = _create_vertical(client, scope)
             assert client.post(advance).json()["outcome"] == "STEP_COMPLETED"
             assert client.post(advance).json()["outcome"] == "WAITING_FOR_HUMAN"
 
