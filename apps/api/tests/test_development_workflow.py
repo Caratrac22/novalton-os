@@ -2909,6 +2909,26 @@ def test_cancel_during_approved_continuation_preserves_real_effects(
                     # An already engaged approved mutation owns the reservation.
                     # Cancellation linearizes after its bounded apply transaction.
                     cancelling = executor.submit(request, cancel_url)
+
+                    async def cancellation_is_waiting():
+                        database = Database.from_settings(Settings.from_environment())
+                        try:
+                            async with database.session_factory() as session:
+                                for _ in range(100):
+                                    waiting = await session.scalar(
+                                        text(
+                                            "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                                            "WHERE locktype = 'advisory' AND NOT granted)"
+                                        )
+                                    )
+                                    if waiting:
+                                        return True
+                                    await asyncio.sleep(0.05)
+                                return False
+                        finally:
+                            await database.dispose()
+
+                    assert asyncio.run(cancellation_is_waiting())
             finally:
                 released.set()
             if cancel_boundary == "mutation":
