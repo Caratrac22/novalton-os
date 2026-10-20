@@ -1075,3 +1075,88 @@ def test_heartbeat_lock_wait_cannot_resurrect_a_lease_that_expired_while_waiting
     assert persisted.stop_reason == "dispatch_lease_expired"
     assert len(attempts) == 1
     assert models == provider.calls == []
+
+
+def test_claim_context_cannot_authorize_tools_for_an_unlinked_agent(scope, tmp_path):
+    from novalton_api.modules.agents import service as agents_service
+    from novalton_api.modules.agents.models import AgentDefinition
+    from novalton_api.modules.agents.schemas import AgentRunCreate
+    from novalton_api.modules.tools import service as tools_service
+    from novalton_api.modules.tools.contracts import ToolProposal
+    from novalton_api.modules.tools.executor import WorkspaceRoot
+
+    (tmp_path / "fixture.txt").write_text("bounded\n")
+    provider = QueueProvider([])
+    row, _, _ = enqueue(scope, provider)
+    claimed = claim(scope)
+
+    async def reserve(session):
+        definition_id = await session.scalar(
+            select(AgentDefinition.id).where(
+                AgentDefinition.tenant_id == scope.tenant_id,
+                AgentDefinition.workspace_id == scope.workspace_id,
+                AgentDefinition.slug == "developer_worker",
+            )
+        )
+        agent = await agents_service.create_run(
+            session,
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            data=AgentRunCreate(
+                agent_definition_id=definition_id,
+                project_id=scope.project_id,
+                task_id=scope.task_id,
+            ),
+        )
+        agent = await agents_service.start_run(
+            session,
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            run_id=agent.id,
+        )
+        await policy_service.create_rule(
+            session,
+            data=PolicyRuleCreate(
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                name="Standalone bounded read",
+                action_pattern="tool.workspace.read_file",
+                effect=PolicyEffect.ALLOW,
+                actor_type="agent",
+                resource_type="task",
+            ),
+        )
+        token = current_claim.set(claimed)
+        try:
+            await tools_service.execute_proposal(
+                session,
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                agent_run_id=agent.id,
+                proposal=ToolProposal.model_validate(
+                    {
+                        "call_key": "unlinked_read",
+                        "tool_name": "workspace.read_file",
+                        "arguments": {"path": "fixture.txt"},
+                    }
+                ),
+                permitted_tools=["workspace.read_file"],
+                workspace_root=WorkspaceRoot.approved(tmp_path),
+            )
+        finally:
+            current_claim.reset(token)
+
+    with pytest.raises(ApplicationError) as error:
+        db_call(reserve)
+    assert error.value.code == "dispatch_scope_mismatch"
+
+    async def count(session):
+        return await session.scalar(
+            select(func.count()).select_from(ToolCall).where(ToolCall.tenant_id == scope.tenant_id)
+        )
+
+    assert db_call(count) == 0
+    persisted, attempts, models = snapshot(scope, row.id)
+    assert persisted.status == "LEASED"
+    assert len(attempts) == 1
+    assert models == provider.calls == []

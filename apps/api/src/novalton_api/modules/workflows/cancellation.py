@@ -66,6 +66,11 @@ async def require_agent_workflow(
             .order_by(WorkflowRun.id)
         )
     ).all()
+    if not rows:
+        from novalton_api.modules.durable_dispatch.authority import current_claim, denied
+
+        if current_claim.get() is not None:
+            raise denied("dispatch_scope_mismatch")
     for run_id, run_tenant, run_workspace in rows:
         if (run_tenant, run_workspace) != (tenant_id, workspace_id):
             raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
