@@ -9,7 +9,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import delete, func, select, text
 
-from novalton_api.core.config import Settings
+from novalton_api.core.config import Settings, get_settings
 from novalton_api.core.database import Database
 from novalton_api.modules.agents import repository as agents_repository
 from novalton_api.modules.agents import service as agents_service
@@ -286,8 +286,9 @@ def test_i044_immutable_verification_authority_round_trip():
         command.upgrade(config, "head")
 
 
-def test_durable_dispatch_downgrade_preserves_enqueued_history():
+def test_durable_dispatch_downgrade_preserves_enqueued_history(monkeypatch):
     from test_development_workflow import QueueProvider, _cleanup, _create_vertical, _seed
+    from test_durable_dispatch import configure_operator, operator_for
 
     from novalton_api.modules.durable_dispatch import service as dispatch_service
     from novalton_api.modules.durable_dispatch.models import DispatchActivation, TaskDispatch
@@ -295,6 +296,7 @@ def test_durable_dispatch_downgrade_preserves_enqueued_history():
 
     config = Config(Path(__file__).parents[1] / "alembic.ini")
     value = asyncio.run(_seed())
+    configure_operator(value, monkeypatch)
     provider = QueueProvider([])
     body, _ = _create_vertical(value, provider)
 
@@ -304,12 +306,14 @@ def test_durable_dispatch_downgrade_preserves_enqueued_history():
             async with database.session_factory() as session:
                 await dispatch_service.configure_workspace(
                     session,
+                    operator=operator_for(value),
                     tenant_id=value.tenant_id,
                     workspace_id=value.workspace_id,
                     enabled=False,
                 )
                 row = await dispatch_service.enqueue(
                     session,
+                    operator=operator_for(value),
                     tenant_id=value.tenant_id,
                     workspace_id=value.workspace_id,
                     data=DispatchRequest(
@@ -358,3 +362,4 @@ def test_durable_dispatch_downgrade_preserves_enqueued_history():
         asyncio.run(_cleanup(value))
         command.downgrade(config, "20261011_0032")
         command.upgrade(config, "head")
+        get_settings.cache_clear()

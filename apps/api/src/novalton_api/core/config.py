@@ -96,6 +96,18 @@ class Settings(BaseModel):
     provider_max_response_bytes: int = Field(default=1_048_576, ge=1_024, le=10_485_760)
     model_output_token_safety_ceiling: int = Field(default=65_536, ge=1, le=65_536)
     durable_dispatch_enabled: bool = False
+    durable_dispatch_operator_key_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
+    durable_dispatch_operator_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    durable_dispatch_operator_tenant_id: UUID | None = None
+    durable_dispatch_operator_workspace_id: UUID | None = None
+    durable_dispatch_operator_permissions: str = ""
     workspace_root: str | None = None
     github_owner: str | None = Field(default=None, min_length=1, max_length=39)
     github_repository: str | None = Field(default=None, min_length=1, max_length=100)
@@ -135,6 +147,11 @@ class Settings(BaseModel):
         "provider_max_response_bytes": "NOVALTON_PROVIDER_MAX_RESPONSE_BYTES",
         "model_output_token_safety_ceiling": "NOVALTON_MODEL_OUTPUT_TOKEN_SAFETY_CEILING",
         "durable_dispatch_enabled": "NOVALTON_DURABLE_DISPATCH_ENABLED",
+        "durable_dispatch_operator_key_sha256": "NOVALTON_DISPATCH_OPERATOR_KEY_SHA256",
+        "durable_dispatch_operator_id": "NOVALTON_DISPATCH_OPERATOR_ID",
+        "durable_dispatch_operator_tenant_id": "NOVALTON_DISPATCH_OPERATOR_TENANT_ID",
+        "durable_dispatch_operator_workspace_id": "NOVALTON_DISPATCH_OPERATOR_WORKSPACE_ID",
+        "durable_dispatch_operator_permissions": "NOVALTON_DISPATCH_OPERATOR_PERMISSIONS",
         "workspace_root": "NOVALTON_WORKSPACE_ROOT",
         "github_owner": "NOVALTON_GITHUB_OWNER",
         "github_repository": "NOVALTON_GITHUB_REPOSITORY",

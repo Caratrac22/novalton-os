@@ -342,7 +342,7 @@ async def _cleanup(scope: Scope) -> None:
                 delete(AgentDefinition).where(AgentDefinition.tenant_id == scope.tenant_id)
             )
             await session.execute(delete(PolicyRule).where(PolicyRule.tenant_id == scope.tenant_id))
-            await session.execute(delete(Task).where(Task.id == scope.task_id))
+            await session.execute(delete(Task).where(Task.project_id == scope.project_id))
             await session.execute(delete(Project).where(Project.id == scope.project_id))
             await session.execute(delete(Workspace).where(Workspace.id == scope.workspace_id))
             await session.execute(delete(Tenant).where(Tenant.id == scope.tenant_id))
