@@ -458,7 +458,11 @@ def test_agent_run_link_is_trusted_same_scope_only(scopes: tuple[Scope, Scope], 
                     workspace_id=first.workspace_id,
                     plan_id=plan.id,
                 )
-                step_run = (await repository.step_runs_for_runs(session, run_ids=[run.id]))[0]
+                step_run = next(
+                    item
+                    for item in await repository.step_runs_for_runs(session, run_ids=[run.id])
+                    if item.status == "READY"
+                )
                 if terminal is not None:
                     if terminal == "workflow_cancelled":
                         await service.cancel_run(
