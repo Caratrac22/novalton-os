@@ -239,6 +239,24 @@ def test_one_tick_reuses_advance_and_three_ticks_reach_real_qa_completion(scope)
     assert db_call(task_status) == "BACKLOG"
 
 
+def test_controlled_multi_task_loop_skips_exhausted_task_across_fresh_sessions(scope):
+    provider = QueueProvider([_manager(), _worker(), _qa("PASS")])
+    stopped, _, _ = enqueue(other_task(scope), provider, priority=50, max_attempts=0)
+    active, _, _ = enqueue(scope, provider, priority=10, max_attempts=3, max_model_calls=3)
+    assert [tick(scope, provider).outcome.value for _ in range(3)] == [
+        "STEP_COMPLETED", "STEP_COMPLETED", "WORKFLOW_COMPLETED"
+    ]
+    blocked, blocked_attempts, _ = snapshot(scope, stopped.id)
+    completed, attempts, models = snapshot(scope, active.id)
+    assert (blocked.status, blocked.stop_reason, blocked_attempts) == (
+        "BLOCKED", "dispatch_attempt_budget_exhausted", []
+    )
+    assert (completed.status, len(attempts), len(models), len(provider.calls)) == (
+        "DONE", 3, 3, 3
+    )
+    assert tick(scope, provider) is None
+
+
 def test_operator_credential_permissions_and_scope_fail_closed(scope, monkeypatch):
     with pytest.raises(ApplicationError) as wrong:
         authenticate_operator("x" * 40)
@@ -341,6 +359,7 @@ def test_resolution_requires_explicit_terminal_old_workflow_and_fresh_run(scope)
     provider = QueueProvider([])
     old, _, _ = enqueue(scope, provider, max_attempts=0)
     assert tick(scope, provider) is None
+
     async def fresh_run(session):
         plan_id = await session.scalar(
             select(WorkflowRun.workflow_plan_id).where(WorkflowRun.id == old.workflow_run_id)
