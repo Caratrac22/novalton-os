@@ -17,7 +17,9 @@ from novalton_api.modules.audit.service import append_record
 from novalton_api.modules.developer_manager import service as manager_service
 from novalton_api.modules.developer_worker import service as developer_service
 from novalton_api.modules.qa_worker import service as qa_service
-from novalton_api.modules.workflows import repository
+from novalton_api.modules.runtime_events.schemas import RuntimeEventCreate
+from novalton_api.modules.runtime_events.service import append_event
+from novalton_api.modules.workflows import cancellation, repository
 from novalton_api.modules.workflows.models import (
     WorkflowPlan,
     WorkflowRun,
@@ -559,7 +561,14 @@ async def _transition_run(
     target: WorkflowRunStatus,
     failure_code: str | None = None,
 ) -> WorkflowRun:
-    await get_run(session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run_id)
+    run = await get_run(session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run_id)
+    if target == WorkflowRunStatus.RUNNING:
+        await cancellation.lock_workflow(session, run_id)
+        await session.refresh(run)
+        # Preserve the established invalid-transition response for terminal
+        # workflows. Only a valid start needs new dispatch authority.
+        if run.status == expected.value:
+            await cancellation.require_active_workflow(session, run_id, allow_created=True)
     now = datetime.now(UTC)
     values: dict[str, object] = {"status": target.value, "updated_at": now}
     if target == WorkflowRunStatus.RUNNING:
@@ -613,22 +622,57 @@ async def fail_run(session: AsyncSession, *, failure_code: str, **scope: object)
 async def cancel_run(
     session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID, run_id: UUID
 ) -> WorkflowRun:
+    """Persist a monotonic fence, then settle steps in a restart-safe transaction."""
     run = await get_run(session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run_id)
-    expected = WorkflowRunStatus(run.status)
-    if expected not in {WorkflowRunStatus.CREATED, WorkflowRunStatus.RUNNING}:
-        raise ApplicationError(
-            "workflow_run_invalid_transition",
-            "Workflow run state transition is invalid",
-            status_code=409,
+    await cancellation.lock_workflow(session, run_id)
+    await session.refresh(run)
+    if run.status == "CANCELLED":
+        await session.commit()
+    elif run.status in {"CREATED", "RUNNING"}:
+        instant = datetime.now(UTC)
+        updated = await repository.transition_run(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            run_id=run_id,
+            expected=run.status,
+            values={
+                "status": "CANCELLED",
+                "failure_code": None,
+                "completed_at": instant,
+                "updated_at": instant,
+            },
         )
-    return await _transition_run(
-        session,
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-        run_id=run_id,
-        expected=expected,
-        target=WorkflowRunStatus.CANCELLED,
-    )
+        if updated is None:
+            await session.rollback()
+            raise ApplicationError(
+                "workflow_run_invalid_transition",
+                "Workflow cancellation conflicted",
+                status_code=409,
+            )
+        await append_event(
+            session,
+            data=RuntimeEventCreate(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                project_id=run.project_id,
+                task_id=run.task_id,
+                correlation_id=run.correlation_id,
+                event_type="workflow.run.cancelled",
+                source="workflow_service",
+                payload={"workflow_run_id": str(run_id), "workflow_status": "CANCELLED"},
+            ),
+            commit=False,
+        )
+        await session.commit()
+    else:
+        await session.rollback()
+        raise ApplicationError(
+            "workflow_run_invalid_transition", "Workflow run is already terminal", status_code=409
+        )
+    await cancellation.settle_cancelled_steps(session, run_id)
+    await session.refresh(run)
+    return run
 
 
 async def transition_step(
@@ -666,6 +710,12 @@ async def transition_step(
         raise ApplicationError(
             "workflow_step_invalid_failure", "Failure code is invalid", status_code=422
         )
+    if target in {
+        WorkflowStepRunStatus.RUNNING,
+        WorkflowStepRunStatus.WAITING_FOR_APPROVAL,
+        WorkflowStepRunStatus.COMPLETED,
+    }:
+        await cancellation.require_active_workflow(session, run_id, allow_created=True)
     now = datetime.now(UTC)
     values: dict[str, object] = {"status": target.value, "updated_at": now}
     if target == WorkflowStepRunStatus.RUNNING and expected == WorkflowStepRunStatus.READY:
@@ -685,6 +735,10 @@ async def transition_step(
             "Workflow step state transition is invalid",
             status_code=409,
         )
+    if expected == WorkflowStepRunStatus.READY and target == WorkflowStepRunStatus.RUNNING:
+        from novalton_api.modules.durable_dispatch.authority import record_step_claim
+
+        await record_step_claim(session, workflow_run_id=run_id, step_run_id=value.id)
     if target == WorkflowStepRunStatus.COMPLETED:
         for dependent in await repository.pending_dependents(
             session, run_id=run_id, completed_step_id=value.workflow_step_id
@@ -726,6 +780,12 @@ async def link_agent_run(
         or (agent_run.project_id, agent_run.task_id) != (run.project_id, run.task_id)
     ):
         raise _not_found()
+    # AgentRun -> workflow -> dispatch is the shared reservation lock order.
+    await session.refresh(agent_run, with_for_update=True)
+    await cancellation.lock_workflow(session, run_id)
+    from novalton_api.modules.durable_dispatch.authority import require_workflow
+
+    await require_workflow(session, run_id)
     linked = await repository.link_agent_run(
         session, step_run_id=step_run_id, agent_run_id=agent_run_id
     )

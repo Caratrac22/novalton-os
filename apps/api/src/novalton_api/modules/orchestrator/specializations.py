@@ -26,6 +26,7 @@ from novalton_api.modules.qa_worker.contracts import ValidationCriterion
 from novalton_api.modules.qa_worker.schemas import QAWorkerValidationRequest
 from novalton_api.modules.workflows import repository
 from novalton_api.modules.workflows import service as workflow_service
+from novalton_api.modules.workflows.cancellation import require_active_workflow
 from novalton_api.modules.workflows.models import (
     WorkflowRun,
     WorkflowStep,
@@ -280,6 +281,7 @@ async def persist_next_handoff(
     step_run: WorkflowStepRun,
     result: AgentResult,
 ) -> WorkflowStepHandoff | None:
+    await require_active_workflow(session, run.id)
     ordered = await repository.ordered_step_runs(session, run_id=run.id)
     index = next(i for i, (value, _) in enumerate(ordered) if value.id == step_run.id)
     if index + 1 >= len(ordered):

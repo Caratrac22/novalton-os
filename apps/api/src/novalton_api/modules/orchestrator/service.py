@@ -27,7 +27,7 @@ from novalton_api.modules.qa_worker.contracts import (
 )
 from novalton_api.modules.runtime_events.schemas import RuntimeEventCreate
 from novalton_api.modules.runtime_events.service import append_event
-from novalton_api.modules.workflows import repository
+from novalton_api.modules.workflows import cancellation, repository
 from novalton_api.modules.workflows import service as workflow_service
 from novalton_api.modules.workflows.models import WorkflowRun, WorkflowStep, WorkflowStepRun
 from novalton_api.modules.workflows.schemas import WorkflowRunStatus, WorkflowStepRunStatus
@@ -209,7 +209,7 @@ async def _fail(
     )
 
 
-async def advance(
+async def _advance_active(
     session: AsyncSession,
     *,
     registry: ProviderRegistry,
@@ -478,6 +478,7 @@ async def advance(
             reason_code="agent_execution_cancelled",
         )
 
+    await cancellation.require_active_workflow(session, workflow_run_id)
     await session.refresh(step_run)
     if step_run.agent_run_id is None:
         step_run = await workflow_service.link_agent_run(
@@ -686,4 +687,39 @@ async def advance(
         step=step,
         agent_run_id=executed.agent_run_id,
         challenge_level=challenge if challenge != ChallengeLevel.NONE else None,
+    )
+
+
+async def advance(
+    session: AsyncSession,
+    *,
+    registry: ProviderRegistry,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    workflow_run_id: UUID,
+) -> OrchestrationResult:
+    """Translate a lost cancellation race to the durable cancelled outcome."""
+    try:
+        result = await _advance_active(
+            session,
+            registry=registry,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            workflow_run_id=workflow_run_id,
+        )
+        if result.outcome != OrchestrationOutcome.CANCELLED:
+            return result
+    except ApplicationError:
+        await session.rollback()
+        run = await workflow_service.get_run(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=workflow_run_id
+        )
+        if run.status != "CANCELLED":
+            raise
+    await cancellation.settle_cancelled_steps(session, workflow_run_id)
+    run = await workflow_service.get_run(
+        session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=workflow_run_id
+    )
+    return await _result(
+        session, run, OrchestrationOutcome.CANCELLED, reason_code="workflow_cancelled"
     )

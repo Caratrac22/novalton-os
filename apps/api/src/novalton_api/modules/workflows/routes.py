@@ -3,10 +3,11 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.database import get_async_session
+from novalton_api.core.exceptions import ApplicationError
 from novalton_api.modules.workflows import operator_view, repository, service
 from novalton_api.modules.workflows.models import WorkflowPlan, WorkflowRun
 from novalton_api.modules.workflows.schemas import (
@@ -233,3 +234,21 @@ async def get_operator_workflow(
         workspace_id=workspace_id,
         workflow_run_id=workflow_run_id,
     )
+
+
+@runs_router.post("/{workflow_run_id}/cancel", response_model=WorkflowRunResponse)
+async def cancel_run(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    workflow_run_id: UUID,
+    session: Session,
+    request: Request,
+) -> WorkflowRunResponse:
+    if await request.body():
+        raise ApplicationError(
+            "invalid_cancellation_request", "Cancellation accepts no request body", status_code=422
+        )
+    run = await service.cancel_run(
+        session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=workflow_run_id
+    )
+    return await _run_response(session, run)

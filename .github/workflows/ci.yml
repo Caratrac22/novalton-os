@@ -41,8 +41,15 @@ jobs:
           cache-dependency-path: apps/api/pyproject.toml
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
-      - run: ruff check .
-      - run: ruff format --check .
+      - name: Check backend formatting and lint
+        run: |
+          status=0
+          ruff format --check --diff . || status=1
+          if ! ruff check .; then
+            status=1
+            ruff check --diff . || true
+          fi
+          exit "$status"
       - name: Verify disposable database contract
         run: |
           test "$NOVALTON_ENV" = test
@@ -83,3 +90,42 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm audit --audit-level=high
+  recovery-export:
+    name: Verified Git recovery export
+    if: github.event_name == 'pull_request' && github.head_ref == 'feature/mission3-durable-dispatch'
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build and verify source archive and complete Git bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir recovery-export
+          git branch mission3-export HEAD
+          git bundle create recovery-export/Novalton_OS_Mission_3.bundle refs/heads/mission3-export
+          git bundle verify recovery-export/Novalton_OS_Mission_3.bundle
+          git clone --quiet --branch mission3-export recovery-export/Novalton_OS_Mission_3.bundle "$RUNNER_TEMP/mission3-restore"
+          test "$(git rev-parse HEAD)" = "$(git -C "$RUNNER_TEMP/mission3-restore" rev-parse HEAD)"
+          test "$(git rev-parse HEAD^{tree})" = "$(git -C "$RUNNER_TEMP/mission3-restore" rev-parse HEAD^{tree})"
+          git archive --format=zip --prefix=novalton-os/ --output=recovery-export/Novalton_OS_Mission_3_Sources.zip HEAD
+          git rev-parse HEAD > recovery-export/HEAD.txt
+          git log --reverse --format='%H %s' 978612f62302a08c16cc4447d2f710d8dae896a3..HEAD > recovery-export/COMMITS.txt
+          if test -f docs/18-mission-3-handoff.md; then
+            cp docs/18-mission-3-handoff.md recovery-export/MISSION_4_REPRISE.md
+          fi
+          cd recovery-export
+          sha256sum Novalton_OS_Mission_3.bundle Novalton_OS_Mission_3_Sources.zip HEAD.txt COMMITS.txt > SHA256SUMS
+          if test -f MISSION_4_REPRISE.md; then
+            sha256sum MISSION_4_REPRISE.md >> SHA256SUMS
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Novalton_OS_Mission_3_${{ github.event.pull_request.head.sha || github.sha }}
+          path: recovery-export/
+          retention-days: 90
+          if-no-files-found: error

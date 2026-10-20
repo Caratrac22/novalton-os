@@ -24,6 +24,7 @@ from novalton_api.modules.tools.contracts import ToolExecutionStatus
 from novalton_api.modules.tools.executor import ToolExecutionError, WorkspaceRoot
 from novalton_api.modules.workflows import repository as workflow_repository
 from novalton_api.modules.workflows import service as workflow_service
+from novalton_api.modules.workflows.cancellation import require_agent_workflow
 from novalton_api.modules.workflows.models import WorkflowRun, WorkflowStepRun
 from novalton_api.modules.workflows.schemas import WorkflowStepRunStatus
 
@@ -523,6 +524,16 @@ async def approve_and_resume(
         workspace_id=workspace_id,
         approval_id=approval_id,
     )
+    # A historical decision is evidence, not authority. Do not hold AgentRun
+    # locks while recording concurrent human decisions; the gateway and the
+    # continuation reservation below fence the actual effects.
+    status = await session.scalar(
+        select(WorkflowRun.status).where(WorkflowRun.id == workflow_run.id)
+    )
+    if status == "CANCELLED":
+        raise ApplicationError(
+            "workflow_execution_cancelled", "Workflow execution was cancelled", status_code=409
+        )
     previous = await approval_service.get_approval(
         session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
     )
@@ -613,6 +624,9 @@ async def approve_and_resume(
             workflow_run_id=workflow_run.id,
         )
         return approval
+    await require_agent_workflow(
+        session, tenant_id=tenant_id, workspace_id=workspace_id, agent_run_id=agent_run.id
+    )
     instant = datetime.now(UTC)
     tool_call.result_metadata = {
         **(tool_call.result_metadata or {}),
@@ -717,7 +731,7 @@ async def reject_and_terminalize(
         workspace_id=workspace_id,
         approval_id=approval_id,
     )
-    if step_run.status == WorkflowStepRunStatus.FAILED.value:
+    if workflow_run.status == "CANCELLED" or step_run.status == WorkflowStepRunStatus.FAILED.value:
         return approval
     agent_run = await tool_service.reject_prepared_mutation(
         session,

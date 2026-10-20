@@ -45,6 +45,7 @@ from novalton_api.modules.tools.executor import (
     WorkspaceRoot,
 )
 from novalton_api.modules.tools.models import ToolCall
+from novalton_api.modules.workflows.cancellation import require_agent_workflow
 from novalton_api.modules.workflows.models import WorkflowRun, WorkflowStepRun
 
 
@@ -124,6 +125,13 @@ async def _load_authority(
     )
     if run is None:
         raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
+    await require_agent_workflow(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_run_id=agent_run_id,
+        reserve_effect=True,
+    )
     if run.status != "RUNNING":
         raise ApplicationError(
             "tool_agent_run_inactive", "Agent run is not active", status_code=409
@@ -605,6 +613,13 @@ async def resume_prepared_mutation(
                 },
             ),
         ), run
+    await require_agent_workflow(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_run_id=run.id,
+        reserve_effect=True,
+    )
     if value.status != "PENDING_APPROVAL" or run.status != "WAITING_FOR_APPROVAL":
         return _result(value, failure_code="approval_resume_invalid_state"), run
     registered = registry.get(value.tool_id)

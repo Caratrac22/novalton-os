@@ -1,6 +1,7 @@
 # Durable task dispatch — implementation design
 
-Status: DESIGN ONLY, 2026-10-20. This document does not enable a background worker,
+Status: DESIGN CONTRACT, 2026-10-20. The controlled foundation is documented in
+[19-durable-task-dispatch.md](19-durable-task-dispatch.md). This document does not enable a background worker,
 automatic provider retries, new tool permissions, or unattended mutations.
 
 ## Existing foundation

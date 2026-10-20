@@ -23,6 +23,7 @@ from novalton_api.modules.audit.service import append_record
 from novalton_api.modules.model_usage.repository import get_scoped_run as get_model_run
 from novalton_api.modules.projects.repository import get_project
 from novalton_api.modules.tasks.repository import get_task
+from novalton_api.modules.workflows.cancellation import require_agent_workflow
 from novalton_api.modules.workspaces.queries import get_workspace_by_tenant_and_id
 
 logger = logging.getLogger(__name__)
@@ -309,6 +310,10 @@ async def _transition(
 ) -> AgentRun:
     await get_run(session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run_id)
     now = datetime.now(UTC)
+    if target in {AgentRunStatus.RUNNING, AgentRunStatus.WAITING_FOR_APPROVAL}:
+        await require_agent_workflow(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, agent_run_id=run_id
+        )
     values: dict[str, object] = {"status": target.value, "updated_at": now}
     if target == AgentRunStatus.RUNNING and expected == AgentRunStatus.CREATED:
         values["started_at"] = now

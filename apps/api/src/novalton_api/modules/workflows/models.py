@@ -164,6 +164,14 @@ class WorkflowRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "workflow_runs"
     __table_args__ = (
         UniqueConstraint("id", "workflow_plan_id", name="uq_workflow_runs_id_plan"),
+        UniqueConstraint(
+            "id",
+            "tenant_id",
+            "workspace_id",
+            "project_id",
+            "task_id",
+            name="uq_workflow_runs_dispatch_scope",
+        ),
         CheckConstraint("plan_version > 0", name="ck_workflow_runs_plan_version_positive"),
         CheckConstraint(
             "status IN ('CREATED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED')",
@@ -231,6 +239,7 @@ class WorkflowStepRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UniqueConstraint(
             "id", "workflow_run_id", "workflow_plan_id", name="uq_workflow_step_runs_id_run_plan"
         ),
+        UniqueConstraint("id", "workflow_run_id", name="uq_workflow_step_runs_dispatch_scope"),
         CheckConstraint(
             "status IN ('PENDING', 'READY', 'RUNNING', 'WAITING_FOR_APPROVAL', "
             "'COMPLETED', 'FAILED', 'CANCELLED')",
