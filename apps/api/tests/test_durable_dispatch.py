@@ -56,6 +56,8 @@ from novalton_api.modules.policy import service as policy_service
 from novalton_api.modules.policy.schemas import PolicyEffect, PolicyRuleCreate
 from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tools.models import ToolCall
+from novalton_api.modules.workflows.models import WorkflowRun
+from novalton_api.modules.workflows.service import create_run as create_workflow_run
 
 
 def db_call(operation):
@@ -101,8 +103,11 @@ def scope(monkeypatch):
     configure_operator(value, monkeypatch)
     db_call(
         lambda session: service.configure_workspace(
-            session, operator=operator_for(value), tenant_id=value.tenant_id,
-            workspace_id=value.workspace_id, enabled=True
+            session,
+            operator=operator_for(value),
+            tenant_id=value.tenant_id,
+            workspace_id=value.workspace_id,
+            enabled=True,
         )
     )
     yield value
@@ -148,8 +153,11 @@ def enqueue(scope, provider, **values):
     )
     row = db_call(
         lambda session: service.enqueue(
-            session, operator=operator_for(scope), tenant_id=scope.tenant_id,
-            workspace_id=scope.workspace_id, data=data
+            session,
+            operator=operator_for(scope),
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            data=data,
         )
     )
     return row, data, advance
@@ -236,7 +244,9 @@ def test_operator_credential_permissions_and_scope_fail_closed(scope, monkeypatc
         authenticate_operator("x" * 40)
     assert wrong.value.code == "dispatch_operator_forbidden"
     with pytest.raises(ApplicationError):
-        OperatorAuthority(object(), "0" * 64, "forged", scope.tenant_id, scope.workspace_id, frozenset())
+        OperatorAuthority(
+            object(), "0" * 64, "forged", scope.tenant_id, scope.workspace_id, frozenset()
+        )
     verified = operator_for(scope)
     with pytest.raises(ApplicationError) as foreign:
         verified.require("dispatch.enqueue", tenant_id=scope.tenant_id, workspace_id=uuid4())
@@ -244,21 +254,29 @@ def test_operator_credential_permissions_and_scope_fail_closed(scope, monkeypatc
     monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_PERMISSIONS", "dispatch.read")
     get_settings.cache_clear()
     with pytest.raises(ApplicationError):
-        verified.require("dispatch.read", tenant_id=scope.tenant_id, workspace_id=scope.workspace_id)
+        verified.require(
+            "dispatch.read", tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+        )
     reader = authenticate_operator(_TEST_OPERATOR_KEY)
     with pytest.raises(ApplicationError) as forbidden:
         db_call(
             lambda session: service.configure_workspace(
-                session, operator=reader, tenant_id=scope.tenant_id,
-                workspace_id=scope.workspace_id, enabled=False
+                session,
+                operator=reader,
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                enabled=False,
             )
         )
     assert forbidden.value.status_code == 403
-    assert db_call(
-        lambda session: service.list_dispatches(
-            session, operator=reader, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+    assert (
+        db_call(
+            lambda session: service.list_dispatches(
+                session, operator=reader, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+            )
         )
-    ) == []
+        == []
+    )
 
 
 def test_operator_read_and_repeated_cancel_leave_one_audited_fence(scope):
@@ -270,8 +288,11 @@ def test_operator_read_and_repeated_cancel_leave_one_audited_fence(scope):
         return await service.list_dispatches(
             session, operator=operator, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
         ), await service.list_attempts(
-            session, operator=operator, tenant_id=scope.tenant_id,
-            workspace_id=scope.workspace_id, dispatch_id=row.id
+            session,
+            operator=operator,
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            dispatch_id=row.id,
         )
 
     listed, attempts = db_call(inspect)
@@ -280,8 +301,11 @@ def test_operator_read_and_repeated_cancel_leave_one_audited_fence(scope):
     for _ in range(2):
         cancelled = db_call(
             lambda session: service.cancel_dispatch(
-                session, operator=operator, tenant_id=scope.tenant_id,
-                workspace_id=scope.workspace_id, dispatch_id=row.id
+                session,
+                operator=operator,
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                dispatch_id=row.id,
             )
         )
         assert cancelled.status == "CANCELLED"
@@ -290,7 +314,9 @@ def test_operator_read_and_repeated_cancel_leave_one_audited_fence(scope):
 
     async def audit_count(session):
         return await session.scalar(
-            select(func.count()).select_from(AuditRecord).where(
+            select(func.count())
+            .select_from(AuditRecord)
+            .where(
                 AuditRecord.tenant_id == scope.tenant_id,
                 AuditRecord.action == "dispatch.task.cancel",
                 AuditRecord.actor_id == operator.actor_id,
@@ -301,8 +327,11 @@ def test_operator_read_and_repeated_cancel_leave_one_audited_fence(scope):
     with pytest.raises(ApplicationError) as foreign:
         db_call(
             lambda session: service.list_attempts(
-                session, operator=operator, tenant_id=scope.tenant_id,
-                workspace_id=uuid4(), dispatch_id=row.id
+                session,
+                operator=operator,
+                tenant_id=scope.tenant_id,
+                workspace_id=uuid4(),
+                dispatch_id=row.id,
             )
         )
     assert foreign.value.status_code == 403
@@ -312,9 +341,18 @@ def test_resolution_requires_explicit_terminal_old_workflow_and_fresh_run(scope)
     provider = QueueProvider([])
     old, _, _ = enqueue(scope, provider, max_attempts=0)
     assert tick(scope, provider) is None
-    body, _ = _create_vertical(scope, provider)
+    async def fresh_run(session):
+        plan_id = await session.scalar(
+            select(WorkflowRun.workflow_plan_id).where(WorkflowRun.id == old.workflow_run_id)
+        )
+        run = await create_workflow_run(
+            session, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id, plan_id=plan_id
+        )
+        return run.id
+
     data = DispatchRequest(
-        workflow_run_id=UUID(body["workflow_run"]["id"]), request_key=uuid4().hex,
+        workflow_run_id=db_call(fresh_run),
+        request_key=uuid4().hex,
         deadline=datetime.now(UTC) + timedelta(hours=1),
     )
     operator = operator_for(scope)
@@ -322,8 +360,12 @@ def test_resolution_requires_explicit_terminal_old_workflow_and_fresh_run(scope)
     def resolve():
         return db_call(
             lambda session: service.resolve_blocked(
-                session, operator=operator, tenant_id=scope.tenant_id,
-                workspace_id=scope.workspace_id, blocked_id=old.id, data=data
+                session,
+                operator=operator,
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                blocked_id=old.id,
+                data=data,
             )
         )
 
@@ -332,8 +374,11 @@ def test_resolution_requires_explicit_terminal_old_workflow_and_fresh_run(scope)
     assert blocked.value.code == "dispatch_resolution_requires_terminal_old_and_fresh_run"
     db_call(
         lambda session: service.cancel_dispatch(
-            session, operator=operator, tenant_id=scope.tenant_id,
-            workspace_id=scope.workspace_id, dispatch_id=old.id
+            session,
+            operator=operator,
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            dispatch_id=old.id,
         )
     )
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -345,7 +390,9 @@ def test_resolution_requires_explicit_terminal_old_workflow_and_fresh_run(scope)
 
     async def resolution_count(session):
         return await session.scalar(
-            select(func.count()).select_from(AuditRecord).where(
+            select(func.count())
+            .select_from(AuditRecord)
+            .where(
                 AuditRecord.tenant_id == scope.tenant_id,
                 AuditRecord.action == "dispatch.task.resolve",
             )
@@ -367,9 +414,9 @@ def test_bounded_capacity_claims_are_unique_and_lost_workers_never_replay(scope,
 
     async def lose_and_observe(session):
         await session.execute(
-            update(TaskDispatch).where(
-                TaskDispatch.tenant_id == scope.tenant_id, TaskDispatch.status == "LEASED"
-            ).values(lease_expires_at=func.clock_timestamp() - text("interval '1 second'"))
+            update(TaskDispatch)
+            .where(TaskDispatch.tenant_id == scope.tenant_id, TaskDispatch.status == "LEASED")
+            .values(lease_expires_at=func.clock_timestamp() - text("interval '1 second'"))
         )
         await session.commit()
         changed = await repository.reconcile(
@@ -386,13 +433,21 @@ def test_bounded_capacity_claims_are_unique_and_lost_workers_never_replay(scope,
 
     changed, states = db_call(lose_and_observe)
     assert changed == len(rows)
-    assert states == [("BLOCKED", 1, "BLOCKED")] * len(rows)
+    assert [tuple(state) for state in states] == [("BLOCKED", 1, "BLOCKED")] * len(rows)
     assert claim(scope) is None
     assert provider.calls == []
-    print(json.dumps({"dispatches": len(rows), "workers": 6, "claim_seconds": round(claim_seconds, 3),
-                      "collisions": len(rows) - len({item.dispatch_id for item in claims}),
-                      "recovered_blocked": changed}))
-    assert "\"collisions\": 0" in capsys.readouterr().out
+    print(
+        json.dumps(
+            {
+                "dispatches": len(rows),
+                "workers": 6,
+                "claim_seconds": round(claim_seconds, 3),
+                "collisions": len(rows) - len({item.dispatch_id for item in claims}),
+                "recovered_blocked": changed,
+            }
+        )
+    )
+    assert '"collisions": 0' in capsys.readouterr().out
 
 
 def test_priority_aging_bounds_starvation_against_new_high_priority_work(scope):
@@ -412,7 +467,8 @@ def test_priority_aging_bounds_starvation_against_new_high_priority_work(scope):
 
     async def age(session):
         await session.execute(
-            update(TaskDispatch).where(TaskDispatch.id == older.id)
+            update(TaskDispatch)
+            .where(TaskDispatch.id == older.id)
             .values(created_at=func.clock_timestamp() - text("interval '1001 seconds'"))
         )
         await session.commit()
@@ -437,8 +493,12 @@ def test_one_iteration_heartbeat_renews_using_an_independent_session(scope):
 
     async def controlled(session):
         return await service.run_once(
-            session, registry=ProviderRegistry((provider,)), tenant_id=scope.tenant_id,
-            workspace_id=scope.workspace_id, owner=uuid4(), lease_seconds=60,
+            session,
+            registry=ProviderRegistry((provider,)),
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            owner=uuid4(),
+            lease_seconds=60,
             heartbeat_session_factory=async_sessionmaker(session.bind, expire_on_commit=False),
             heartbeat_interval_seconds=0.05,
         )
@@ -447,9 +507,11 @@ def test_one_iteration_heartbeat_renews_using_an_independent_session(scope):
         future = executor.submit(db_call, controlled)
         assert entered.wait(15)
         try:
+
             async def shorten(session):
                 await session.execute(
-                    update(TaskDispatch).where(TaskDispatch.id == row.id)
+                    update(TaskDispatch)
+                    .where(TaskDispatch.id == row.id)
                     .values(lease_expires_at=func.clock_timestamp() + text("interval '1 second'"))
                 )
                 await session.commit()
@@ -486,6 +548,7 @@ def test_lost_heartbeat_fences_late_provider_without_replay(scope, monkeypatch):
         return await original(request)
 
     async def heartbeat_failed(session, claimed, *, lease_seconds=3600):
+        assert await asyncio.to_thread(entered.wait, 10)
         lost.set()
         return False
 
@@ -494,8 +557,12 @@ def test_lost_heartbeat_fences_late_provider_without_replay(scope, monkeypatch):
 
     async def controlled(session):
         return await service.run_once(
-            session, registry=ProviderRegistry((provider,)), tenant_id=scope.tenant_id,
-            workspace_id=scope.workspace_id, owner=uuid4(), lease_seconds=60,
+            session,
+            registry=ProviderRegistry((provider,)),
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            owner=uuid4(),
+            lease_seconds=60,
             heartbeat_session_factory=async_sessionmaker(session.bind, expire_on_commit=False),
             heartbeat_interval_seconds=0.05,
         )
@@ -525,8 +592,11 @@ def test_enqueue_idempotency_is_atomic_and_conflicting_bindings_fail(scope):
     def repeat():
         return db_call(
             lambda session: service.enqueue(
-                session, operator=operator_for(scope), tenant_id=scope.tenant_id,
-                workspace_id=scope.workspace_id, data=data
+                session,
+                operator=operator_for(scope),
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                data=data,
             )
         )
 
@@ -842,8 +912,11 @@ def test_global_switch_and_workspace_activation_are_both_required(scope, monkeyp
     get_settings.cache_clear()
     db_call(
         lambda session: service.configure_workspace(
-            session, operator=operator_for(scope), tenant_id=scope.tenant_id,
-            workspace_id=scope.workspace_id, enabled=False
+            session,
+            operator=operator_for(scope),
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            enabled=False,
         )
     )
     with pytest.raises(ApplicationError) as error:
@@ -897,8 +970,11 @@ def test_scoped_foreign_keys_and_dependency_scope_fail_closed(scope, monkeypatch
         configure_operator(other, monkeypatch)
         db_call(
             lambda session: service.configure_workspace(
-                session, operator=operator_for(other), tenant_id=other.tenant_id,
-                workspace_id=other.workspace_id, enabled=False
+                session,
+                operator=operator_for(other),
+                tenant_id=other.tenant_id,
+                workspace_id=other.workspace_id,
+                enabled=False,
             )
         )
         foreign, _, _ = enqueue(other, provider)
@@ -914,8 +990,11 @@ def test_scoped_foreign_keys_and_dependency_scope_fail_closed(scope, monkeypatch
         with pytest.raises(ApplicationError) as error:
             db_call(
                 lambda session: service.enqueue(
-                    session, operator=operator_for(scope), tenant_id=scope.tenant_id,
-                    workspace_id=scope.workspace_id, data=data
+                    session,
+                    operator=operator_for(scope),
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    data=data,
                 )
             )
         assert error.value.code == "dispatch_dependency_scope_mismatch"
@@ -1136,8 +1215,11 @@ def test_enqueue_refuses_to_adopt_an_already_started_manual_workflow(scope):
     with pytest.raises(ApplicationError) as error:
         db_call(
             lambda session: service.enqueue(
-                session, operator=operator_for(scope), tenant_id=scope.tenant_id,
-                workspace_id=scope.workspace_id, data=data
+                session,
+                operator=operator_for(scope),
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                data=data,
             )
         )
     assert error.value.code == "dispatch_fresh_workflow_required"

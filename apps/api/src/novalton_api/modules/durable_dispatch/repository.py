@@ -224,7 +224,8 @@ async def reconcile_cancelled(
 ) -> TaskDispatch | None:
     """Project one persisted cancellation without a bounded queue scan."""
     row = await session.scalar(
-        select(TaskDispatch).where(
+        select(TaskDispatch)
+        .where(
             TaskDispatch.id == dispatch_id,
             TaskDispatch.tenant_id == tenant_id,
             TaskDispatch.workspace_id == workspace_id,
@@ -278,9 +279,7 @@ async def claim(
         # ordering then selects the older request. Never rotate created_at.
         age = func.least(
             200,
-            func.greatest(
-                0, func.floor(func.extract("epoch", now - TaskDispatch.created_at) / 5)
-            ),
+            func.greatest(0, func.floor(func.extract("epoch", now - TaskDispatch.created_at) / 5)),
         )
         row = await session.scalar(
             select(TaskDispatch)

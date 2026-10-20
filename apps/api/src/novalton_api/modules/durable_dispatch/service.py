@@ -416,7 +416,10 @@ async def resolve_blocked(
             actor_type="local_user",
             actor_id=operator.actor_id,
             outcome="success",
-            metadata={"previous_dispatch_id": str(blocked_id), "new_workflow_run_id": str(fresh.id)},
+            metadata={
+                "previous_dispatch_id": str(blocked_id),
+                "new_workflow_run_id": str(fresh.id),
+            },
         ),
         commit=False,
     )

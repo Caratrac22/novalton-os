@@ -41,7 +41,9 @@ def _configured() -> tuple[str, str, UUID, UUID, frozenset[str]]:
     if any(value is None for value in values):
         raise _forbidden()
     permissions = frozenset(
-        item.strip() for item in settings.durable_dispatch_operator_permissions.split(",") if item.strip()
+        item.strip()
+        for item in settings.durable_dispatch_operator_permissions.split(",")
+        if item.strip()
     )
     if not permissions or not permissions <= PERMISSIONS:
         raise _forbidden()
