@@ -2625,20 +2625,22 @@ def test_cancellation_fences_late_provider_and_every_new_reservation(
                                 tenant_id=scope.tenant_id,
                                 workspace_id=scope.workspace_id,
                                 agent_run_id=agent_id,
-                                proposal=ToolProposal.model_validate({
-                                    "call_key": "cancelled_read",
-                                    "tool_name": "workspace.read_file",
-                                    "arguments": {"path": "fixture.txt"},
-                                }),
+                                proposal=ToolProposal.model_validate(
+                                    {
+                                        "call_key": "cancelled_read",
+                                        "tool_name": "workspace.read_file",
+                                        "arguments": {"path": "fixture.txt"},
+                                    }
+                                ),
                                 permitted_tools=["workspace.read_file"],
                                 workspace_root=WorkspaceRoot.approved(tmp_path),
                             )
                         assert error.value.code == "workflow_execution_cancelled"
                         await session.rollback()
                         count = await session.scalar(
-                            select(func.count()).select_from(ToolCall).where(
-                                ToolCall.tenant_id == scope.tenant_id
-                            )
+                            select(func.count())
+                            .select_from(ToolCall)
+                            .where(ToolCall.tenant_id == scope.tenant_id)
                         )
                         assert count == 0
                 finally:
@@ -2654,9 +2656,7 @@ def test_cancellation_fences_late_provider_and_every_new_reservation(
     assert len(after["model_runs"]) == len(after["agent_runs"]) == position + 1
     assert len(after["handoffs"]) == len(before["handoffs"])
     assert len(provider.calls) == position + 1
-    assert after["model_runs"][-1].status == (
-        "FAILED" if late_result == "failure" else "SUCCEEDED"
-    )
+    assert after["model_runs"][-1].status == ("FAILED" if late_result == "failure" else "SUCCEEDED")
     assert all(row.status in {"COMPLETED", "CANCELLED"} for row, _ in after["rows"])
     assert _advance_fresh(provider, advance)["outcome"] == "CANCELLED"
     cancelled_events = [
@@ -2694,9 +2694,10 @@ def test_cancel_commit_survives_crash_and_repeated_requests_settle_once(scope, m
     assert all(response.status_code == 200 for response in responses)
     state = asyncio.run(_vertical_state(scope, run_id))
     assert all(row.status == "CANCELLED" for row, _ in state["rows"])
-    assert len([
-        event for event in state["events"] if event.event_type == "workflow.run.cancelled"
-    ]) == 1
+    assert (
+        len([event for event in state["events"] if event.event_type == "workflow.run.cancelled"])
+        == 1
+    )
     assert state["agent_runs"] == state["model_runs"] == []
     assert provider.calls == []
     assert _advance_fresh(provider, advance)["outcome"] == "CANCELLED"
@@ -2734,16 +2735,18 @@ def test_cancelled_workflow_never_recovers_authority_from_old_approval(
     asyncio.run(add_policy())
     proposal = _worker() | {
         "status": "PARTIAL",
-        "tool_proposals": [{
-            "call_key": "cancelled_mutation",
-            "tool_name": "workspace.replace_text",
-            "arguments": {
-                "path": "fixture.txt",
-                "search": "before",
-                "replacement": "after",
-                "expected_matches": 1,
-            },
-        }],
+        "tool_proposals": [
+            {
+                "call_key": "cancelled_mutation",
+                "tool_name": "workspace.replace_text",
+                "arguments": {
+                    "path": "fixture.txt",
+                    "search": "before",
+                    "replacement": "after",
+                    "expected_matches": 1,
+                },
+            }
+        ],
     }
     provider = QueueProvider([_manager(), proposal, _worker()])
     try:
@@ -2779,7 +2782,9 @@ def test_cancelled_workflow_never_recovers_authority_from_old_approval(
             try:
                 async with database.session_factory() as session:
                     await approvals_service.approve(
-                        session, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id,
+                        session,
+                        tenant_id=scope.tenant_id,
+                        workspace_id=scope.workspace_id,
                         approval_id=identifier,
                     )
             finally:

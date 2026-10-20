@@ -70,9 +70,11 @@ async def settle_cancelled_steps(session: AsyncSession, workflow_run_id: UUID) -
     Never mark ModelRuns or RUNNING ToolCalls cancelled: the external operation
     may still finish, incur cost, or already have applied its approved effect.
     """
-    cancelled = select(WorkflowRun.id).where(
-        WorkflowRun.id == workflow_run_id, WorkflowRun.status == "CANCELLED"
-    ).exists()
+    cancelled = (
+        select(WorkflowRun.id)
+        .where(WorkflowRun.id == workflow_run_id, WorkflowRun.status == "CANCELLED")
+        .exists()
+    )
     instant = datetime.now(UTC)
     await session.execute(
         update(WorkflowStepRun)
