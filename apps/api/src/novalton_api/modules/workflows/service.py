@@ -561,9 +561,14 @@ async def _transition_run(
     target: WorkflowRunStatus,
     failure_code: str | None = None,
 ) -> WorkflowRun:
-    await get_run(session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run_id)
+    run = await get_run(session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run_id)
     if target == WorkflowRunStatus.RUNNING:
-        await cancellation.require_active_workflow(session, run_id, allow_created=True)
+        await cancellation.lock_workflow(session, run_id)
+        await session.refresh(run)
+        # Preserve the established invalid-transition response for terminal
+        # workflows. Only a valid start needs new dispatch authority.
+        if run.status == expected.value:
+            await cancellation.require_active_workflow(session, run_id, allow_created=True)
     now = datetime.now(UTC)
     values: dict[str, object] = {"status": target.value, "updated_at": now}
     if target == WorkflowRunStatus.RUNNING:
