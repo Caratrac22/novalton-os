@@ -243,13 +243,21 @@ async def advance(
     # A prior HTTP worker may have died after atomically claiming a governed
     # continuation. Aged claims fail closed; no provider or mutation is retried.
     from novalton_api.modules.approvals.mutation_resume import reconcile_stale_continuation
+    from novalton_api.modules.orchestrator.recovery import reconcile_stale_unlinked_step
 
-    await reconcile_stale_continuation(
+    unlinked_recovered = await reconcile_stale_unlinked_step(
         session,
         tenant_id=tenant_id,
         workspace_id=workspace_id,
-        workflow_run_id=run.id,
+        workflow_run_id=workflow_run_id,
     )
+    if not unlinked_recovered:
+        await reconcile_stale_continuation(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            workflow_run_id=workflow_run_id,
+        )
     # A lost recovery race rolls back and expires ORM objects. Reload before
     # reading even run.id; implicit async lazy loading would raise MissingGreenlet.
     # A competitor may also have completed/cancelled/failed the workflow.

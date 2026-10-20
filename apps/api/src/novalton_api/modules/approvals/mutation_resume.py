@@ -69,6 +69,7 @@ async def reconcile_stale_continuation(
             )
         )
         if agent is None or agent.status not in {
+            "CREATED",
             "RUNNING",
             "WAITING_FOR_APPROVAL",
             "SUCCEEDED",
@@ -92,7 +93,12 @@ async def reconcile_stale_continuation(
         # No ToolCall exists yet: a crash can strand the initially linked
         # AgentRun during its first provider invocation. This is a terminal
         # recovery only; never retry the initial provider call.
-        initial_without_tool = not calls and step.status == "RUNNING" and agent.status == "RUNNING"
+        initial_status = agent.status
+        initial_without_tool = (
+            not calls and step.status == "RUNNING" and initial_status in {"CREATED", "RUNNING"}
+        )
+        if initial_status == "CREATED" and calls:
+            continue
         # Proposal and suspension are separate commits. A crash in between
         # leaves a pending approval with a still-running workflow step.
         if pending is not None:
@@ -169,7 +175,7 @@ async def reconcile_stale_continuation(
                     except ValueError:
                         continue
         if candidate is None and initial_without_tool:
-            claimed_at = agent.started_at
+            claimed_at = agent.created_at if initial_status == "CREATED" else agent.started_at
             stamp = None
         elif candidate is None:
             continue
@@ -271,8 +277,13 @@ async def reconcile_stale_continuation(
                 initial_without_tool
                 and (
                     fresh_calls
-                    or fresh_agent.started_at != claimed_at
-                    or fresh_agent.status != "RUNNING"
+                    or (
+                        fresh_agent.created_at
+                        if initial_status == "CREATED"
+                        else fresh_agent.started_at
+                    )
+                    != claimed_at
+                    or fresh_agent.status != initial_status
                 )
             )
             or (pending is None and latest_pending is not None)
@@ -310,7 +321,8 @@ async def reconcile_stale_continuation(
             fresh_step is None
             or fresh_step.status not in {"RUNNING", "WAITING_FOR_APPROVAL"}
             or fresh_agent is None
-            or fresh_agent.status not in {"RUNNING", "WAITING_FOR_APPROVAL", "SUCCEEDED", "FAILED"}
+            or fresh_agent.status
+            not in {"CREATED", "RUNNING", "WAITING_FOR_APPROVAL", "SUCCEEDED", "FAILED"}
             or (pending is not None and fresh_step.status != "RUNNING")
             or (
                 initial_without_tool
@@ -335,7 +347,10 @@ async def reconcile_stale_continuation(
         ):
             await session.rollback()
             return False
-        if fresh_agent.status in {"RUNNING", "WAITING_FOR_APPROVAL"}:
+        if fresh_agent.status in {"CREATED", "RUNNING", "WAITING_FOR_APPROVAL"}:
+            # CREATED never reached dispatch. Cancel it without fabricating a
+            # started_at timestamp, as required by the AgentRun lifecycle.
+            never_started = fresh_agent.status == "CREATED"
             updated = await agent_repository.transition_run(
                 session,
                 tenant_id=tenant_id,
@@ -343,8 +358,8 @@ async def reconcile_stale_continuation(
                 run_id=fresh_agent.id,
                 expected_status=fresh_agent.status,
                 values={
-                    "status": "FAILED",
-                    "failure_code": _INTERRUPTED,
+                    "status": "CANCELLED" if never_started else "FAILED",
+                    "failure_code": None if never_started else _INTERRUPTED,
                     "completed_at": instant,
                     "updated_at": instant,
                 },

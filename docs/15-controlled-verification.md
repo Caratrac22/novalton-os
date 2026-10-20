@@ -75,8 +75,10 @@ later correction wait. A crash after claiming fails closed; no automatic provide
 retry or reapplication occurs. Syntax output never grants another permission.
 
 The trusted workflow links each Manager, Developer, QA and generic AgentRun before
-provider/tool work. An initially linked RUNNING AgentRun with no ToolCalls is
-also failed closed after the same one-hour lease on a later explicit `advance`.
+provider/tool work. An initially linked CREATED or RUNNING AgentRun with no
+ToolCalls is also terminalized after the same one-hour lease on a later explicit
+`advance`. A never-started CREATED run becomes CANCELLED with no fabricated start
+timestamp; a RUNNING run becomes FAILED. The step and workflow become FAILED.
 The AgentRun and step are locked and rechecked, and ToolCalls are reread after
 locking so a concurrently committed proposal prevents this pre-tool recovery.
 Active ModelRuns, AgentRun, step and workflow fail in one transaction. Neither
@@ -87,10 +89,14 @@ transaction. An interrupted pending proposal, running/finished first tool, appli
 mutation, denial or claimed continuation is failed closed on a later explicit
 `advance` after the fixed one-hour lease. Active continuations are not reclaimed
 before that lease; each governed provider continuation has a 300-second deadline.
-This does not yet reclaim a RUNNING step with no linked AgentRun or an AgentRun
-still in CREATED: interruption before durable linkage/start requires explicit
-operator investigation. Recovery marks an abandoned run FAILED; it does not
-automatically retry an assignment or provide a durable task scheduler.
+An aged RUNNING AGENT_TASK step with no linked AgentRun is separately failed with
+`initial_step_interrupted`, under the step row lock and a scoped workflow CAS.
+Delayed linkage to a terminal step or workflow is rejected. If the process died
+after creating an AgentRun but before linking it, the orphan is left untouched:
+no association is guessed from a shared task or timestamp. It has no ModelRun or
+tool authority. Neither recovery path automatically retries an assignment or
+provides a durable task scheduler. Cancellation of an already dispatched provider
+remains a separate concern.
 
 Approved replacement preserves existing ordinary mode/group so the separate
 verification UID can still read admitted source. Foreign ownership, privileged

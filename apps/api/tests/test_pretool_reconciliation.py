@@ -13,21 +13,40 @@ from novalton_api.modules.approvals import mutation_resume
 
 
 @pytest.mark.parametrize(
-    "case", ["stale", "young", "late_tool", "completed_agent", "agent_changed", "step_changed"]
+    "case",
+    [
+        "stale",
+        "young",
+        "late_tool",
+        "completed_agent",
+        "agent_changed",
+        "step_changed",
+        "created",
+        "created_started",
+    ],
 )
 def test_initial_agent_reconciliation_is_terminal_and_race_safe(monkeypatch, case):
     now = datetime.now(UTC)
     tenant_id, workspace_id, run_id, agent_id, step_id = (uuid4() for _ in range(5))
-    agent = SimpleNamespace(id=agent_id, status="RUNNING", started_at=now - timedelta(hours=2))
+    agent = SimpleNamespace(
+        id=agent_id,
+        status="RUNNING",
+        started_at=now - timedelta(hours=2),
+        created_at=now - timedelta(hours=2),
+    )
     step = SimpleNamespace(id=step_id, agent_run_id=agent_id, status="RUNNING")
     if case == "young":
         agent.started_at = now - timedelta(minutes=5)
     if case == "completed_agent":
         agent.status = "SUCCEEDED"
+    if case in {"created", "created_started"}:
+        agent.status, agent.started_at = "CREATED", None
     fresh_agent = SimpleNamespace(**vars(agent))
     fresh_step = SimpleNamespace(**vars(step))
     if case == "agent_changed":
         fresh_agent.status = "WAITING_FOR_APPROVAL"
+    if case == "created_started":
+        fresh_agent.status, fresh_agent.started_at = "RUNNING", now
     if case == "step_changed":
         fresh_step.status = "WAITING_FOR_APPROVAL"
     tool = SimpleNamespace(id=uuid4(), status="RUNNING", result_metadata={})
@@ -59,11 +78,17 @@ def test_initial_agent_reconciliation_is_terminal_and_race_safe(monkeypatch, cas
             now=now,
         )
     )
-    expected = case == "stale"
+    expected = case in {"stale", "created"}
     assert result is expected
     assert session.commit.await_count == int(expected)
     assert len(transitions) == (3 if expected else 0)
-    if expected:
+    if case == "created":
+        assert transitions[0]["values"]["status"] == "CANCELLED"
+        assert transitions[0]["values"]["failure_code"] is None
+        assert all(
+            t["values"]["failure_code"] == "tool_continuation_interrupted" for t in transitions[1:]
+        )
+    elif expected:
         assert all(
             t["values"]["failure_code"] == "tool_continuation_interrupted" for t in transitions
         )

@@ -1834,7 +1834,10 @@ def test_initial_pretool_recovery_rechecks_committed_proposal_after_agent_lock(s
 
 
 @pytest.mark.parametrize("position", [0, 1, 2], ids=["manager", "developer", "qa"])
-def test_every_specialized_provider_crash_has_durable_workflow_link(scope, monkeypatch, position):
+@pytest.mark.parametrize("boundary", ["before_provider", "before_start"])
+def test_every_specialized_provider_crash_has_durable_workflow_link(
+    scope, monkeypatch, position, boundary
+):
     from novalton_api.modules.approvals import mutation_resume
 
     provider = QueueProvider([_manager(), _worker(), _qa("PASS")])
@@ -1842,7 +1845,14 @@ def test_every_specialized_provider_crash_has_durable_workflow_link(scope, monke
     for _ in range(position):
         assert _advance_fresh(provider, advance)["outcome"] == "STEP_COMPLETED"
 
-    _inject_worker_loss(provider, monkeypatch)
+    if boundary == "before_provider":
+        _inject_worker_loss(provider, monkeypatch)
+    else:
+
+        async def interrupt_before_start(*args, **kwargs):
+            raise RuntimeError("injected_worker_loss_before_agent_start")
+
+        monkeypatch.setattr(agent_service, "start_run", interrupt_before_start)
     with TestClient(
         create_app(provider_registry=ProviderRegistry((provider,))), raise_server_exceptions=False
     ) as client:
@@ -1851,16 +1861,26 @@ def test_every_specialized_provider_crash_has_durable_workflow_link(scope, monke
     before = asyncio.run(_vertical_state(scope, run_id))
     linked_agent = before["rows"][position][0].agent_run_id
     assert linked_agent == before["agent_runs"][position].id
-    assert before["agent_runs"][position].status == "RUNNING"
+    assert before["agent_runs"][position].status == (
+        "RUNNING" if boundary == "before_provider" else "CREATED"
+    )
     assert _advance_fresh(provider, advance)["outcome"] == "WAITING_FOR_HUMAN"
     monkeypatch.setattr(mutation_resume, "_CONTINUATION_LEASE", timedelta(0))
     assert _advance_fresh(provider, advance)["outcome"] == "WORKFLOW_FAILED"
     after = asyncio.run(_vertical_state(scope, run_id))
     assert after["rows"][position][0].status == "FAILED"
-    assert after["agent_runs"][position].status == "FAILED"
+    assert after["agent_runs"][position].status == (
+        "FAILED" if boundary == "before_provider" else "CANCELLED"
+    )
+    if boundary == "before_start":
+        assert after["agent_runs"][position].started_at is None
+        assert after["agent_runs"][position].failure_code is None
     assert all(model.status != "RUNNING" for model in after["model_runs"])
+    assert len(after["agent_runs"]) == position + 1
     assert (
-        len(provider.calls) == len(after["agent_runs"]) == len(after["model_runs"]) == position + 1
+        len(provider.calls)
+        == len(after["model_runs"])
+        == position + (boundary == "before_provider")
     )
     assert after["approval_count"] == 0
 

@@ -419,7 +419,10 @@ def test_run_lifecycle_terminal_cannot_reopen(scopes: tuple[Scope, Scope]) -> No
     asyncio.run(scenario())
 
 
-def test_agent_run_link_is_trusted_same_scope_only(scopes: tuple[Scope, Scope]) -> None:
+@pytest.mark.parametrize(
+    "terminal", [None, "COMPLETED", "FAILED", "CANCELLED", "workflow_cancelled"]
+)
+def test_agent_run_link_is_trusted_same_scope_only(scopes: tuple[Scope, Scope], terminal) -> None:
     first, second = scopes
     plan = asyncio.run(_create(first))
 
@@ -456,6 +459,49 @@ def test_agent_run_link_is_trusted_same_scope_only(scopes: tuple[Scope, Scope]) 
                     plan_id=plan.id,
                 )
                 step_run = (await repository.step_runs_for_runs(session, run_ids=[run.id]))[0]
+                if terminal is not None:
+                    if terminal == "workflow_cancelled":
+                        await service.cancel_run(
+                            session,
+                            tenant_id=first.tenant_id,
+                            workspace_id=first.workspace_id,
+                            run_id=run.id,
+                        )
+                    else:
+                        await service.transition_step(
+                            session,
+                            tenant_id=first.tenant_id,
+                            workspace_id=first.workspace_id,
+                            run_id=run.id,
+                            step_run_id=step_run.id,
+                            expected=WorkflowStepRunStatus.READY,
+                            target=WorkflowStepRunStatus.RUNNING,
+                        )
+                        await service.transition_step(
+                            session,
+                            tenant_id=first.tenant_id,
+                            workspace_id=first.workspace_id,
+                            run_id=run.id,
+                            step_run_id=step_run.id,
+                            expected=WorkflowStepRunStatus.RUNNING,
+                            target=WorkflowStepRunStatus(terminal),
+                            failure_code="injected_terminal_failure"
+                            if terminal == "FAILED"
+                            else None,
+                        )
+                    with pytest.raises(ApplicationError) as error:
+                        await service.link_agent_run(
+                            session,
+                            tenant_id=first.tenant_id,
+                            workspace_id=first.workspace_id,
+                            run_id=run.id,
+                            step_run_id=step_run.id,
+                            agent_run_id=agent_run.id,
+                        )
+                    assert error.value.code == "workflow_step_agent_link_conflict"
+                    await session.refresh(step_run)
+                    assert step_run.agent_run_id is None
+                    return
                 linked = await service.link_agent_run(
                     session,
                     tenant_id=first.tenant_id,

@@ -293,7 +293,17 @@ async def link_agent_run(
 ) -> WorkflowStepRun | None:
     return await session.scalar(
         update(WorkflowStepRun)
-        .where(WorkflowStepRun.id == step_run_id, WorkflowStepRun.agent_run_id.is_(None))
+        .where(
+            WorkflowStepRun.id == step_run_id,
+            WorkflowStepRun.agent_run_id.is_(None),
+            WorkflowStepRun.status.in_(["PENDING", "READY", "RUNNING", "WAITING_FOR_APPROVAL"]),
+            select(WorkflowRun.id)
+            .where(
+                WorkflowRun.id == WorkflowStepRun.workflow_run_id,
+                WorkflowRun.status.in_(["CREATED", "RUNNING"]),
+            )
+            .exists(),
+        )
         .values(agent_run_id=agent_run_id)
         .returning(WorkflowStepRun)
     )

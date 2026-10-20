@@ -643,3 +643,82 @@ def test_generic_agent_provider_crash_is_linked_before_dispatch_and_reclaimed(sc
         assert client.post(url).json()["outcome"] == "WORKFLOW_FAILED"
     assert asyncio.run(state()) == ("FAILED", "FAILED", "FAILED")
     assert len(provider.calls) == 1
+
+
+@pytest.mark.parametrize("boundary", ["before_agent_create", "before_link"])
+def test_unlinked_initial_step_crash_fails_closed_without_guessing_agent(
+    scope, monkeypatch, boundary
+):
+    from novalton_api.core.exceptions import ApplicationError
+    from novalton_api.modules.orchestrator import recovery
+
+    run_id = asyncio.run(_run(scope, [_agent_step(scope, "unlinked")]))
+    provider = MockProvider(_result().model_dump_json())
+    original_link = workflow_service.link_agent_run
+
+    async def lose_worker(*args, **kwargs):
+        raise RuntimeError("injected_worker_loss_before_link")
+
+    if boundary == "before_agent_create":
+        monkeypatch.setattr(orchestrator_service.agent_execution, "execute", lose_worker)
+    else:
+        monkeypatch.setattr(workflow_service, "link_agent_run", lose_worker)
+    url = _url(scope, run_id)
+    with TestClient(
+        create_app(provider_registry=ProviderRegistry((provider,))), raise_server_exceptions=False
+    ) as client:
+        assert client.post(url).status_code == 500
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        assert client.post(url).json()["outcome"] == "WAITING_FOR_HUMAN"
+    monkeypatch.setattr(recovery, "_INITIAL_STEP_LEASE", timedelta(0))
+    with (
+        TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client,
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        results = list(executor.map(lambda _: client.post(url), range(2)))
+        assert all(response.status_code == 200 for response in results)
+        assert all(response.json()["outcome"] == "WORKFLOW_FAILED" for response in results)
+        assert client.post(url).json()["reason_code"] == "initial_step_interrupted"
+
+    async def verify():
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                run = await session.get(WorkflowRun, run_id)
+                step = await session.scalar(
+                    select(WorkflowStepRun).where(WorkflowStepRun.workflow_run_id == run_id)
+                )
+                agents = list(
+                    await session.scalars(
+                        select(AgentRun).where(AgentRun.tenant_id == scope.tenant_id)
+                    )
+                )
+                assert run.status == step.status == "FAILED"
+                assert run.failure_code == step.failure_code == "initial_step_interrupted"
+                assert step.agent_run_id is None
+                assert len(agents) == int(boundary == "before_link")
+                for agent in agents:
+                    assert agent.status == "CREATED" and agent.started_at is None
+                    with pytest.raises(ApplicationError) as error:
+                        await original_link(
+                            session,
+                            tenant_id=scope.tenant_id,
+                            workspace_id=scope.workspace_id,
+                            run_id=run_id,
+                            step_run_id=step.id,
+                            agent_run_id=agent.id,
+                        )
+                    assert error.value.code == "workflow_step_agent_link_conflict"
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(ModelRun)
+                        .where(ModelRun.tenant_id == scope.tenant_id)
+                    )
+                    == 0
+                )
+        finally:
+            await database.dispose()
+
+    asyncio.run(verify())
+    assert provider.calls == []
