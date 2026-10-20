@@ -239,6 +239,7 @@ class WorkflowStepRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UniqueConstraint(
             "id", "workflow_run_id", "workflow_plan_id", name="uq_workflow_step_runs_id_run_plan"
         ),
+        UniqueConstraint("id", "workflow_run_id", name="uq_workflow_step_runs_dispatch_scope"),
         CheckConstraint(
             "status IN ('PENDING', 'READY', 'RUNNING', 'WAITING_FOR_APPROVAL', "
             "'COMPLETED', 'FAILED', 'CANCELLED')",

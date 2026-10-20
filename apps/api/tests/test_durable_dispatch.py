@@ -988,3 +988,34 @@ def test_one_claim_cannot_be_reused_to_advance_a_second_step(scope):
     assert attempts[0].workflow_step_run_id == state["rows"][0][0].id
     assert state["rows"][1][0].status == "READY"
     assert len(models) == len(provider.calls) == 1
+
+
+def test_attempt_step_evidence_cannot_reference_another_workflow_even_in_the_same_workspace(scope):
+    from novalton_api.modules.workflows.models import WorkflowStepRun
+
+    provider = QueueProvider([])
+    first, _, _ = enqueue(scope, provider, priority=10)
+    second, _, _ = enqueue(other_task(scope), provider, priority=0)
+    claimed = claim(scope)
+    assert claimed.dispatch_id == first.id
+
+    async def forge(session):
+        foreign_step = await session.scalar(
+            select(WorkflowStepRun.id)
+            .where(WorkflowStepRun.workflow_run_id == second.workflow_run_id)
+            .limit(1)
+        )
+        await session.execute(
+            update(DispatchAttempt)
+            .where(
+                DispatchAttempt.dispatch_id == first.id,
+                DispatchAttempt.generation == claimed.generation,
+            )
+            .values(workflow_step_run_id=foreign_step)
+        )
+        await session.commit()
+
+    with pytest.raises(IntegrityError):
+        db_call(forge)
+    assert snapshot(scope, first.id)[1][0].workflow_step_run_id is None
+    assert provider.calls == []

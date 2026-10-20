@@ -68,7 +68,9 @@ Mission 3. CI activation applies only to disposable test fixtures.
 Migration `20261020_0033` follows the reviewed I-044 migration. It adds
 `dispatch_activations`, `task_dispatches`, `dispatch_dependencies` and
 `dispatch_attempts`. Composite foreign keys bind tenant/workspace/project/task/run,
-and dependency edges cannot cross workspace boundaries. One workflow has one
+and dependency edges cannot cross workspace boundaries. Migration `20261020_0034`
+also binds step evidence to its exact workflow with a composite foreign key.
+One workflow has one
 immutable dispatch binding; a partial unique index allows only one active
 READY/LEASED/WAITING_HUMAN dispatch per task.
 

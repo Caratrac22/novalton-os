@@ -30,9 +30,10 @@ def test_alembic_configuration_loads_durable_dispatch_after_i044() -> None:
     revision = scripts.get_revision(head)
     predecessor = scripts.get_revision("20260902_0031")
 
-    assert head == "20261020_0033"
+    assert head == "20261020_0034"
     assert revision is not None
-    assert revision.down_revision == "20261011_0032"
+    assert revision.down_revision == "20261020_0033"
+    assert scripts.get_revision("20261020_0033").down_revision == "20261011_0032"
     assert scripts.get_revision("20261011_0032").down_revision == "20260902_0031"
     assert predecessor is not None
     assert predecessor.down_revision == "20260902_0030"
@@ -332,7 +333,7 @@ def test_durable_dispatch_downgrade_preserves_enqueued_history():
                 async with database.session_factory() as session:
                     assert await session.get(TaskDispatch, identifier) is not None
                     revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-                    assert revision == "20261020_0033"
+                    assert revision == "20261020_0034"
             finally:
                 await database.dispose()
 

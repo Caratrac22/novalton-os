@@ -7,7 +7,6 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
-    ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
@@ -167,6 +166,12 @@ class DispatchAttempt(UUIDPrimaryKeyMixin, Base):
             ondelete="RESTRICT",
             name="fk_dispatch_attempt_binding",
         ),
+        ForeignKeyConstraint(
+            ["workflow_step_run_id", "workflow_run_id"],
+            ["workflow_step_runs.id", "workflow_step_runs.workflow_run_id"],
+            ondelete="RESTRICT",
+            name="fk_dispatch_attempt_step_scope",
+        ),
         CheckConstraint("generation > 0", name="ck_dispatch_attempt_generation"),
         CheckConstraint(
             "outcome IS NULL OR outcome IN ('READY','WAITING_HUMAN','BLOCKED','DONE','CANCELLED')",
@@ -191,9 +196,7 @@ class DispatchAttempt(UUIDPrimaryKeyMixin, Base):
     pre_status: Mapped[str] = mapped_column(String(16), nullable=False)
     post_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
     workflow_step_run_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True),
-        ForeignKey("workflow_step_runs.id", ondelete="RESTRICT"),
-        nullable=True,
+        PostgreSQLUUID(as_uuid=True), nullable=True
     )
     outcome: Mapped[str | None] = mapped_column(String(24), nullable=True)
     reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
