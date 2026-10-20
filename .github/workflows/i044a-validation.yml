@@ -115,6 +115,7 @@ jobs:
             apps/api/tests/test_development_workflow.py::test_cancel_commit_survives_crash_and_repeated_requests_settle_once \
             apps/api/tests/test_development_workflow.py::test_cancelled_workflow_never_recovers_authority_from_old_approval \
             apps/api/tests/test_development_workflow.py::test_cancel_during_approved_continuation_preserves_real_effects \
+            apps/api/tests/test_durable_dispatch.py \
             apps/api/tests/test_migrations.py::test_i044_immutable_verification_authority_round_trip
 
       - name: Run full API suite on novalton_test

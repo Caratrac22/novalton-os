@@ -11,6 +11,7 @@ from novalton_api.core.context import get_correlation_id
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.contracts import GenerationResult
 from novalton_api.infrastructure.providers.errors import ProviderFailure
+from novalton_api.modules.durable_dispatch.authority import reserve_model
 from novalton_api.modules.model_catalog.repository import get_model
 from novalton_api.modules.model_usage import repository
 from novalton_api.modules.model_usage.models import ModelRun
@@ -79,6 +80,16 @@ async def start_run(
     if data.agent_run_id is not None:
         await require_agent_workflow(
             session, tenant_id=tenant_id, workspace_id=workspace_id, agent_run_id=data.agent_run_id
+        )
+        await reserve_model(
+            session,
+            agent_run_id=data.agent_run_id,
+            price_known=(
+                model is not None
+                and model.input_price_per_million is not None
+                and model.output_price_per_million is not None
+                and model.currency is not None
+            ),
         )
     now = datetime.now(UTC)
     currency = data.currency or (model.currency if model is not None else None)

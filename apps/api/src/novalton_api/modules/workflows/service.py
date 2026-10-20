@@ -562,6 +562,8 @@ async def _transition_run(
     failure_code: str | None = None,
 ) -> WorkflowRun:
     await get_run(session, tenant_id=tenant_id, workspace_id=workspace_id, run_id=run_id)
+    if target == WorkflowRunStatus.RUNNING:
+        await cancellation.require_active_workflow(session, run_id, allow_created=True)
     now = datetime.now(UTC)
     values: dict[str, object] = {"status": target.value, "updated_at": now}
     if target == WorkflowRunStatus.RUNNING:
@@ -769,6 +771,12 @@ async def link_agent_run(
         or (agent_run.project_id, agent_run.task_id) != (run.project_id, run.task_id)
     ):
         raise _not_found()
+    # AgentRun -> workflow -> dispatch is the shared reservation lock order.
+    await session.refresh(agent_run, with_for_update=True)
+    await cancellation.lock_workflow(session, run_id)
+    from novalton_api.modules.durable_dispatch.authority import require_workflow
+
+    await require_workflow(session, run_id)
     linked = await repository.link_agent_run(
         session, step_run_id=step_run_id, agent_run_id=agent_run_id
     )

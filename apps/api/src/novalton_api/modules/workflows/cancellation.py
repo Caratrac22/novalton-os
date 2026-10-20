@@ -33,6 +33,9 @@ async def require_active_workflow(
         raise ApplicationError(
             "workflow_execution_inactive", "Workflow execution is not active", status_code=409
         )
+    from novalton_api.modules.durable_dispatch.authority import require_workflow
+
+    await require_workflow(session, workflow_run_id)
 
 
 async def require_agent_workflow(

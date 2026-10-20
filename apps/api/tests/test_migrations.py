@@ -19,7 +19,7 @@ from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.workspaces.models import Workspace
 
 
-def test_alembic_configuration_loads_i044_controlled_verification() -> None:
+def test_alembic_configuration_loads_durable_dispatch_after_i044() -> None:
     api_root = Path(__file__).parents[1]
     config = Config(api_root / "alembic.ini")
     scripts = ScriptDirectory.from_config(config)
@@ -28,9 +28,10 @@ def test_alembic_configuration_loads_i044_controlled_verification() -> None:
     revision = scripts.get_revision(head)
     predecessor = scripts.get_revision("20260902_0031")
 
-    assert head == "20261011_0032"
+    assert head == "20261020_0033"
     assert revision is not None
-    assert revision.down_revision == "20260902_0031"
+    assert revision.down_revision == "20261011_0032"
+    assert scripts.get_revision("20261011_0032").down_revision == "20260902_0031"
     assert predecessor is not None
     assert predecessor.down_revision == "20260902_0030"
 

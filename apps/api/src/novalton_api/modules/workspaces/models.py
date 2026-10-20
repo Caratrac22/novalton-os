@@ -20,6 +20,7 @@ class Workspace(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     __tablename__ = "workspaces"
     __table_args__ = (
+        UniqueConstraint("id", "tenant_id", name="uq_workspaces_id_tenant"),
         CheckConstraint("char_length(name) BETWEEN 1 AND 200", name="ck_workspaces_name_length"),
         CheckConstraint("char_length(slug) BETWEEN 1 AND 63", name="ck_workspaces_slug_length"),
         UniqueConstraint("tenant_id", "slug", name="uq_workspaces_tenant_id_slug"),
