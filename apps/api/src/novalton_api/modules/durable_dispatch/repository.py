@@ -3,7 +3,7 @@
 from datetime import timedelta
 from uuid import UUID
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -324,16 +324,8 @@ async def heartbeat(
     configured = await activation(
         session, tenant_id=claimed.tenant_id, workspace_id=claimed.workspace_id
     )
-    now = await database_now(session)
-    if (
-        configured is None
-        or not configured.enabled
-        or configured.generation != claimed.activation_generation
-    ):
-        await session.rollback()
-        return False
-    identifier = await session.scalar(
-        update(TaskDispatch)
+    row = await session.scalar(
+        select(TaskDispatch)
         .where(
             TaskDispatch.id == claimed.dispatch_id,
             TaskDispatch.tenant_id == claimed.tenant_id,
@@ -343,22 +335,29 @@ async def heartbeat(
             TaskDispatch.owner == claimed.owner,
             TaskDispatch.generation == claimed.generation,
             TaskDispatch.activation_generation == claimed.activation_generation,
-            TaskDispatch.lease_expires_at > now,
-            TaskDispatch.deadline > now,
         )
-        .values(
-            lease_expires_at=func.least(
-                func.greatest(
-                    TaskDispatch.lease_expires_at, now + timedelta(seconds=lease_seconds)
-                ),
-                TaskDispatch.deadline,
-            ),
-            updated_at=now,
-        )
-        .returning(TaskDispatch.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
+    # Read database time AFTER any row-lock wait. A timestamp captured before
+    # waiting could resurrect a lease which expired while the lock was held.
+    now = await database_now(session)
+    if (
+        row is None
+        or row.lease_expires_at <= now
+        or row.deadline <= now
+        or configured is None
+        or not configured.enabled
+        or configured.generation != claimed.activation_generation
+    ):
+        await session.rollback()
+        return False
+    row.lease_expires_at = min(
+        max(row.lease_expires_at, now + timedelta(seconds=lease_seconds)), row.deadline
+    )
+    row.updated_at = now
     await session.commit()
-    return identifier is not None
+    return True
 
 
 async def finish(

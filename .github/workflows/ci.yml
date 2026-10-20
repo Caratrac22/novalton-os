@@ -120,6 +120,9 @@ jobs:
           fi
           cd recovery-export
           sha256sum Novalton_OS_Mission_3.bundle Novalton_OS_Mission_3_Sources.zip HEAD.txt COMMITS.txt > SHA256SUMS
+          if test -f MISSION_4_REPRISE.md; then
+            sha256sum MISSION_4_REPRISE.md >> SHA256SUMS
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: Novalton_OS_Mission_3_${{ github.event.pull_request.head.sha || github.sha }}

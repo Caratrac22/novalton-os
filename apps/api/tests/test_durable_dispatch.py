@@ -1019,3 +1019,59 @@ def test_attempt_step_evidence_cannot_reference_another_workflow_even_in_the_sam
         db_call(forge)
     assert snapshot(scope, first.id)[1][0].workflow_step_run_id is None
     assert provider.calls == []
+
+
+def test_heartbeat_lock_wait_cannot_resurrect_a_lease_that_expired_while_waiting(scope):
+    provider = QueueProvider([])
+    row, _, _ = enqueue(scope, provider)
+    claimed = claim(scope)
+    entered, release = threading.Event(), threading.Event()
+
+    def hold_row():
+        async def hold(session):
+            await session.scalar(
+                select(TaskDispatch).where(TaskDispatch.id == row.id).with_for_update()
+            )
+            entered.set()
+            assert await asyncio.to_thread(release.wait, 15)
+            # This expiry is later than a waiting heartbeat's old timestamp,
+            # but already elapsed when that heartbeat finally acquires the row.
+            await session.execute(
+                update(TaskDispatch)
+                .where(TaskDispatch.id == row.id)
+                .values(lease_expires_at=func.clock_timestamp())
+            )
+            await session.commit()
+
+        db_call(hold)
+
+    async def heartbeat_waiting(session):
+        for _ in range(100):
+            waiting = await session.scalar(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND wait_event_type = 'Lock' "
+                    "AND query LIKE '%task_dispatches%')"
+                )
+            )
+            if waiting:
+                return True
+            await session.rollback()
+            await asyncio.sleep(0.05)
+        return False
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        holder = executor.submit(hold_row)
+        assert entered.wait(15)
+        renewing = executor.submit(db_call, lambda session: repository.heartbeat(session, claimed))
+        try:
+            assert db_call(heartbeat_waiting)
+        finally:
+            release.set()
+        holder.result(timeout=15)
+        assert renewing.result(timeout=15) is False
+    assert tick(scope, provider) is None
+    persisted, attempts, models = snapshot(scope, row.id)
+    assert persisted.stop_reason == "dispatch_lease_expired"
+    assert len(attempts) == 1
+    assert models == provider.calls == []
