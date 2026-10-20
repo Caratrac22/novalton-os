@@ -2547,3 +2547,251 @@ def test_i029_double_advance_and_terminal_advance_do_not_duplicate_usage(scope: 
     assert terminal["reason_code"] == "workflow_already_completed"
     assert len(provider.calls) == len(state["agent_runs"]) == len(state["model_runs"]) == 3
     assert len(state["handoffs"]) == 3
+
+
+@pytest.mark.parametrize("position", [0, 1, 2], ids=["manager", "developer", "qa"])
+@pytest.mark.parametrize("late_result", ["valid", "truncated", "failure"])
+def test_cancellation_fences_late_provider_and_every_new_reservation(
+    scope, tmp_path, position, late_result
+):
+    from novalton_api.core.exceptions import ApplicationError
+    from novalton_api.modules.model_usage import service as usage_service
+    from novalton_api.modules.model_usage.schemas import ModelRunStart
+    from novalton_api.modules.tools import service as tools_service
+    from novalton_api.modules.tools.contracts import ToolProposal
+    from novalton_api.modules.tools.executor import WorkspaceRoot
+
+    provider = QueueProvider([_manager(), _worker(), _qa("PASS")])
+    created, advance = _create_vertical(scope, provider)
+    run_id = UUID(str(created["workflow_run"]["id"]))
+    for _ in range(position):
+        assert _advance_fresh(provider, advance)["outcome"] == "STEP_COMPLETED"
+    entered, released = threading.Event(), threading.Event()
+
+    async def delayed(request):
+        provider.calls.append(request)
+        entered.set()
+        assert await asyncio.to_thread(released.wait, 15)
+        if late_result == "failure":
+            raise RuntimeError("bounded_test_provider_failure")
+        return GenerationResult(
+            provider_id="mock",
+            model_id=request.model_id,
+            content=json.dumps(provider.results.pop(0)),
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+            duration_ms=1,
+            finish_reason="length" if late_result == "truncated" else "stop",
+        )
+
+    provider.complete = delayed
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        active = pool.submit(_advance_fresh, provider, advance)
+        try:
+            assert entered.wait(15)
+            before = asyncio.run(_vertical_state(scope, run_id))
+            assert before["model_runs"][-1].status == "RUNNING"
+            with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+                cancel = client.post(advance.removesuffix("/advance") + "/cancel")
+                assert cancel.status_code == 200, cancel.text
+                assert cancel.json()["status"] == "CANCELLED"
+                repeated = client.post(advance.removesuffix("/advance") + "/cancel")
+                assert repeated.status_code == 200, repeated.text
+            paused = asyncio.run(_vertical_state(scope, run_id))
+            assert paused["model_runs"][-1].status == "RUNNING"
+            agent_id = paused["agent_runs"][-1].id
+
+            async def new_reservations_are_denied():
+                database = Database.from_settings(Settings.from_environment())
+                try:
+                    async with database.session_factory() as session:
+                        with pytest.raises(ApplicationError) as error:
+                            await usage_service.start_run(
+                                session,
+                                tenant_id=scope.tenant_id,
+                                workspace_id=scope.workspace_id,
+                                data=ModelRunStart(
+                                    model_definition_id=scope.model_id,
+                                    agent_run_id=agent_id,
+                                    project_id=scope.project_id,
+                                ),
+                            )
+                        assert error.value.code == "workflow_execution_cancelled"
+                        await session.rollback()
+                        with pytest.raises(ApplicationError) as error:
+                            await tools_service.execute_proposal(
+                                session,
+                                tenant_id=scope.tenant_id,
+                                workspace_id=scope.workspace_id,
+                                agent_run_id=agent_id,
+                                proposal=ToolProposal.model_validate({
+                                    "call_key": "cancelled_read",
+                                    "tool_name": "workspace.read_file",
+                                    "arguments": {"path": "fixture.txt"},
+                                }),
+                                permitted_tools=["workspace.read_file"],
+                                workspace_root=WorkspaceRoot.approved(tmp_path),
+                            )
+                        assert error.value.code == "workflow_execution_cancelled"
+                        await session.rollback()
+                        count = await session.scalar(
+                            select(func.count()).select_from(ToolCall).where(
+                                ToolCall.tenant_id == scope.tenant_id
+                            )
+                        )
+                        assert count == 0
+                finally:
+                    await database.dispose()
+
+            asyncio.run(new_reservations_are_denied())
+        finally:
+            released.set()
+        result = active.result(timeout=15)
+    assert result["outcome"] == "CANCELLED"
+    after = asyncio.run(_vertical_state(scope, run_id))
+    assert after["run"].status == "CANCELLED"
+    assert len(after["model_runs"]) == len(after["agent_runs"]) == position + 1
+    assert len(after["handoffs"]) == len(before["handoffs"])
+    assert len(provider.calls) == position + 1
+    assert after["model_runs"][-1].status == (
+        "FAILED" if late_result == "failure" else "SUCCEEDED"
+    )
+    assert all(row.status in {"COMPLETED", "CANCELLED"} for row, _ in after["rows"])
+    assert _advance_fresh(provider, advance)["outcome"] == "CANCELLED"
+    cancelled_events = [
+        event for event in after["events"] if event.event_type == "workflow.run.cancelled"
+    ]
+    assert len(cancelled_events) == 1
+
+
+def test_cancel_commit_survives_crash_and_repeated_requests_settle_once(scope, monkeypatch):
+    from novalton_api.modules.workflows import cancellation
+
+    provider = QueueProvider([_manager()])
+    created, advance = _create_vertical(scope, provider)
+    run_id = UUID(str(created["workflow_run"]["id"]))
+    url = advance.removesuffix("/advance") + "/cancel"
+    original = cancellation.settle_cancelled_steps
+
+    async def crash_after_commit(*args, **kwargs):
+        raise RuntimeError("injected_after_cancel_commit")
+
+    monkeypatch.setattr(cancellation, "settle_cancelled_steps", crash_after_commit)
+    with TestClient(
+        create_app(provider_registry=ProviderRegistry((provider,))), raise_server_exceptions=False
+    ) as client:
+        assert client.post(url).status_code == 500
+    assert asyncio.run(_vertical_state(scope, run_id))["run"].status == "CANCELLED"
+    monkeypatch.setattr(cancellation, "settle_cancelled_steps", original)
+
+    def cancel_again(_):
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            return client.post(url)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        responses = list(pool.map(cancel_again, range(3)))
+    assert all(response.status_code == 200 for response in responses)
+    state = asyncio.run(_vertical_state(scope, run_id))
+    assert all(row.status == "CANCELLED" for row, _ in state["rows"])
+    assert len([
+        event for event in state["events"] if event.event_type == "workflow.run.cancelled"
+    ]) == 1
+    assert state["agent_runs"] == state["model_runs"] == []
+    assert provider.calls == []
+    assert _advance_fresh(provider, advance)["outcome"] == "CANCELLED"
+
+
+def test_cancelled_workflow_never_recovers_authority_from_old_approval(
+    scope, tmp_path, monkeypatch
+):
+    from novalton_api.modules.approvals import service as approvals_service
+
+    target = tmp_path / "fixture.txt"
+    target.write_text("before\n")
+    monkeypatch.setenv("NOVALTON_WORKSPACE_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+
+    async def add_policy():
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                await policy_service.create_rule(
+                    session,
+                    data=PolicyRuleCreate(
+                        tenant_id=scope.tenant_id,
+                        workspace_id=scope.workspace_id,
+                        name="Confirm exact cancellation fixture",
+                        action_pattern="tool.workspace.replace_text",
+                        effect=PolicyEffect.REQUIRE_CONFIRMATION,
+                        actor_type="agent",
+                        resource_type="task",
+                    ),
+                )
+        finally:
+            await database.dispose()
+
+    asyncio.run(add_policy())
+    proposal = _worker() | {
+        "status": "PARTIAL",
+        "tool_proposals": [{
+            "call_key": "cancelled_mutation",
+            "tool_name": "workspace.replace_text",
+            "arguments": {
+                "path": "fixture.txt",
+                "search": "before",
+                "replacement": "after",
+                "expected_matches": 1,
+            },
+        }],
+    }
+    provider = QueueProvider([_manager(), proposal, _worker()])
+    try:
+        created, advance = _create_vertical(scope, provider)
+        run_id = UUID(str(created["workflow_run"]["id"]))
+        assert _advance_fresh(provider, advance)["outcome"] == "STEP_COMPLETED"
+        assert _advance_fresh(provider, advance)["outcome"] == "WAITING_FOR_HUMAN"
+
+        async def approval_id():
+            database = Database.from_settings(Settings.from_environment())
+            try:
+                async with database.session_factory() as session:
+                    return await session.scalar(
+                        select(ApprovalRequest.id).where(
+                            ApprovalRequest.tenant_id == scope.tenant_id
+                        )
+                    )
+            finally:
+                await database.dispose()
+
+        identifier = asyncio.run(approval_id())
+        assert identifier is not None
+        decision_url = (
+            f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+            f"/approvals/{identifier}/approve"
+        )
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            assert client.post(advance.removesuffix("/advance") + "/cancel").status_code == 200
+            assert client.post(decision_url).status_code == 409
+
+        async def record_old_human_decision():
+            database = Database.from_settings(Settings.from_environment())
+            try:
+                async with database.session_factory() as session:
+                    await approvals_service.approve(
+                        session, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id,
+                        approval_id=identifier,
+                    )
+            finally:
+                await database.dispose()
+
+        asyncio.run(record_old_human_decision())
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            assert client.post(decision_url).status_code == 409
+            assert client.post(advance).json()["outcome"] == "CANCELLED"
+        state = asyncio.run(_vertical_state(scope, run_id))
+        assert state["run"].status == "CANCELLED"
+        assert len(state["model_runs"]) == len(provider.calls) == 2
+        assert target.read_text() == "before\n"
+    finally:
+        get_settings.cache_clear()

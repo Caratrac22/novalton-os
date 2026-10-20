@@ -20,6 +20,7 @@ from novalton_api.modules.model_usage.schemas import (
     ModelRunStatus,
 )
 from novalton_api.modules.projects.repository import get_project
+from novalton_api.modules.workflows.cancellation import require_agent_workflow
 from novalton_api.modules.workspaces.queries import get_workspace_by_tenant_and_id
 
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
@@ -74,6 +75,10 @@ async def start_run(
     ):
         raise ApplicationError(
             "model_run_currency_mismatch", "Cost currency does not match model pricing"
+        )
+    if data.agent_run_id is not None:
+        await require_agent_workflow(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, agent_run_id=data.agent_run_id
         )
     now = datetime.now(UTC)
     currency = data.currency or (model.currency if model is not None else None)

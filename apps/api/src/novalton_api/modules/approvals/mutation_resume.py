@@ -24,6 +24,7 @@ from novalton_api.modules.tools.contracts import ToolExecutionStatus
 from novalton_api.modules.tools.executor import ToolExecutionError, WorkspaceRoot
 from novalton_api.modules.workflows import repository as workflow_repository
 from novalton_api.modules.workflows import service as workflow_service
+from novalton_api.modules.workflows.cancellation import require_agent_workflow
 from novalton_api.modules.workflows.models import WorkflowRun, WorkflowStepRun
 from novalton_api.modules.workflows.schemas import WorkflowStepRunStatus
 
@@ -523,6 +524,12 @@ async def approve_and_resume(
         workspace_id=workspace_id,
         approval_id=approval_id,
     )
+    await require_agent_workflow(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_run_id=tool_call.agent_run_id,
+    )
     previous = await approval_service.get_approval(
         session, tenant_id=tenant_id, workspace_id=workspace_id, approval_id=approval_id
     )
@@ -600,6 +607,9 @@ async def approve_and_resume(
             code="approval_resume_context_invalid",
         )
         return approval
+    await require_agent_workflow(
+        session, tenant_id=tenant_id, workspace_id=workspace_id, agent_run_id=agent_run.id
+    )
     # A repair cycle can wait for multiple distinct approvals. Claim the
     # continuation on THIS exact mutation, atomically with the AgentRun CAS;
     # replaying an earlier approval must never consume a later approval wait.
@@ -717,7 +727,7 @@ async def reject_and_terminalize(
         workspace_id=workspace_id,
         approval_id=approval_id,
     )
-    if step_run.status == WorkflowStepRunStatus.FAILED.value:
+    if workflow_run.status == "CANCELLED" or step_run.status == WorkflowStepRunStatus.FAILED.value:
         return approval
     agent_run = await tool_service.reject_prepared_mutation(
         session,
