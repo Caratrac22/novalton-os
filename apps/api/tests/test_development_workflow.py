@@ -1709,6 +1709,114 @@ def _advance_fresh(provider: QueueProvider, url: str) -> dict[str, object]:
     return response.json()
 
 
+def _interrupt_initial_developer(scope, monkeypatch):
+    """Leave a real committed AgentRun/ModelRun with no ToolCalls, as on worker death."""
+    provider = QueueProvider([_manager(), _worker()])
+    created, advance = _create_vertical(scope, provider)
+    assert _advance_fresh(provider, advance)["step_key"] == "manager_plan"
+
+    async def crash(request):
+        provider.calls.append(request)
+        raise RuntimeError("injected_initial_provider_crash")
+
+    monkeypatch.setattr(provider, "complete", crash)
+    with TestClient(
+        create_app(provider_registry=ProviderRegistry((provider,))), raise_server_exceptions=False
+    ) as client:
+        assert client.post(advance).status_code == 500
+    run_id = UUID(str(created["workflow_run"]["id"]))
+    state = asyncio.run(_vertical_state(scope, run_id))
+    assert state["rows"][1][0].agent_run_id == state["agent_runs"][1].id
+    assert state["agent_runs"][1].status == state["model_runs"][1].status == "RUNNING"
+    assert state["rows"][1][0].status == "RUNNING"
+    assert state["approval_count"] == 0
+    return provider, advance, run_id, state
+
+
+@pytest.mark.parametrize("concurrent", [False, True])
+def test_initial_pretool_crash_recovery_is_durable_and_never_replays(
+    scope, monkeypatch, concurrent
+):
+    from novalton_api.modules.approvals import mutation_resume
+
+    provider, advance, run_id, before = _interrupt_initial_developer(scope, monkeypatch)
+    # A fresh app cannot reclaim a legitimate young provider invocation.
+    assert _advance_fresh(provider, advance)["outcome"] == "WAITING_FOR_HUMAN"
+    assert len(provider.calls) == 2
+    monkeypatch.setattr(mutation_resume, "_CONTINUATION_LEASE", timedelta(0))
+    if concurrent:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: _advance_fresh(provider, advance), range(2)))
+    else:
+        results = [_advance_fresh(provider, advance)]
+    assert all(result["outcome"] == "WORKFLOW_FAILED" for result in results)
+    assert _advance_fresh(provider, advance)["outcome"] == "WORKFLOW_FAILED"
+    after = asyncio.run(_vertical_state(scope, run_id))
+    assert len(provider.calls) == 2
+    assert len(after["agent_runs"]) == len(after["model_runs"]) == 2
+    assert len(after["handoffs"]) == len(before["handoffs"])
+    assert after["approval_count"] == 0
+    assert after["rows"][2][0].status == "PENDING"
+    for row in [after["run"], after["rows"][1][0], after["agent_runs"][1], after["model_runs"][1]]:
+        assert row.status == "FAILED"
+        assert row.failure_code == "tool_continuation_interrupted"
+        assert row.completed_at is not None
+    assert after["agent_runs"][0].status == after["model_runs"][0].status == "SUCCEEDED"
+
+
+def test_initial_pretool_recovery_rechecks_committed_proposal_after_agent_lock(scope, monkeypatch):
+    """A producer commits a real proposal after the reclaimer's first empty read."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from novalton_api.modules.approvals import mutation_resume
+
+    provider, advance, run_id, before = _interrupt_initial_developer(scope, monkeypatch)
+    agent = before["agent_runs"][1]
+    original_scalar = AsyncSession.scalar
+    injected = False
+
+    async def insert_before_lock(session, statement, *args, **kwargs):
+        nonlocal injected
+        if (
+            not injected
+            and getattr(statement, "_for_update_arg", None) is not None
+            and statement.column_descriptions[0].get("entity") is AgentRun
+        ):
+            injected = True
+            database = Database.from_settings(Settings.from_environment())
+            try:
+                async with database.session_factory.begin() as producer:
+                    await producer.scalar(
+                        select(AgentRun).where(AgentRun.id == agent.id).with_for_update()
+                    )
+                    producer.add(
+                        ToolCall(
+                            tenant_id=scope.tenant_id,
+                            workspace_id=scope.workspace_id,
+                            project_id=scope.project_id,
+                            task_id=scope.task_id,
+                            agent_run_id=agent.id,
+                            tool_id="workspace.read_file",
+                            call_key="late_proposal",
+                            status="PROPOSED",
+                            safe_input_metadata={"path": "fixture.txt"},
+                        )
+                    )
+            finally:
+                await database.dispose()
+        return await original_scalar(session, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "scalar", insert_before_lock)
+    monkeypatch.setattr(mutation_resume, "_CONTINUATION_LEASE", timedelta(0))
+    assert _advance_fresh(provider, advance)["outcome"] == "WAITING_FOR_HUMAN"
+    after = asyncio.run(_vertical_state(scope, run_id))
+    assert injected
+    assert after["run"].status == after["rows"][1][0].status == "RUNNING"
+    assert after["agent_runs"][1].status == "RUNNING"
+    assert after["model_runs"][1].status == "RUNNING"
+    assert len(provider.calls) == 2
+
+
 def test_i029_full_vertical_integration_across_fresh_app_and_db_boundaries(
     scope: Scope,
 ) -> None:

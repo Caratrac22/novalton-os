@@ -89,6 +89,10 @@ async def reconcile_stale_continuation(
         pending = next((call for call in calls if call.status == "PENDING_APPROVAL"), None)
         running = next((call for call in calls if call.status == "RUNNING"), None)
         terminal_running = False
+        # No ToolCall exists yet: a crash can strand the initially linked
+        # AgentRun during its first provider invocation. This is a terminal
+        # recovery only; never retry the initial provider call.
+        initial_without_tool = not calls and step.status == "RUNNING" and agent.status == "RUNNING"
         # Proposal and suspension are separate commits. A crash in between
         # leaves a pending approval with a still-running workflow step.
         if pending is not None:
@@ -148,12 +152,13 @@ async def reconcile_stale_continuation(
                         ),
                         None,
                     )
-                    if step.status != "RUNNING" or terminal is None:
+                    if step.status != "RUNNING" or (terminal is None and not initial_without_tool):
                         continue
-                    candidate = terminal
-                    claimed_at = terminal.completed_at
-                    stamp = None
-                    terminal_running = True
+                    if terminal is not None:
+                        candidate = terminal
+                        claimed_at = terminal.completed_at
+                        stamp = None
+                        terminal_running = True
                 else:
                     candidate = claimed
                     stamp = (claimed.result_metadata or {}).get("continuation_claimed_at")
@@ -163,6 +168,11 @@ async def reconcile_stale_continuation(
                         claimed_at = datetime.fromisoformat(stamp)
                     except ValueError:
                         continue
+        if candidate is None and initial_without_tool:
+            claimed_at = agent.started_at
+            stamp = None
+        elif candidate is None:
+            continue
         if claimed_at is None:
             continue
         if claimed_at.tzinfo is None or instant - claimed_at < _CONTINUATION_LEASE:
@@ -184,38 +194,49 @@ async def reconcile_stale_continuation(
             await session.rollback()
             return False
         # Lock the same ToolCall used by approval resume and recheck under lock.
-        await session.refresh(candidate, with_for_update=True)
-        if pending is not None and candidate.status != "PENDING_APPROVAL":
+        if candidate is not None:
+            await session.refresh(candidate, with_for_update=True)
+        if pending is not None and (candidate is None or candidate.status != "PENDING_APPROVAL"):
             await session.rollback()
             return False
         if (
             pending is None
             and running is not None
-            and (candidate.status != "RUNNING" or candidate.started_at != claimed_at)
+            and (
+                candidate is None
+                or candidate.status != "RUNNING"
+                or candidate.started_at != claimed_at
+            )
         ):
             await session.rollback()
             return False
         if (
             pending is None
             and stamp is not None
-            and (candidate.result_metadata or {}).get("continuation_claimed_at") != stamp
-        ):
-            await session.rollback()
-            return False
-        if (
-            pending is None
-            and running is None
-            and stamp is None
-            and candidate.status not in {"SUCCEEDED", "BLOCKED", "FAILED"}
-        ):
-            await session.rollback()
-            return False
-        if (
-            pending is None
-            and running is None
-            and stamp is None
             and (
-                (candidate.result_metadata or {}).get("continuation_claimed") is True
+                candidate is None
+                or (candidate.result_metadata or {}).get("continuation_claimed_at") != stamp
+            )
+        ):
+            await session.rollback()
+            return False
+        if (
+            pending is None
+            and running is None
+            and stamp is None
+            and not initial_without_tool
+            and (candidate is None or candidate.status not in {"SUCCEEDED", "BLOCKED", "FAILED"})
+        ):
+            await session.rollback()
+            return False
+        if (
+            pending is None
+            and running is None
+            and stamp is None
+            and not initial_without_tool
+            and (
+                candidate is None
+                or (candidate.result_metadata or {}).get("continuation_claimed") is True
                 or candidate.completed_at != claimed_at
             )
         ):
@@ -246,7 +267,15 @@ async def reconcile_stale_continuation(
             None,
         )
         if (
-            (pending is None and latest_pending is not None)
+            (
+                initial_without_tool
+                and (
+                    fresh_calls
+                    or fresh_agent.started_at != claimed_at
+                    or fresh_agent.status != "RUNNING"
+                )
+            )
+            or (pending is None and latest_pending is not None)
             or (running is None and latest_running is not None)
             or (
                 pending is not None
@@ -284,9 +313,14 @@ async def reconcile_stale_continuation(
             or fresh_agent.status not in {"RUNNING", "WAITING_FOR_APPROVAL", "SUCCEEDED", "FAILED"}
             or (pending is not None and fresh_step.status != "RUNNING")
             or (
+                initial_without_tool
+                and (fresh_step.status != "RUNNING" or fresh_step.agent_run_id != fresh_agent.id)
+            )
+            or (
                 pending is None
                 and running is None
                 and stamp is None
+                and not initial_without_tool
                 and (
                     (
                         not terminal_running
