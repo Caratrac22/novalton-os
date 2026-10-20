@@ -56,8 +56,11 @@ class TaskDispatch(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKeyConstraint(
             ["workflow_run_id", "tenant_id", "workspace_id", "project_id", "task_id"],
             [
-                "workflow_runs.id", "workflow_runs.tenant_id", "workflow_runs.workspace_id",
-                "workflow_runs.project_id", "workflow_runs.task_id",
+                "workflow_runs.id",
+                "workflow_runs.tenant_id",
+                "workflow_runs.workspace_id",
+                "workflow_runs.project_id",
+                "workflow_runs.task_id",
             ],
             ondelete="RESTRICT",
             name="fk_dispatch_workflow_scope",
@@ -75,8 +78,7 @@ class TaskDispatch(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_dispatch_attempt_budget",
         ),
         CheckConstraint(
-            "max_model_calls BETWEEN 0 AND 128 "
-            "AND model_call_count BETWEEN 0 AND max_model_calls",
+            "max_model_calls BETWEEN 0 AND 128 AND model_call_count BETWEEN 0 AND max_model_calls",
             name="ck_dispatch_model_budget",
         ),
         CheckConstraint(
@@ -90,13 +92,21 @@ class TaskDispatch(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_dispatch_stop_reason",
         ),
         Index(
-            "uq_dispatch_active_task", "tenant_id", "workspace_id", "task_id",
+            "uq_dispatch_active_task",
+            "tenant_id",
+            "workspace_id",
+            "task_id",
             unique=True,
             postgresql_where=text("status IN ('READY','LEASED','WAITING_HUMAN')"),
         ),
         Index(
-            "ix_dispatch_claim", "tenant_id", "workspace_id", "status", "priority",
-            "eligible_at", "id",
+            "ix_dispatch_claim",
+            "tenant_id",
+            "workspace_id",
+            "status",
+            "priority",
+            "eligible_at",
+            "id",
         ),
     )
     tenant_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
@@ -117,7 +127,9 @@ class TaskDispatch(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     max_model_calls: Mapped[int] = mapped_column(Integer, nullable=False)
     allow_unknown_cost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     owner: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=True)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     activation_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     stop_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
@@ -157,8 +169,7 @@ class DispatchAttempt(UUIDPrimaryKeyMixin, Base):
         ),
         CheckConstraint("generation > 0", name="ck_dispatch_attempt_generation"),
         CheckConstraint(
-            "outcome IS NULL OR outcome IN "
-            "('READY','WAITING_HUMAN','BLOCKED','DONE','CANCELLED')",
+            "outcome IS NULL OR outcome IN ('READY','WAITING_HUMAN','BLOCKED','DONE','CANCELLED')",
             name="ck_dispatch_attempt_outcome",
         ),
         CheckConstraint(
@@ -180,7 +191,8 @@ class DispatchAttempt(UUIDPrimaryKeyMixin, Base):
     pre_status: Mapped[str] = mapped_column(String(16), nullable=False)
     post_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
     workflow_step_run_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), ForeignKey("workflow_step_runs.id", ondelete="RESTRICT"),
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workflow_step_runs.id", ondelete="RESTRICT"),
         nullable=True,
     )
     outcome: Mapped[str | None] = mapped_column(String(24), nullable=True)

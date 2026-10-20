@@ -39,7 +39,12 @@ async def require_active_workflow(
 
 
 async def require_agent_workflow(
-    session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID, agent_run_id: UUID
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    agent_run_id: UUID,
+    reserve_effect: bool = False,
 ) -> None:
     """Fence linked workflows without changing standalone AgentRun behavior."""
     agent = await session.scalar(
@@ -65,6 +70,10 @@ async def require_agent_workflow(
         if (run_tenant, run_workspace) != (tenant_id, workspace_id):
             raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
         await require_active_workflow(session, run_id)
+        if reserve_effect:
+            from novalton_api.modules.durable_dispatch.authority import require_effect_capacity
+
+            await require_effect_capacity(session, run_id)
 
 
 async def settle_cancelled_steps(session: AsyncSession, workflow_run_id: UUID) -> None:

@@ -165,7 +165,11 @@ class WorkflowRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("id", "workflow_plan_id", name="uq_workflow_runs_id_plan"),
         UniqueConstraint(
-            "id", "tenant_id", "workspace_id", "project_id", "task_id",
+            "id",
+            "tenant_id",
+            "workspace_id",
+            "project_id",
+            "task_id",
             name="uq_workflow_runs_dispatch_scope",
         ),
         CheckConstraint("plan_version > 0", name="ck_workflow_runs_plan_version_positive"),

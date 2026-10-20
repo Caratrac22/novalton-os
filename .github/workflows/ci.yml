@@ -85,6 +85,7 @@ jobs:
       - run: npm audit --audit-level=high
   recovery-export:
     name: Verified Git recovery export
+    if: github.event_name == 'pull_request' && github.head_ref == 'feature/mission3-durable-dispatch'
     needs: [backend, frontend]
     runs-on: ubuntu-latest
     steps:
@@ -106,7 +107,7 @@ jobs:
           test "$(git rev-parse HEAD^{tree})" = "$(git -C "$RUNNER_TEMP/mission3-restore" rev-parse HEAD^{tree})"
           git archive --format=zip --prefix=novalton-os/ --output=recovery-export/Novalton_OS_Mission_3_Sources.zip HEAD
           git rev-parse HEAD > recovery-export/HEAD.txt
-          git log -12 --format='%H %s' > recovery-export/COMMITS.txt
+          git log --reverse --format='%H %s' 978612f62302a08c16cc4447d2f710d8dae896a3..HEAD > recovery-export/COMMITS.txt
           if test -f docs/18-mission-3-handoff.md; then
             cp docs/18-mission-3-handoff.md recovery-export/MISSION_4_REPRISE.md
           fi

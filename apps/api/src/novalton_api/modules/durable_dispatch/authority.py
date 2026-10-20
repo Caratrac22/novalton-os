@@ -79,6 +79,10 @@ async def binding_for_reservation(
         raise denied("dispatch_not_runnable")
     if row.deadline <= now:
         raise denied("dispatch_deadline_exhausted")
+    if row.max_attempts == 0:
+        raise denied("dispatch_attempt_budget_exhausted")
+    if row.max_model_calls == 0:
+        raise denied("dispatch_model_budget_exhausted")
     if claim is None:
         if row.status == "LEASED":
             raise denied("dispatch_claim_required")
@@ -108,13 +112,9 @@ async def require_workflow(session: AsyncSession, workflow_run_id: UUID) -> None
     await binding_for_reservation(session, workflow_run_id)
 
 
-async def reserve_model(
-    session: AsyncSession, *, agent_run_id: UUID, price_known: bool
-) -> None:
+async def reserve_model(session: AsyncSession, *, agent_run_id: UUID, price_known: bool) -> None:
     workflow_run_id = await session.scalar(
-        select(WorkflowStepRun.workflow_run_id).where(
-            WorkflowStepRun.agent_run_id == agent_run_id
-        )
+        select(WorkflowStepRun.workflow_run_id).where(WorkflowStepRun.agent_run_id == agent_run_id)
     )
     if workflow_run_id is None:
         if current_claim.get() is not None:
@@ -132,3 +132,14 @@ async def reserve_model(
     # Counter and ModelRun creation are committed by model_usage.start_run.
     # A rollback consumes neither; a crash after commit never refunds it.
     await session.flush()
+
+
+async def require_effect_capacity(session: AsyncSession, workflow_run_id: UUID) -> None:
+    """Do not reserve a new tool effect after the model budget is exhausted.
+
+    Persisting the real outcome of an already engaged tool/provider remains
+    permitted. This check applies only at the new effect reservation boundary.
+    """
+    row = await binding_for_reservation(session, workflow_run_id)
+    if row is not None and row.model_call_count >= row.max_model_calls:
+        raise denied("dispatch_model_budget_exhausted")

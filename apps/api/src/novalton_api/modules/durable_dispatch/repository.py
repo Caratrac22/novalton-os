@@ -69,8 +69,13 @@ def _budget(row: TaskDispatch, now) -> str | None:
 
 
 async def _close(
-    session: AsyncSession, row: TaskDispatch, status: str, reason: str, *,
-    post_status: str | None, step_run_id: UUID | None = None,
+    session: AsyncSession,
+    row: TaskDispatch,
+    status: str,
+    reason: str,
+    *,
+    post_status: str | None,
+    step_run_id: UUID | None = None,
 ) -> None:
     now = await database_now(session)
     if row.status == "LEASED":
@@ -83,8 +88,11 @@ async def _close(
                 DispatchAttempt.outcome.is_(None),
             )
             .values(
-                outcome=status, reason_code=reason, post_status=post_status,
-                workflow_step_run_id=step_run_id, completed_at=now,
+                outcome=status,
+                reason_code=reason,
+                post_status=post_status,
+                workflow_step_run_id=step_run_id,
+                completed_at=now,
             )
         )
     row.status = status
@@ -103,10 +111,12 @@ async def _pending_work(session: AsyncSession, row: TaskDispatch) -> tuple[bool,
         )
     )
     challenge = await session.scalar(
-        select(AgentChallengeResolution.id).where(
+        select(AgentChallengeResolution.id)
+        .where(
             AgentChallengeResolution.workflow_run_id == row.workflow_run_id,
             AgentChallengeResolution.decision.is_(None),
-        ).limit(1)
+        )
+        .limit(1)
     )
     waiting = "WAITING_FOR_APPROVAL" in states or challenge is not None
     return waiting, "RUNNING" in states, "READY" in states
@@ -149,7 +159,8 @@ async def reconcile(
             if row.lease_expires_at <= now:
                 reason = "dispatch_lease_expired"
             elif (
-                configured is None or not configured.enabled
+                configured is None
+                or not configured.enabled
                 or configured.generation != row.activation_generation
             ):
                 reason = "dispatch_activation_revoked"
@@ -190,11 +201,15 @@ async def reconcile(
                         WorkflowStepRun.status == "READY",
                         WorkflowStep.step_type == "AGENT_TASK",
                         WorkflowStep.agent_definition_id.is_not(None),
-                    ).limit(1)
+                    )
+                    .limit(1)
                 )
                 if not waiting and not running and ready and runnable is not None:
                     await _close(
-                        session, row, "READY", "dispatch_human_decision_observed",
+                        session,
+                        row,
+                        "READY",
+                        "dispatch_human_decision_observed",
                         post_status=status,
                     )
                     changed += 1
@@ -203,8 +218,12 @@ async def reconcile(
 
 
 async def claim(
-    session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID,
-    owner: UUID, lease_seconds: int = 3600,
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    owner: UUID,
+    lease_seconds: int = 3600,
 ) -> DispatchClaim | None:
     if not 60 <= lease_seconds <= 3600:
         raise ValueError("lease_seconds must be between 60 and 3600")
@@ -254,7 +273,9 @@ async def claim(
         waiting, running, _ = await _pending_work(session, row)
         if waiting or running:
             await _close(
-                session, row, "WAITING_HUMAN" if waiting else "BLOCKED",
+                session,
+                row,
+                "WAITING_HUMAN" if waiting else "BLOCKED",
                 "dispatch_human_required" if waiting else "dispatch_existing_execution",
                 post_status=status,
             )
@@ -270,13 +291,22 @@ async def claim(
         row.updated_at = now
         session.add(
             DispatchAttempt(
-                dispatch_id=row.id, workflow_run_id=row.workflow_run_id,
-                generation=row.generation, owner=owner, started_at=now, pre_status=status,
+                dispatch_id=row.id,
+                workflow_run_id=row.workflow_run_id,
+                generation=row.generation,
+                owner=owner,
+                started_at=now,
+                pre_status=status,
             )
         )
         result = DispatchClaim(
-            row.id, tenant_id, workspace_id, row.workflow_run_id, owner,
-            row.generation, configured.generation,
+            row.id,
+            tenant_id,
+            workspace_id,
+            row.workflow_run_id,
+            owner,
+            row.generation,
+            configured.generation,
         )
         await session.commit()
         return result
@@ -294,7 +324,8 @@ async def heartbeat(
     )
     now = await database_now(session)
     if (
-        configured is None or not configured.enabled
+        configured is None
+        or not configured.enabled
         or configured.generation != claimed.activation_generation
     ):
         await session.rollback()
@@ -306,10 +337,12 @@ async def heartbeat(
             TaskDispatch.tenant_id == claimed.tenant_id,
             TaskDispatch.workspace_id == claimed.workspace_id,
             TaskDispatch.workflow_run_id == claimed.workflow_run_id,
-            TaskDispatch.status == "LEASED", TaskDispatch.owner == claimed.owner,
+            TaskDispatch.status == "LEASED",
+            TaskDispatch.owner == claimed.owner,
             TaskDispatch.generation == claimed.generation,
             TaskDispatch.activation_generation == claimed.activation_generation,
-            TaskDispatch.lease_expires_at > now, TaskDispatch.deadline > now,
+            TaskDispatch.lease_expires_at > now,
+            TaskDispatch.deadline > now,
         )
         .values(
             lease_expires_at=func.least(
@@ -324,7 +357,9 @@ async def heartbeat(
 
 
 async def finish(
-    session: AsyncSession, claimed: DispatchClaim, *,
+    session: AsyncSession,
+    claimed: DispatchClaim,
+    *,
     result: OrchestrationResult | None = None,
 ) -> bool:
     configured = await activation(
@@ -337,7 +372,8 @@ async def finish(
             TaskDispatch.tenant_id == claimed.tenant_id,
             TaskDispatch.workspace_id == claimed.workspace_id,
             TaskDispatch.workflow_run_id == claimed.workflow_run_id,
-            TaskDispatch.status == "LEASED", TaskDispatch.owner == claimed.owner,
+            TaskDispatch.status == "LEASED",
+            TaskDispatch.owner == claimed.owner,
             TaskDispatch.generation == claimed.generation,
             TaskDispatch.activation_generation == claimed.activation_generation,
         )
@@ -346,8 +382,10 @@ async def finish(
     )
     now = await database_now(session)
     if (
-        row is None or row.lease_expires_at <= now
-        or configured is None or not configured.enabled
+        row is None
+        or row.lease_expires_at <= now
+        or configured is None
+        or not configured.enabled
         or configured.generation != claimed.activation_generation
     ):
         await session.rollback()
@@ -366,6 +404,11 @@ async def finish(
         )
         if step_id is None:
             target = ("BLOCKED", "dispatch_result_scope_mismatch")
+    if (
+        target is None and result is not None
+        and result.workflow_status.value != status
+    ):
+        target = ("BLOCKED", "dispatch_result_state_mismatch")
     if target is None:
         if result is None:
             target = ("BLOCKED", "dispatch_execution_interrupted")
@@ -373,9 +416,12 @@ async def finish(
             waiting, running, ready = await _pending_work(session, row)
             if waiting or (
                 result.outcome.value == "WAITING_FOR_HUMAN"
-                and result.reason_code in {
-                    "agent_challenge", "manual_review_required",
-                    "unsupported_system_step", "agent_assignment_required",
+                and result.reason_code
+                in {
+                    "agent_challenge",
+                    "manual_review_required",
+                    "unsupported_system_step",
+                    "agent_assignment_required",
                 }
             ):
                 target = ("WAITING_HUMAN", "dispatch_human_required")

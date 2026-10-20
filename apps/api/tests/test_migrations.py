@@ -1,11 +1,13 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
@@ -280,4 +282,77 @@ def test_i044_immutable_verification_authority_round_trip():
         asyncio.run(inspect_index("agent_run_id, recovery_attempt_index"))
         asyncio.run(inspect("ENABLED", retained))
     finally:
+        command.upgrade(config, "head")
+
+
+def test_durable_dispatch_downgrade_preserves_enqueued_history():
+    from test_development_workflow import QueueProvider, _cleanup, _create_vertical, _seed
+
+    from novalton_api.modules.durable_dispatch import service as dispatch_service
+    from novalton_api.modules.durable_dispatch.models import DispatchActivation, TaskDispatch
+    from novalton_api.modules.durable_dispatch.schemas import DispatchRequest
+
+    config = Config(Path(__file__).parents[1] / "alembic.ini")
+    value = asyncio.run(_seed())
+    provider = QueueProvider([])
+    body, _ = _create_vertical(value, provider)
+
+    async def enqueue():
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                await dispatch_service.configure_workspace(
+                    session,
+                    tenant_id=value.tenant_id,
+                    workspace_id=value.workspace_id,
+                    enabled=False,
+                )
+                row = await dispatch_service.enqueue(
+                    session,
+                    tenant_id=value.tenant_id,
+                    workspace_id=value.workspace_id,
+                    data=DispatchRequest(
+                        workflow_run_id=UUID(body["workflow_run"]["id"]),
+                        request_key="migration-evidence",
+                        deadline=datetime.now(UTC) + timedelta(hours=1),
+                    ),
+                )
+                return row.id
+        finally:
+            await database.dispose()
+
+    identifier = asyncio.run(enqueue())
+    try:
+        with pytest.raises(RuntimeError, match="durable_dispatch_downgrade_has_history"):
+            command.downgrade(config, "20261011_0032")
+
+        async def preserved():
+            database = Database.from_settings(Settings.from_environment())
+            try:
+                async with database.session_factory() as session:
+                    assert await session.get(TaskDispatch, identifier) is not None
+                    revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
+                    assert revision == "20261020_0033"
+            finally:
+                await database.dispose()
+
+        asyncio.run(preserved())
+    finally:
+        async def cleanup():
+            database = Database.from_settings(Settings.from_environment())
+            try:
+                async with database.session_factory() as session:
+                    await session.execute(delete(TaskDispatch).where(TaskDispatch.id == identifier))
+                    await session.execute(
+                        delete(DispatchActivation).where(
+                            DispatchActivation.tenant_id == value.tenant_id
+                        )
+                    )
+                    await session.commit()
+            finally:
+                await database.dispose()
+
+        asyncio.run(cleanup())
+        asyncio.run(_cleanup(value))
+        command.downgrade(config, "20261011_0032")
         command.upgrade(config, "head")

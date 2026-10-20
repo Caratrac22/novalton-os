@@ -11,6 +11,16 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
+from test_development_workflow import (
+    QueueProvider,
+    _cleanup,
+    _create_vertical,
+    _manager,
+    _qa,
+    _seed,
+    _vertical_state,
+    _worker,
+)
 
 from novalton_api.core.config import Settings, get_settings
 from novalton_api.core.database import Database
@@ -37,16 +47,6 @@ from novalton_api.modules.policy import service as policy_service
 from novalton_api.modules.policy.schemas import PolicyEffect, PolicyRuleCreate
 from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tools.models import ToolCall
-from test_development_workflow import (
-    QueueProvider,
-    _cleanup,
-    _create_vertical,
-    _manager,
-    _qa,
-    _seed,
-    _vertical_state,
-    _worker,
-)
 
 
 def db_call(operation):
@@ -123,8 +123,12 @@ def enqueue(scope, provider, **values):
 def tick(scope, provider, **values):
     return db_call(
         lambda session: service.run_once(
-            session, registry=ProviderRegistry((provider,)),
-            tenant_id=scope.tenant_id, workspace_id=scope.workspace_id, owner=uuid4(), **values,
+            session,
+            registry=ProviderRegistry((provider,)),
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            owner=uuid4(),
+            **values,
         )
     )
 
@@ -159,7 +163,8 @@ def expire(identifier, *, deadline=False):
     async def change(session):
         column = TaskDispatch.deadline if deadline else TaskDispatch.lease_expires_at
         await session.execute(
-            update(TaskDispatch).where(TaskDispatch.id == identifier)
+            update(TaskDispatch)
+            .where(TaskDispatch.id == identifier)
             .values({column: func.clock_timestamp() - text("interval '1 second'")})
         )
         await session.commit()
@@ -212,7 +217,9 @@ def test_enqueue_idempotency_is_atomic_and_conflicting_bindings_fail(scope):
         with pytest.raises(ApplicationError) as error:
             db_call(
                 lambda session: service.enqueue(
-                    session, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id,
+                    session,
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
                     data=changed,
                 )
             )
@@ -230,7 +237,9 @@ def test_two_claimers_get_one_generation_and_one_attempt(scope):
         return claim(scope)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = [future.result(timeout=15) for future in [executor.submit(compete) for _ in range(2)]]
+        results = [
+            future.result(timeout=15) for future in [executor.submit(compete) for _ in range(2)]
+        ]
     assert len([value for value in results if value is not None]) == 1
     persisted, attempts, models = snapshot(scope, row.id)
     assert (persisted.status, persisted.generation) == ("LEASED", 1)
@@ -278,6 +287,7 @@ def test_skip_locked_claim_can_select_an_independent_lower_priority_task(scope):
             entered.set()
             assert await asyncio.to_thread(released.wait, 15)
             await session.rollback()
+
         db_call(hold)
 
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -386,9 +396,11 @@ def test_late_provider_after_revocation_keeps_usage_but_has_no_proposal_authorit
             if revocation == "activation":
                 for enabled in (False, True):
                     db_call(
-                        lambda session: service.configure_workspace(
-                            session, tenant_id=scope.tenant_id,
-                            workspace_id=scope.workspace_id, enabled=enabled,
+                        lambda session, enabled=enabled: service.configure_workspace(
+                            session,
+                            tenant_id=scope.tenant_id,
+                            workspace_id=scope.workspace_id,
+                            enabled=enabled,
                         )
                     )
             else:
@@ -446,8 +458,13 @@ def test_truncation_recovery_cannot_exceed_the_persisted_model_budget(scope):
     async def truncated(request):
         provider.calls.append(request)
         return GenerationResult(
-            provider_id="mock", model_id=request.model_id, content='{"status":',
-            finish_reason="length", input_tokens=10, output_tokens=5, total_tokens=15,
+            provider_id="mock",
+            model_id=request.model_id,
+            content='{"status":',
+            finish_reason="length",
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
         )
 
     provider.complete = truncated
@@ -465,7 +482,8 @@ def test_unknown_model_cost_requires_explicit_operator_policy(scope, allow_unkno
 
     async def unknown(session):
         await session.execute(
-            update(ModelDefinition).where(ModelDefinition.id == scope.model_id)
+            update(ModelDefinition)
+            .where(ModelDefinition.id == scope.model_id)
             .values(input_price_per_million=None, output_price_per_million=None, currency=None)
         )
         await session.commit()
@@ -519,8 +537,10 @@ def test_wrong_owner_and_old_activation_cannot_heartbeat_finalize_or_reserve(sco
     assert not db_call(lambda session: repository.finish(session, wrong))
     for enabled in (False, True):
         db_call(
-            lambda session: service.configure_workspace(
-                session, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id,
+            lambda session, enabled=enabled: service.configure_workspace(
+                session,
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
                 enabled=enabled,
             )
         )
@@ -554,7 +574,8 @@ def test_scoped_foreign_keys_and_dependency_scope_fail_closed(scope):
         body, _ = _create_vertical(other_task(scope), provider)
         data = DispatchRequest(
             workflow_run_id=UUID(body["workflow_run"]["id"]),
-            request_key=uuid4().hex, deadline=datetime.now(UTC) + timedelta(hours=1),
+            request_key=uuid4().hex,
+            deadline=datetime.now(UTC) + timedelta(hours=1),
             dependencies=(foreign.id,),
         )
         with pytest.raises(ApplicationError) as error:
@@ -567,7 +588,8 @@ def test_scoped_foreign_keys_and_dependency_scope_fail_closed(scope):
 
         async def forge(session):
             await session.execute(
-                update(TaskDispatch).where(TaskDispatch.id == local.id)
+                update(TaskDispatch)
+                .where(TaskDispatch.id == local.id)
                 .values(workspace_id=other.workspace_id)
             )
             await session.commit()
@@ -598,9 +620,13 @@ def test_waiting_approval_releases_dispatch_for_an_independent_task(scope, tmp_p
         await policy_service.create_rule(
             session,
             data=PolicyRuleCreate(
-                tenant_id=scope.tenant_id, workspace_id=scope.workspace_id,
-                name="Durable exact approval", action_pattern="tool.workspace.replace_text",
-                effect=PolicyEffect.REQUIRE_CONFIRMATION, actor_type="agent", resource_type="task",
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                name="Durable exact approval",
+                action_pattern="tool.workspace.replace_text",
+                effect=PolicyEffect.REQUIRE_CONFIRMATION,
+                actor_type="agent",
+                resource_type="task",
             ),
         )
 
@@ -609,9 +635,12 @@ def test_waiting_approval_releases_dispatch_for_an_independent_task(scope, tmp_p
         "status": "PARTIAL",
         "tool_proposals": [
             {
-                "call_key": "durable_mutation", "tool_name": "workspace.replace_text",
+                "call_key": "durable_mutation",
+                "tool_name": "workspace.replace_text",
                 "arguments": {
-                    "path": "fixture.txt", "search": "before", "replacement": "after",
+                    "path": "fixture.txt",
+                    "search": "before",
+                    "replacement": "after",
                     "expected_matches": 1,
                 },
             }
@@ -650,3 +679,228 @@ def test_waiting_approval_releases_dispatch_for_an_independent_task(scope, tmp_p
     with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
         assert client.post(url).status_code == 200
     assert len(provider.calls) == before == 5
+
+
+def test_exhausted_model_budget_cannot_reserve_a_new_tool_effect(scope, tmp_path, monkeypatch):
+    target = tmp_path / "fixture.txt"
+    target.write_text("before\n")
+    monkeypatch.setenv("NOVALTON_WORKSPACE_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+
+    async def policy(session):
+        await policy_service.create_rule(
+            session,
+            data=PolicyRuleCreate(
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                name="Bounded read",
+                action_pattern="tool.workspace.read_file",
+                effect=PolicyEffect.ALLOW,
+                actor_type="agent",
+                resource_type="task",
+            ),
+        )
+
+    db_call(policy)
+    proposal = _worker() | {
+        "status": "PARTIAL",
+        "tool_proposals": [
+            {
+                "call_key": "budget_read",
+                "tool_name": "workspace.read_file",
+                "arguments": {"path": "fixture.txt"},
+            }
+        ],
+    }
+    provider = QueueProvider([_manager(), proposal])
+    row, _, _ = enqueue(scope, provider, max_model_calls=2)
+    assert tick(scope, provider).outcome.value == "STEP_COMPLETED"
+    assert tick(scope, provider).outcome.value == "WORKFLOW_FAILED"
+    persisted, _, models = snapshot(scope, row.id)
+    assert persisted.model_call_count == len(models) == len(provider.calls) == 2
+
+    async def count(session):
+        return await session.scalar(
+            select(func.count()).select_from(ToolCall).where(ToolCall.tenant_id == scope.tenant_id)
+        )
+
+    assert db_call(count) == 0
+    assert target.read_text() == "before\n"
+
+
+def test_budget_counter_and_model_run_commit_atomically(scope, monkeypatch):
+    from novalton_api.modules.model_usage import repository as usage_repository
+
+    provider = QueueProvider([])
+    row, _, _ = enqueue(scope, provider)
+
+    async def interrupted_insert(*args, **kwargs):
+        raise RuntimeError("injected_model_insert_failure")
+
+    monkeypatch.setattr(usage_repository, "create_run", interrupted_insert)
+    with pytest.raises(RuntimeError, match="injected_model_insert_failure"):
+        tick(scope, provider)
+    persisted, attempts, models = snapshot(scope, row.id)
+    assert (persisted.status, persisted.model_call_count) == ("BLOCKED", 0)
+    assert attempts[0].reason_code == "dispatch_execution_interrupted"
+    assert models == provider.calls == []
+
+
+def test_managed_inflight_cancellation_finishes_queue_without_restarting_the_workflow(scope):
+    provider = QueueProvider([_manager()])
+    row, _, advance = enqueue(scope, provider)
+    entered, released = threading.Event(), threading.Event()
+    original = provider.complete
+
+    async def delayed(request):
+        entered.set()
+        assert await asyncio.to_thread(released.wait, 15)
+        return await original(request)
+
+    provider.complete = delayed
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(tick, scope, provider)
+        assert entered.wait(15)
+        try:
+            with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+                url = advance.removesuffix("/advance") + "/cancel"
+                assert client.post(url).status_code == 200
+                assert client.post(url).status_code == 200
+        finally:
+            released.set()
+        assert future.result(timeout=20).outcome.value == "CANCELLED"
+    persisted, attempts, models = snapshot(scope, row.id)
+    assert persisted.status == attempts[0].outcome == "CANCELLED"
+    assert models[0].status == "SUCCEEDED"
+    assert len(provider.calls) == 1
+    assert tick(scope, provider) is None
+    assert len(provider.calls) == 1
+
+
+def test_task_status_never_creates_or_authorizes_a_dispatch(scope):
+    provider = QueueProvider([])
+
+    async def mark_ready(session):
+        await session.execute(update(Task).where(Task.id == scope.task_id).values(status="READY"))
+        await session.commit()
+
+    db_call(mark_ready)
+    assert tick(scope, provider) is None
+    assert provider.calls == []
+
+
+def test_enqueue_refuses_to_adopt_an_already_started_manual_workflow(scope):
+    provider = QueueProvider([_manager()])
+    body, advance = _create_vertical(scope, provider)
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        assert client.post(advance).json()["outcome"] == "STEP_COMPLETED"
+    data = DispatchRequest(
+        workflow_run_id=UUID(body["workflow_run"]["id"]),
+        request_key=uuid4().hex,
+        deadline=datetime.now(UTC) + timedelta(hours=1),
+    )
+    with pytest.raises(ApplicationError) as error:
+        db_call(
+            lambda session: service.enqueue(
+                session, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id, data=data
+            )
+        )
+    assert error.value.code == "dispatch_fresh_workflow_required"
+    assert len(provider.calls) == 1
+
+
+def test_manual_advance_cannot_overlap_an_unexpired_dispatch_claim(scope):
+    provider = QueueProvider([])
+    row, _, advance = enqueue(scope, provider)
+    claimed = claim(scope)
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        response = client.post(advance)
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "dispatch_claim_required"
+    persisted, attempts, models = snapshot(scope, row.id)
+    assert persisted.generation == claimed.generation == 1
+    assert len(attempts) == 1
+    assert models == provider.calls == []
+
+
+def test_only_persisted_workflow_truth_can_mark_dispatch_done(scope):
+    from novalton_api.modules.orchestrator.schemas import (
+        OrchestrationOutcome,
+        OrchestrationResult,
+    )
+    from novalton_api.modules.workflows.schemas import WorkflowRunStatus
+
+    provider = QueueProvider([])
+    row, _, _ = enqueue(scope, provider)
+    claimed = claim(scope)
+    invented = OrchestrationResult(
+        workflow_run_id=row.workflow_run_id,
+        workflow_status=WorkflowRunStatus.COMPLETED,
+        outcome=OrchestrationOutcome.WORKFLOW_COMPLETED,
+        remaining_ready=0,
+        remaining_pending=0,
+    )
+    assert db_call(lambda session: repository.finish(session, claimed, result=invented))
+    persisted, attempts, models = snapshot(scope, row.id)
+    assert persisted.status == "BLOCKED"
+    assert persisted.stop_reason == "dispatch_result_state_mismatch"
+    assert attempts[0].post_status == "CREATED"
+    assert models == provider.calls == []
+
+
+def test_qa_failure_is_blocked_and_never_reported_as_done(scope):
+    provider = QueueProvider([_manager(), _worker(), _qa("FAIL")])
+    row, _, _ = enqueue(scope, provider)
+    for _ in range(2):
+        assert tick(scope, provider).outcome.value == "STEP_COMPLETED"
+    assert tick(scope, provider).outcome.value == "WORKFLOW_FAILED"
+    persisted, attempts, _ = snapshot(scope, row.id)
+    assert persisted.status == "BLOCKED"
+    assert attempts[-1].post_status == "FAILED"
+    assert attempts[-1].outcome == "BLOCKED"
+    assert tick(scope, provider) is None
+    assert len(provider.calls) == 3
+
+
+def test_old_generation_cannot_finalize_or_reserve_under_a_new_owner(scope):
+    from novalton_api.modules.orchestrator import service as orchestrator
+
+    provider = QueueProvider([_manager()])
+    row, _, _ = enqueue(scope, provider)
+    old = claim(scope)
+
+    async def complete_first(session):
+        token = current_claim.set(old)
+        try:
+            result = await orchestrator.advance(
+                session,
+                registry=ProviderRegistry((provider,)),
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                workflow_run_id=row.workflow_run_id,
+            )
+            assert await repository.finish(session, old, result=result)
+        finally:
+            current_claim.reset(token)
+
+    db_call(complete_first)
+    new = claim(scope)
+    assert new.generation == old.generation + 1
+    assert not db_call(lambda session: repository.heartbeat(session, old))
+    assert not db_call(lambda session: repository.finish(session, old))
+
+    async def stale_reservation(session):
+        token = current_claim.set(old)
+        try:
+            await require_workflow(session, row.workflow_run_id)
+        finally:
+            current_claim.reset(token)
+
+    with pytest.raises(ApplicationError) as error:
+        db_call(stale_reservation)
+    assert error.value.code == "dispatch_claim_lost"
+    persisted, attempts, models = snapshot(scope, row.id)
+    assert persisted.status == "LEASED"
+    assert persisted.owner == new.owner
+    assert len(attempts) == 2
+    assert len(models) == len(provider.calls) == 1

@@ -52,8 +52,11 @@ async def configure_workspace(
     row = await session.scalar(
         insert(DispatchActivation)
         .values(
-            workspace_id=workspace_id, tenant_id=tenant_id, enabled=enabled,
-            generation=1, updated_at=now,
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            enabled=enabled,
+            generation=1,
+            updated_at=now,
         )
         .on_conflict_do_update(
             index_elements=[DispatchActivation.workspace_id],
@@ -92,7 +95,8 @@ async def enqueue(
     run = await session.scalar(
         select(WorkflowRun)
         .where(
-            WorkflowRun.id == data.workflow_run_id, WorkflowRun.tenant_id == tenant_id,
+            WorkflowRun.id == data.workflow_run_id,
+            WorkflowRun.tenant_id == tenant_id,
             WorkflowRun.workspace_id == workspace_id,
         )
         .execution_options(populate_existing=True)
@@ -106,10 +110,13 @@ async def enqueue(
         raise denied("dispatch_activation_required")
     fingerprint = _fingerprint(data)
     existing = await session.scalar(
-        select(TaskDispatch).where(
-            TaskDispatch.tenant_id == tenant_id, TaskDispatch.workspace_id == workspace_id,
+        select(TaskDispatch)
+        .where(
+            TaskDispatch.tenant_id == tenant_id,
+            TaskDispatch.workspace_id == workspace_id,
             TaskDispatch.request_key == data.request_key,
-        ).execution_options(populate_existing=True)
+        )
+        .execution_options(populate_existing=True)
     )
     if existing is not None:
         if existing.input_fingerprint != fingerprint:
@@ -117,11 +124,13 @@ async def enqueue(
         await session.commit()
         return existing
     started = await session.scalar(
-        select(WorkflowStepRun.id).where(
+        select(WorkflowStepRun.id)
+        .where(
             WorkflowStepRun.workflow_run_id == run.id,
             (WorkflowStepRun.agent_run_id.is_not(None))
             | (WorkflowStepRun.status.not_in(["READY", "PENDING"])),
-        ).limit(1)
+        )
+        .limit(1)
     )
     if run.status != "CREATED" or started is not None:
         raise denied("dispatch_fresh_workflow_required")
@@ -141,12 +150,20 @@ async def enqueue(
         if identifiers != set(data.dependencies):
             raise denied("dispatch_dependency_scope_mismatch")
     row = TaskDispatch(
-        tenant_id=tenant_id, workspace_id=workspace_id, project_id=run.project_id,
-        task_id=run.task_id, workflow_run_id=run.id, request_key=data.request_key,
-        input_fingerprint=fingerprint, priority=data.priority,
-        eligible_at=data.eligible_at or now, deadline=data.deadline,
-        status="READY", max_attempts=data.max_attempts,
-        max_model_calls=data.max_model_calls, allow_unknown_cost=data.allow_unknown_cost,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        project_id=run.project_id,
+        task_id=run.task_id,
+        workflow_run_id=run.id,
+        request_key=data.request_key,
+        input_fingerprint=fingerprint,
+        priority=data.priority,
+        eligible_at=data.eligible_at or now,
+        deadline=data.deadline,
+        status="READY",
+        max_attempts=data.max_attempts,
+        max_model_calls=data.max_model_calls,
+        allow_unknown_cost=data.allow_unknown_cost,
     )
     session.add(row)
     try:
@@ -154,8 +171,10 @@ async def enqueue(
         for identifier in data.dependencies:
             session.add(
                 DispatchDependency(
-                    dispatch_id=row.id, prerequisite_id=identifier,
-                    tenant_id=tenant_id, workspace_id=workspace_id,
+                    dispatch_id=row.id,
+                    prerequisite_id=identifier,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
                 )
             )
         await session.commit()
@@ -166,20 +185,32 @@ async def enqueue(
 
 
 async def claim_next(
-    session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID,
-    owner: UUID, lease_seconds: int = 3600,
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    owner: UUID,
+    lease_seconds: int = 3600,
 ) -> DispatchClaim | None:
     if not get_settings().durable_dispatch_enabled:
         raise denied("dispatch_disabled")
     return await repository.claim(
-        session, tenant_id=tenant_id, workspace_id=workspace_id,
-        owner=owner, lease_seconds=lease_seconds,
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        owner=owner,
+        lease_seconds=lease_seconds,
     )
 
 
 async def run_once(
-    session: AsyncSession, *, registry: ProviderRegistry,
-    tenant_id: UUID, workspace_id: UUID, owner: UUID, lease_seconds: int = 3600,
+    session: AsyncSession,
+    *,
+    registry: ProviderRegistry,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    owner: UUID,
+    lease_seconds: int = 3600,
 ) -> OrchestrationResult | None:
     """One bounded observation/claim and one advance; no loop, replay or approvals.
 
@@ -188,15 +219,21 @@ async def run_once(
     """
     await repository.reconcile(session, tenant_id=tenant_id, workspace_id=workspace_id)
     claimed = await claim_next(
-        session, tenant_id=tenant_id, workspace_id=workspace_id,
-        owner=owner, lease_seconds=lease_seconds,
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        owner=owner,
+        lease_seconds=lease_seconds,
     )
     if claimed is None:
         return None
     token = current_claim.set(claimed)
     try:
         result = await orchestrator_service.advance(
-            session, registry=registry, tenant_id=tenant_id, workspace_id=workspace_id,
+            session,
+            registry=registry,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
             workflow_run_id=claimed.workflow_run_id,
         )
     except Exception:
