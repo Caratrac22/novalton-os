@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from novalton_api.core.config import get_settings
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
+from novalton_api.modules.audit.schemas import AuditRecordCreate
+from novalton_api.modules.audit.service import append_record
 from novalton_api.modules.durable_dispatch import repository
 from novalton_api.modules.durable_dispatch.authority import (
     DispatchClaim,
@@ -73,6 +75,19 @@ async def configure_workspace(
     if row is None:
         await session.rollback()
         raise denied("dispatch_scope_mismatch")
+    await append_record(
+        session,
+        data=AuditRecordCreate(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            action="dispatch.activation.configure",
+            actor_type="service",
+            actor_id="durable_dispatch",
+            outcome="success",
+            metadata={"enabled": enabled, "generation": row.generation},
+        ),
+        commit=False,
+    )
     await session.commit()
     return row
 
@@ -177,6 +192,29 @@ async def enqueue(
                     workspace_id=workspace_id,
                 )
             )
+        await append_record(
+            session,
+            data=AuditRecordCreate(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                project_id=run.project_id,
+                task_id=run.task_id,
+                resource_type="task",
+                resource_id=run.task_id,
+                action="dispatch.task.enqueue",
+                actor_type="service",
+                actor_id="durable_dispatch",
+                outcome="success",
+                metadata={
+                    "dispatch_id": str(row.id),
+                    "workflow_run_id": str(run.id),
+                    "max_attempts": row.max_attempts,
+                    "max_model_calls": row.max_model_calls,
+                    "allow_unknown_cost": row.allow_unknown_cost,
+                },
+            ),
+            commit=False,
+        )
         await session.commit()
     except IntegrityError:
         await session.rollback()

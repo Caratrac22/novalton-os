@@ -346,7 +346,9 @@ async def heartbeat(
         )
         .values(
             lease_expires_at=func.least(
-                func.greatest(TaskDispatch.lease_expires_at, now + timedelta(seconds=lease_seconds)),
+                func.greatest(
+                    TaskDispatch.lease_expires_at, now + timedelta(seconds=lease_seconds)
+                ),
                 TaskDispatch.deadline,
             ),
             updated_at=now,

@@ -216,7 +216,7 @@ def test_enqueue_idempotency_is_atomic_and_conflicting_bindings_fail(scope):
     ):
         with pytest.raises(ApplicationError) as error:
             db_call(
-                lambda session: service.enqueue(
+                lambda session, changed=changed: service.enqueue(
                     session,
                     tenant_id=scope.tenant_id,
                     workspace_id=scope.workspace_id,
@@ -915,3 +915,32 @@ def test_heartbeat_never_shortens_a_lease_and_cannot_extend_the_deadline(scope):
     after = snapshot(scope, row.id)[0]
     assert before.lease_expires_at <= after.lease_expires_at <= after.deadline
     assert after.generation == before.generation
+
+
+def test_activation_changes_have_atomic_audit_evidence_and_rotate_generation(scope):
+    from novalton_api.modules.audit.models import AuditRecord
+
+    generations = []
+    for enabled in (False, True):
+        row = db_call(
+            lambda session, enabled=enabled: service.configure_workspace(
+                session,
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                enabled=enabled,
+            )
+        )
+        generations.append(row.generation)
+    assert generations == [2, 3]
+
+    async def count(session):
+        return await session.scalar(
+            select(func.count())
+            .select_from(AuditRecord)
+            .where(
+                AuditRecord.tenant_id == scope.tenant_id,
+                AuditRecord.action == "dispatch.activation.configure",
+            )
+        )
+
+    assert db_call(count) == 3
