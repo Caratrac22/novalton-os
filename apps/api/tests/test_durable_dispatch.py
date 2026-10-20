@@ -364,12 +364,15 @@ def test_crash_after_model_reservation_keeps_uncertain_evidence_and_never_replay
     persisted, attempts, models = snapshot(scope, row.id)
     assert persisted.status == "LEASED"
     assert attempts[0].completed_at is None
+    assert attempts[0].workflow_step_run_id is not None
+    recorded_step = attempts[0].workflow_step_run_id
     assert len(models) == 1 and models[0].status == "RUNNING"
     assert current_claim.get() is None
     expire(row.id)
     assert tick(scope, provider) is None
     persisted, attempts, models = snapshot(scope, row.id)
     assert persisted.status == "BLOCKED"
+    assert attempts[0].workflow_step_run_id == recorded_step
     assert models[0].status == "RUNNING"
     assert len(provider.calls) == 1
 
@@ -944,3 +947,44 @@ def test_activation_changes_have_atomic_audit_evidence_and_rotate_generation(sco
         )
 
     assert db_call(count) == 3
+
+
+def test_one_claim_cannot_be_reused_to_advance_a_second_step(scope):
+    from novalton_api.modules.orchestrator import service as orchestrator
+
+    provider = QueueProvider([_manager()])
+    row, _, _ = enqueue(scope, provider)
+    claimed = claim(scope)
+
+    async def execute(session):
+        token = current_claim.set(claimed)
+        try:
+            first = await orchestrator.advance(
+                session,
+                registry=ProviderRegistry((provider,)),
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                workflow_run_id=row.workflow_run_id,
+            )
+            assert first.outcome.value == "STEP_COMPLETED"
+            with pytest.raises(ApplicationError) as error:
+                await orchestrator.advance(
+                    session,
+                    registry=ProviderRegistry((provider,)),
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    workflow_run_id=row.workflow_run_id,
+                )
+            assert error.value.code == "dispatch_step_claim_conflict"
+            await session.rollback()
+            assert await repository.finish(session, claimed, result=first)
+        finally:
+            current_claim.reset(token)
+
+    db_call(execute)
+    persisted, attempts, models = snapshot(scope, row.id)
+    state = asyncio.run(_vertical_state(scope, row.workflow_run_id))
+    assert persisted.status == "READY"
+    assert attempts[0].workflow_step_run_id == state["rows"][0][0].id
+    assert state["rows"][1][0].status == "READY"
+    assert len(models) == len(provider.calls) == 1

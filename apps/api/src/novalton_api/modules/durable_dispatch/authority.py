@@ -5,12 +5,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.config import get_settings
 from novalton_api.core.exceptions import ApplicationError
-from novalton_api.modules.durable_dispatch.models import DispatchActivation, TaskDispatch
+from novalton_api.modules.durable_dispatch.models import (
+    DispatchActivation,
+    DispatchAttempt,
+    TaskDispatch,
+)
 from novalton_api.modules.workflows.models import WorkflowStepRun
 
 
@@ -143,3 +147,29 @@ async def require_effect_capacity(session: AsyncSession, workflow_run_id: UUID) 
     row = await binding_for_reservation(session, workflow_run_id)
     if row is not None and row.model_call_count >= row.max_model_calls:
         raise denied("dispatch_model_budget_exhausted")
+
+
+async def record_step_claim(
+    session: AsyncSession, *, workflow_run_id: UUID, step_run_id: UUID
+) -> None:
+    """Bind crash evidence atomically with the existing READY-to-RUNNING CAS."""
+    claimed = current_claim.get()
+    if claimed is None:
+        return
+    if claimed.workflow_run_id != workflow_run_id:
+        raise denied("dispatch_scope_mismatch")
+    identifier = await session.scalar(
+        update(DispatchAttempt)
+        .where(
+            DispatchAttempt.dispatch_id == claimed.dispatch_id,
+            DispatchAttempt.workflow_run_id == workflow_run_id,
+            DispatchAttempt.generation == claimed.generation,
+            DispatchAttempt.owner == claimed.owner,
+            DispatchAttempt.outcome.is_(None),
+            DispatchAttempt.workflow_step_run_id.is_(None),
+        )
+        .values(workflow_step_run_id=step_run_id)
+        .returning(DispatchAttempt.id)
+    )
+    if identifier is None:
+        raise denied("dispatch_step_claim_conflict")

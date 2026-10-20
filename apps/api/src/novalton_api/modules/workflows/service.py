@@ -730,6 +730,10 @@ async def transition_step(
             "Workflow step state transition is invalid",
             status_code=409,
         )
+    if expected == WorkflowStepRunStatus.READY and target == WorkflowStepRunStatus.RUNNING:
+        from novalton_api.modules.durable_dispatch.authority import record_step_claim
+
+        await record_step_claim(session, workflow_run_id=run_id, step_run_id=value.id)
     if target == WorkflowStepRunStatus.COMPLETED:
         for dependent in await repository.pending_dependents(
             session, run_id=run_id, completed_step_id=value.workflow_step_id

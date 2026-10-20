@@ -91,7 +91,9 @@ async def _close(
                 outcome=status,
                 reason_code=reason,
                 post_status=post_status,
-                workflow_step_run_id=step_run_id,
+                workflow_step_run_id=(
+                    step_run_id if step_run_id is not None else DispatchAttempt.workflow_step_run_id
+                ),
                 completed_at=now,
             )
         )
@@ -407,6 +409,16 @@ async def finish(
         )
         if step_id is None:
             target = ("BLOCKED", "dispatch_result_scope_mismatch")
+        recorded_step = await session.scalar(
+            select(DispatchAttempt.workflow_step_run_id).where(
+                DispatchAttempt.dispatch_id == row.id,
+                DispatchAttempt.generation == claimed.generation,
+                DispatchAttempt.owner == claimed.owner,
+            )
+        )
+        if recorded_step is not None and recorded_step != step_id:
+            target = ("BLOCKED", "dispatch_result_state_mismatch")
+            step_id = None
     if target is None and result is not None and result.workflow_status.value != status:
         target = ("BLOCKED", "dispatch_result_state_mismatch")
     if target is None:
