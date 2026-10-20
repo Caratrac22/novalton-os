@@ -2800,3 +2800,131 @@ def test_cancelled_workflow_never_recovers_authority_from_old_approval(
         assert target.read_text() == "before\n"
     finally:
         get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("cancel_boundary", ["provider", "mutation"])
+def test_cancel_during_approved_continuation_preserves_real_effects(
+    scope, tmp_path, monkeypatch, cancel_boundary
+):
+    from novalton_api.modules.tools.executor import ReplaceTextExecutor
+
+    target = tmp_path / "fixture.txt"
+    target.write_text("before\n")
+    monkeypatch.setenv("NOVALTON_WORKSPACE_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+
+    async def policy():
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                await policy_service.create_rule(
+                    session,
+                    data=PolicyRuleCreate(
+                        tenant_id=scope.tenant_id,
+                        workspace_id=scope.workspace_id,
+                        name="Exact cancellation mutation",
+                        action_pattern="tool.workspace.replace_text",
+                        effect=PolicyEffect.REQUIRE_CONFIRMATION,
+                        actor_type="agent",
+                        resource_type="task",
+                    ),
+                )
+        finally:
+            await database.dispose()
+
+    asyncio.run(policy())
+    proposed = _worker() | {
+        "status": "PARTIAL",
+        "tool_proposals": [
+            {
+                "call_key": "inflight_mutation",
+                "tool_name": "workspace.replace_text",
+                "arguments": {
+                    "path": "fixture.txt",
+                    "search": "before",
+                    "replacement": "after",
+                    "expected_matches": 1,
+                },
+            }
+        ],
+    }
+    provider = QueueProvider([_manager(), proposed, _worker()])
+    entered = threading.Event()
+    released = threading.Event()
+    applied = []
+    original_apply = ReplaceTextExecutor.apply
+    original_complete = provider.complete
+
+    def delayed_apply(executor, *args, **kwargs):
+        applied.append(True)
+        entered.set()
+        assert released.wait(15)
+        return original_apply(executor, *args, **kwargs)
+
+    async def delayed_complete(request):
+        entered.set()
+        assert await asyncio.to_thread(released.wait, 15)
+        return await original_complete(request)
+
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            run_id, advance = _create_vertical(client, scope)
+            assert client.post(advance).json()["outcome"] == "STEP_COMPLETED"
+            assert client.post(advance).json()["outcome"] == "WAITING_FOR_HUMAN"
+
+        async def pending():
+            database = Database.from_settings(Settings.from_environment())
+            try:
+                async with database.session_factory() as session:
+                    return await session.scalar(
+                        select(ToolCall.approval_request_id).where(
+                            ToolCall.tenant_id == scope.tenant_id,
+                            ToolCall.status == "PENDING_APPROVAL",
+                        )
+                    )
+            finally:
+                await database.dispose()
+
+        approval_id = asyncio.run(pending())
+        base = f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+        decision_url = f"{base}/approvals/{approval_id}/approve"
+        cancel_url = advance.removesuffix("/advance") + "/cancel"
+        if cancel_boundary == "provider":
+            provider.complete = delayed_complete
+        else:
+            monkeypatch.setattr(ReplaceTextExecutor, "apply", delayed_apply)
+
+        def request(url):
+            with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+                return client.post(url)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            decision = executor.submit(request, decision_url)
+            assert entered.wait(15)
+            try:
+                if cancel_boundary == "provider":
+                    assert request(cancel_url).status_code == 200
+                else:
+                    # An already engaged approved mutation owns the reservation.
+                    # Cancellation linearizes after its bounded apply transaction.
+                    cancelling = executor.submit(request, cancel_url)
+            finally:
+                released.set()
+            if cancel_boundary == "mutation":
+                assert cancelling.result(timeout=20).status_code == 200
+            response = decision.result(timeout=20)
+        assert response.status_code in {200, 409}, response.text
+        assert target.read_text() == "after\n"
+        state = asyncio.run(_vertical_state(scope, run_id))
+        assert state["run"].status == "CANCELLED"
+        assert all(row.status in {"COMPLETED", "CANCELLED"} for row, _ in state["rows"])
+        assert _advance_fresh(provider, advance)["outcome"] == "CANCELLED"
+        assert request(decision_url).status_code == 409
+        assert len(state["handoffs"]) == 2
+        if cancel_boundary == "provider":
+            assert len(state["model_runs"]) == len(provider.calls) == 3
+        else:
+            assert len(applied) == 1
+    finally:
+        released.set()
+        get_settings.cache_clear()

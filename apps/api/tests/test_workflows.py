@@ -108,7 +108,9 @@ async def _cleanup(scopes: tuple[Scope, Scope]) -> None:
                 delete(AgentDefinition).where(AgentDefinition.tenant_id.in_(tenant_ids))
             )
             await session.execute(delete(AuditRecord).where(AuditRecord.tenant_id.in_(tenant_ids)))
-            await session.execute(delete(RuntimeEvent).where(RuntimeEvent.tenant_id.in_(tenant_ids)))
+            await session.execute(
+                delete(RuntimeEvent).where(RuntimeEvent.tenant_id.in_(tenant_ids))
+            )
             for scope in scopes:
                 await session.execute(delete(Task).where(Task.id == scope.task_id))
                 await session.execute(delete(Project).where(Project.id == scope.project_id))
