@@ -3,7 +3,7 @@
 from datetime import timedelta
 from uuid import UUID
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -219,6 +219,31 @@ async def reconcile(
     return changed
 
 
+async def reconcile_cancelled(
+    session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID, dispatch_id: UUID
+) -> TaskDispatch | None:
+    """Project one persisted cancellation without a bounded queue scan."""
+    row = await session.scalar(
+        select(TaskDispatch).where(
+            TaskDispatch.id == dispatch_id,
+            TaskDispatch.tenant_id == tenant_id,
+            TaskDispatch.workspace_id == workspace_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        await session.rollback()
+        return None
+    if await _workflow_status(session, row) != "CANCELLED":
+        await session.rollback()
+        raise denied("dispatch_cancellation_not_persisted")
+    if row.status != "CANCELLED":
+        await _close(session, row, "CANCELLED", "workflow_cancelled", post_status="CANCELLED")
+    await session.commit()
+    return row
+
+
 async def claim(
     session: AsyncSession,
     *,
@@ -247,6 +272,16 @@ async def claim(
     )
     for _ in range(32):
         now = await database_now(session)
+        # A READY request gains one point per five seconds, capped at 200.
+        # Even under a stream of new +100 requests, a waiting -100 request
+        # reaches the same rank within 1,000 seconds; stable eligibility/ID
+        # ordering then selects the older request. Never rotate created_at.
+        age = func.least(
+            200,
+            func.greatest(
+                0, func.floor(func.extract("epoch", now - TaskDispatch.created_at) / 5)
+            ),
+        )
         row = await session.scalar(
             select(TaskDispatch)
             .where(
@@ -256,7 +291,11 @@ async def claim(
                 TaskDispatch.eligible_at <= now,
                 ~unmet,
             )
-            .order_by(TaskDispatch.priority.desc(), TaskDispatch.eligible_at, TaskDispatch.id)
+            .order_by(
+                (TaskDispatch.priority + age).desc(),
+                TaskDispatch.eligible_at,
+                TaskDispatch.id,
+            )
             .limit(1)
             .with_for_update(skip_locked=True, of=TaskDispatch)
             .execution_options(populate_existing=True)

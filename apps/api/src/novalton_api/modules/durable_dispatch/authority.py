@@ -1,5 +1,6 @@
 """Reservation fencing shared by the trusted model/tool/workflow boundaries."""
 
+from asyncio import Event
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
@@ -27,6 +28,7 @@ class DispatchClaim:
     owner: UUID
     generation: int
     activation_generation: int
+    lost: Event | None = None
 
 
 current_claim: ContextVar[DispatchClaim | None] = ContextVar("durable_dispatch_claim", default=None)
@@ -49,6 +51,8 @@ async def binding_for_reservation(
     transferable to another producer, including a direct/manual advance.
     """
     claim = current_claim.get()
+    if claim is not None and claim.lost is not None and claim.lost.is_set():
+        raise denied("dispatch_claim_lost")
     if claim is not None and claim.workflow_run_id != workflow_run_id:
         raise denied("dispatch_scope_mismatch")
     scope = (

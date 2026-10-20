@@ -1,7 +1,10 @@
 """Disposable PostgreSQL acceptance for the bounded trusted dispatcher."""
 
 import asyncio
+import hashlib
+import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -11,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from test_development_workflow import (
     QueueProvider,
     _cleanup,
@@ -29,6 +33,7 @@ from novalton_api.infrastructure.providers.contracts import GenerationResult
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.main import create_app
 from novalton_api.modules.approvals.models import ApprovalRequest
+from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.durable_dispatch import repository, service
 from novalton_api.modules.durable_dispatch.authority import (
     current_claim,
@@ -39,6 +44,10 @@ from novalton_api.modules.durable_dispatch.models import (
     DispatchAttempt,
     DispatchDependency,
     TaskDispatch,
+)
+from novalton_api.modules.durable_dispatch.operator import (
+    OperatorAuthority,
+    authenticate_operator,
 )
 from novalton_api.modules.durable_dispatch.schemas import DispatchRequest
 from novalton_api.modules.model_catalog.models import ModelDefinition
@@ -61,14 +70,39 @@ def db_call(operation):
     return asyncio.run(execute())
 
 
+_TEST_OPERATOR_KEY = "mission-four-dispatch-test-credential-only"
+_TEST_PERMISSIONS = (
+    "activation.configure,dispatch.enqueue,dispatch.read,dispatch.cancel,dispatch.resolve"
+)
+
+
+def configure_operator(scope, monkeypatch):
+    monkeypatch.setenv(
+        "NOVALTON_DISPATCH_OPERATOR_KEY_SHA256",
+        hashlib.sha256(_TEST_OPERATOR_KEY.encode()).hexdigest(),
+    )
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_ID", "test-operator")
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_TENANT_ID", str(scope.tenant_id))
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_WORKSPACE_ID", str(scope.workspace_id))
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_PERMISSIONS", _TEST_PERMISSIONS)
+    get_settings.cache_clear()
+
+
+def operator_for(scope):
+    actor = authenticate_operator(_TEST_OPERATOR_KEY)
+    actor.require("dispatch.read", tenant_id=scope.tenant_id, workspace_id=scope.workspace_id)
+    return actor
+
+
 @pytest.fixture
 def scope(monkeypatch):
     monkeypatch.setenv("NOVALTON_DURABLE_DISPATCH_ENABLED", "true")
-    get_settings.cache_clear()
     value = asyncio.run(_seed())
+    configure_operator(value, monkeypatch)
     db_call(
         lambda session: service.configure_workspace(
-            session, tenant_id=value.tenant_id, workspace_id=value.workspace_id, enabled=True
+            session, operator=operator_for(value), tenant_id=value.tenant_id,
+            workspace_id=value.workspace_id, enabled=True
         )
     )
     yield value
@@ -114,7 +148,8 @@ def enqueue(scope, provider, **values):
     )
     row = db_call(
         lambda session: service.enqueue(
-            session, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id, data=data
+            session, operator=operator_for(scope), tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id, data=data
         )
     )
     return row, data, advance
@@ -196,6 +231,293 @@ def test_one_tick_reuses_advance_and_three_ticks_reach_real_qa_completion(scope)
     assert db_call(task_status) == "BACKLOG"
 
 
+def test_operator_credential_permissions_and_scope_fail_closed(scope, monkeypatch):
+    with pytest.raises(ApplicationError) as wrong:
+        authenticate_operator("x" * 40)
+    assert wrong.value.code == "dispatch_operator_forbidden"
+    with pytest.raises(ApplicationError):
+        OperatorAuthority(object(), "0" * 64, "forged", scope.tenant_id, scope.workspace_id, frozenset())
+    verified = operator_for(scope)
+    with pytest.raises(ApplicationError) as foreign:
+        verified.require("dispatch.enqueue", tenant_id=scope.tenant_id, workspace_id=uuid4())
+    assert foreign.value.status_code == 403
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_PERMISSIONS", "dispatch.read")
+    get_settings.cache_clear()
+    with pytest.raises(ApplicationError):
+        verified.require("dispatch.read", tenant_id=scope.tenant_id, workspace_id=scope.workspace_id)
+    reader = authenticate_operator(_TEST_OPERATOR_KEY)
+    with pytest.raises(ApplicationError) as forbidden:
+        db_call(
+            lambda session: service.configure_workspace(
+                session, operator=reader, tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id, enabled=False
+            )
+        )
+    assert forbidden.value.status_code == 403
+    assert db_call(
+        lambda session: service.list_dispatches(
+            session, operator=reader, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+        )
+    ) == []
+
+
+def test_operator_read_and_repeated_cancel_leave_one_audited_fence(scope):
+    provider = QueueProvider([])
+    row, _, _ = enqueue(scope, provider)
+    operator = operator_for(scope)
+
+    async def inspect(session):
+        return await service.list_dispatches(
+            session, operator=operator, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+        ), await service.list_attempts(
+            session, operator=operator, tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id, dispatch_id=row.id
+        )
+
+    listed, attempts = db_call(inspect)
+    assert [entry.id for entry in listed] == [row.id]
+    assert attempts == []
+    for _ in range(2):
+        cancelled = db_call(
+            lambda session: service.cancel_dispatch(
+                session, operator=operator, tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id, dispatch_id=row.id
+            )
+        )
+        assert cancelled.status == "CANCELLED"
+    assert tick(scope, provider) is None
+    assert provider.calls == []
+
+    async def audit_count(session):
+        return await session.scalar(
+            select(func.count()).select_from(AuditRecord).where(
+                AuditRecord.tenant_id == scope.tenant_id,
+                AuditRecord.action == "dispatch.task.cancel",
+                AuditRecord.actor_id == operator.actor_id,
+            )
+        )
+
+    assert db_call(audit_count) == 1
+    with pytest.raises(ApplicationError) as foreign:
+        db_call(
+            lambda session: service.list_attempts(
+                session, operator=operator, tenant_id=scope.tenant_id,
+                workspace_id=uuid4(), dispatch_id=row.id
+            )
+        )
+    assert foreign.value.status_code == 403
+
+
+def test_resolution_requires_explicit_terminal_old_workflow_and_fresh_run(scope):
+    provider = QueueProvider([])
+    old, _, _ = enqueue(scope, provider, max_attempts=0)
+    assert tick(scope, provider) is None
+    body, _ = _create_vertical(scope, provider)
+    data = DispatchRequest(
+        workflow_run_id=UUID(body["workflow_run"]["id"]), request_key=uuid4().hex,
+        deadline=datetime.now(UTC) + timedelta(hours=1),
+    )
+    operator = operator_for(scope)
+
+    def resolve():
+        return db_call(
+            lambda session: service.resolve_blocked(
+                session, operator=operator, tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id, blocked_id=old.id, data=data
+            )
+        )
+
+    with pytest.raises(ApplicationError) as blocked:
+        resolve()
+    assert blocked.value.code == "dispatch_resolution_requires_terminal_old_and_fresh_run"
+    db_call(
+        lambda session: service.cancel_dispatch(
+            session, operator=operator, tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id, dispatch_id=old.id
+        )
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: resolve(), range(2)))
+    assert {result.id for result in results} == {results[0].id}
+    assert results[0].workflow_run_id == data.workflow_run_id
+    assert results[0].id != old.id
+    assert snapshot(scope, old.id)[0].status == "CANCELLED"
+
+    async def resolution_count(session):
+        return await session.scalar(
+            select(func.count()).select_from(AuditRecord).where(
+                AuditRecord.tenant_id == scope.tenant_id,
+                AuditRecord.action == "dispatch.task.resolve",
+            )
+        )
+
+    assert db_call(resolution_count) == 1
+
+
+def test_bounded_capacity_claims_are_unique_and_lost_workers_never_replay(scope, capsys):
+    provider = QueueProvider([])
+    rows = [enqueue(other_task(scope), provider, priority=number % 3)[0] for number in range(18)]
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        claims = list(executor.map(lambda _: claim(scope), rows))
+    claim_seconds = time.perf_counter() - started
+    assert all(item is not None for item in claims)
+    assert len({item.dispatch_id for item in claims}) == len(rows)
+    assert {item.dispatch_id for item in claims} == {row.id for row in rows}
+
+    async def lose_and_observe(session):
+        await session.execute(
+            update(TaskDispatch).where(
+                TaskDispatch.tenant_id == scope.tenant_id, TaskDispatch.status == "LEASED"
+            ).values(lease_expires_at=func.clock_timestamp() - text("interval '1 second'"))
+        )
+        await session.commit()
+        changed = await repository.reconcile(
+            session, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id, limit=32
+        )
+        states = list(
+            await session.execute(
+                select(TaskDispatch.status, TaskDispatch.attempt_count, DispatchAttempt.outcome)
+                .join(DispatchAttempt, DispatchAttempt.dispatch_id == TaskDispatch.id)
+                .where(TaskDispatch.tenant_id == scope.tenant_id)
+            )
+        )
+        return changed, states
+
+    changed, states = db_call(lose_and_observe)
+    assert changed == len(rows)
+    assert states == [("BLOCKED", 1, "BLOCKED")] * len(rows)
+    assert claim(scope) is None
+    assert provider.calls == []
+    print(json.dumps({"dispatches": len(rows), "workers": 6, "claim_seconds": round(claim_seconds, 3),
+                      "collisions": len(rows) - len({item.dispatch_id for item in claims}),
+                      "recovered_blocked": changed}))
+    assert "\"collisions\": 0" in capsys.readouterr().out
+
+
+def test_priority_aging_bounds_starvation_against_new_high_priority_work(scope):
+    provider = QueueProvider([])
+    low, _, _ = enqueue(other_task(scope), provider, priority=-100)
+    high, _, _ = enqueue(other_task(scope), provider, priority=100)
+    first = claim(scope)
+    assert first.dispatch_id == high.id
+    # Expired uncertain ownership remains BLOCKED; fairness never transfers it.
+    expire(high.id)
+    assert claim(scope).dispatch_id == low.id
+    expire(low.id)
+    assert claim(scope) is None
+
+    older, _, _ = enqueue(other_task(scope), provider, priority=-100)
+    newer, _, _ = enqueue(other_task(scope), provider, priority=100)
+
+    async def age(session):
+        await session.execute(
+            update(TaskDispatch).where(TaskDispatch.id == older.id)
+            .values(created_at=func.clock_timestamp() - text("interval '1001 seconds'"))
+        )
+        await session.commit()
+
+    db_call(age)
+    assert claim(scope).dispatch_id == older.id
+    assert claim(scope).dispatch_id == newer.id
+
+
+def test_one_iteration_heartbeat_renews_using_an_independent_session(scope):
+    provider = QueueProvider([_manager()])
+    row, _, _ = enqueue(scope, provider)
+    entered, released = threading.Event(), threading.Event()
+    original = provider.complete
+
+    async def delayed(request):
+        entered.set()
+        assert await asyncio.to_thread(released.wait, 15)
+        return await original(request)
+
+    provider.complete = delayed
+
+    async def controlled(session):
+        return await service.run_once(
+            session, registry=ProviderRegistry((provider,)), tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id, owner=uuid4(), lease_seconds=60,
+            heartbeat_session_factory=async_sessionmaker(session.bind, expire_on_commit=False),
+            heartbeat_interval_seconds=0.05,
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(db_call, controlled)
+        assert entered.wait(15)
+        try:
+            async def shorten(session):
+                await session.execute(
+                    update(TaskDispatch).where(TaskDispatch.id == row.id)
+                    .values(lease_expires_at=func.clock_timestamp() + text("interval '1 second'"))
+                )
+                await session.commit()
+
+            db_call(shorten)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                lease = db_call(
+                    lambda session: session.scalar(
+                        select(TaskDispatch.lease_expires_at).where(TaskDispatch.id == row.id)
+                    )
+                )
+                if lease is not None and (lease - datetime.now(UTC)).total_seconds() > 30:
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("controlled heartbeat did not renew the lease")
+        finally:
+            released.set()
+        assert future.result(timeout=20).outcome.value == "STEP_COMPLETED"
+    persisted, attempts, models = snapshot(scope, row.id)
+    assert (persisted.status, len(attempts), len(models), len(provider.calls)) == ("READY", 1, 1, 1)
+
+
+def test_lost_heartbeat_fences_late_provider_without_replay(scope, monkeypatch):
+    provider = QueueProvider([_manager()])
+    row, _, _ = enqueue(scope, provider)
+    entered, lost, released = threading.Event(), threading.Event(), threading.Event()
+    original = provider.complete
+
+    async def delayed(request):
+        entered.set()
+        assert await asyncio.to_thread(released.wait, 15)
+        return await original(request)
+
+    async def heartbeat_failed(session, claimed, *, lease_seconds=3600):
+        lost.set()
+        return False
+
+    provider.complete = delayed
+    monkeypatch.setattr(repository, "heartbeat", heartbeat_failed)
+
+    async def controlled(session):
+        return await service.run_once(
+            session, registry=ProviderRegistry((provider,)), tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id, owner=uuid4(), lease_seconds=60,
+            heartbeat_session_factory=async_sessionmaker(session.bind, expire_on_commit=False),
+            heartbeat_interval_seconds=0.05,
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(db_call, controlled)
+        assert entered.wait(15)
+        assert lost.wait(10)
+        released.set()
+        with pytest.raises(ApplicationError) as failure:
+            future.result(timeout=20)
+    assert failure.value.code == "dispatch_claim_lost"
+    persisted, attempts, models = snapshot(scope, row.id)
+    assert persisted.status == "LEASED"
+    assert attempts[0].completed_at is None
+    assert models[0].status == "SUCCEEDED"
+    expire(row.id)
+    assert tick(scope, provider) is None
+    assert snapshot(scope, row.id)[0].status == "BLOCKED"
+    assert len(provider.calls) == 1
+
+
 def test_enqueue_idempotency_is_atomic_and_conflicting_bindings_fail(scope):
     provider = QueueProvider([])
     row, data, _ = enqueue(scope, provider)
@@ -203,7 +525,8 @@ def test_enqueue_idempotency_is_atomic_and_conflicting_bindings_fail(scope):
     def repeat():
         return db_call(
             lambda session: service.enqueue(
-                session, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id, data=data
+                session, operator=operator_for(scope), tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id, data=data
             )
         )
 
@@ -218,6 +541,7 @@ def test_enqueue_idempotency_is_atomic_and_conflicting_bindings_fail(scope):
             db_call(
                 lambda session, changed=changed: service.enqueue(
                     session,
+                    operator=operator_for(scope),
                     tenant_id=scope.tenant_id,
                     workspace_id=scope.workspace_id,
                     data=changed,
@@ -401,6 +725,7 @@ def test_late_provider_after_revocation_keeps_usage_but_has_no_proposal_authorit
                     db_call(
                         lambda session, enabled=enabled: service.configure_workspace(
                             session,
+                            operator=operator_for(scope),
                             tenant_id=scope.tenant_id,
                             workspace_id=scope.workspace_id,
                             enabled=enabled,
@@ -517,7 +842,8 @@ def test_global_switch_and_workspace_activation_are_both_required(scope, monkeyp
     get_settings.cache_clear()
     db_call(
         lambda session: service.configure_workspace(
-            session, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id, enabled=False
+            session, operator=operator_for(scope), tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id, enabled=False
         )
     )
     with pytest.raises(ApplicationError) as error:
@@ -542,6 +868,7 @@ def test_wrong_owner_and_old_activation_cannot_heartbeat_finalize_or_reserve(sco
         db_call(
             lambda session, enabled=enabled: service.configure_workspace(
                 session,
+                operator=operator_for(scope),
                 tenant_id=scope.tenant_id,
                 workspace_id=scope.workspace_id,
                 enabled=enabled,
@@ -563,16 +890,19 @@ def test_wrong_owner_and_old_activation_cannot_heartbeat_finalize_or_reserve(sco
     assert snapshot(scope, row.id)[1][0].outcome is None
 
 
-def test_scoped_foreign_keys_and_dependency_scope_fail_closed(scope):
+def test_scoped_foreign_keys_and_dependency_scope_fail_closed(scope, monkeypatch):
     other = asyncio.run(_seed())
     provider = QueueProvider([])
     try:
+        configure_operator(other, monkeypatch)
         db_call(
             lambda session: service.configure_workspace(
-                session, tenant_id=other.tenant_id, workspace_id=other.workspace_id, enabled=False
+                session, operator=operator_for(other), tenant_id=other.tenant_id,
+                workspace_id=other.workspace_id, enabled=False
             )
         )
         foreign, _, _ = enqueue(other, provider)
+        configure_operator(scope, monkeypatch)
         local, _, _ = enqueue(scope, provider)
         body, _ = _create_vertical(other_task(scope), provider)
         data = DispatchRequest(
@@ -584,7 +914,8 @@ def test_scoped_foreign_keys_and_dependency_scope_fail_closed(scope):
         with pytest.raises(ApplicationError) as error:
             db_call(
                 lambda session: service.enqueue(
-                    session, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id, data=data
+                    session, operator=operator_for(scope), tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id, data=data
                 )
             )
         assert error.value.code == "dispatch_dependency_scope_mismatch"
@@ -805,7 +1136,8 @@ def test_enqueue_refuses_to_adopt_an_already_started_manual_workflow(scope):
     with pytest.raises(ApplicationError) as error:
         db_call(
             lambda session: service.enqueue(
-                session, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id, data=data
+                session, operator=operator_for(scope), tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id, data=data
             )
         )
     assert error.value.code == "dispatch_fresh_workflow_required"
@@ -928,6 +1260,7 @@ def test_activation_changes_have_atomic_audit_evidence_and_rotate_generation(sco
         row = db_call(
             lambda session, enabled=enabled: service.configure_workspace(
                 session,
+                operator=operator_for(scope),
                 tenant_id=scope.tenant_id,
                 workspace_id=scope.workspace_id,
                 enabled=enabled,
