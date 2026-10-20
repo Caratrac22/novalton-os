@@ -1,6 +1,7 @@
 """Scoped Developer Manager definition and I-022 execution integration."""
 
 import logging
+from collections.abc import Awaitable, Callable
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,7 +10,7 @@ from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.modules.agents import execution, repository
 from novalton_api.modules.agents.contract_execution import ResultShapeConstraint
-from novalton_api.modules.agents.models import AgentDefinition
+from novalton_api.modules.agents.models import AgentDefinition, AgentRun
 from novalton_api.modules.agents.schemas import AgentDefinitionStatus
 from novalton_api.modules.developer_manager.contracts import DeveloperManagerResult
 from novalton_api.modules.developer_manager.schemas import (
@@ -74,6 +75,7 @@ async def plan(
     workspace_id: UUID,
     data: DeveloperManagerPlanningRequest,
     result_shape_constraints: tuple[ResultShapeConstraint, ...] = (),
+    on_run_created: Callable[[AgentRun], Awaitable[None]] | None = None,
 ) -> DeveloperManagerPlanningResponse:
     definition = await resolve_definition(session, tenant_id=tenant_id, workspace_id=workspace_id)
     response = await execution.execute(
@@ -86,6 +88,7 @@ async def plan(
         result_contract=DeveloperManagerResult,
         contract_instructions=_CONTRACT_INSTRUCTIONS,
         result_shape_constraints=result_shape_constraints,
+        on_run_created=on_run_created,
     )
     result = response.result
     if result is not None:
