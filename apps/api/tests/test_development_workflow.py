@@ -1817,6 +1817,42 @@ def test_initial_pretool_recovery_rechecks_committed_proposal_after_agent_lock(s
     assert len(provider.calls) == 2
 
 
+@pytest.mark.parametrize("position", [0, 1, 2], ids=["manager", "developer", "qa"])
+def test_every_specialized_provider_crash_has_durable_workflow_link(scope, monkeypatch, position):
+    from novalton_api.modules.approvals import mutation_resume
+
+    provider = QueueProvider([_manager(), _worker(), _qa("PASS")])
+    created, advance = _create_vertical(scope, provider)
+    for _ in range(position):
+        assert _advance_fresh(provider, advance)["outcome"] == "STEP_COMPLETED"
+
+    async def crash(request):
+        provider.calls.append(request)
+        raise RuntimeError("injected_specialized_provider_crash")
+
+    monkeypatch.setattr(provider, "complete", crash)
+    with TestClient(
+        create_app(provider_registry=ProviderRegistry((provider,))), raise_server_exceptions=False
+    ) as client:
+        assert client.post(advance).status_code == 500
+    run_id = UUID(str(created["workflow_run"]["id"]))
+    before = asyncio.run(_vertical_state(scope, run_id))
+    linked_agent = before["rows"][position][0].agent_run_id
+    assert linked_agent == before["agent_runs"][position].id
+    assert before["agent_runs"][position].status == "RUNNING"
+    assert _advance_fresh(provider, advance)["outcome"] == "WAITING_FOR_HUMAN"
+    monkeypatch.setattr(mutation_resume, "_CONTINUATION_LEASE", timedelta(0))
+    assert _advance_fresh(provider, advance)["outcome"] == "WORKFLOW_FAILED"
+    after = asyncio.run(_vertical_state(scope, run_id))
+    assert after["rows"][position][0].status == "FAILED"
+    assert after["agent_runs"][position].status == "FAILED"
+    assert all(model.status != "RUNNING" for model in after["model_runs"])
+    assert (
+        len(provider.calls) == len(after["agent_runs"]) == len(after["model_runs"]) == position + 1
+    )
+    assert after["approval_count"] == 0
+
+
 def test_i029_full_vertical_integration_across_fresh_app_and_db_boundaries(
     scope: Scope,
 ) -> None:

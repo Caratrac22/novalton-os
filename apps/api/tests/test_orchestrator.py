@@ -2,6 +2,7 @@ import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -594,3 +595,45 @@ def test_simultaneous_advance_cannot_duplicate_agent_or_model_run(scope: Scope) 
             await database.dispose()
 
     assert asyncio.run(counts()) == (1, 1)
+
+
+def test_generic_agent_provider_crash_is_linked_before_dispatch_and_reclaimed(scope, monkeypatch):
+    from novalton_api.modules.approvals import mutation_resume
+
+    run_id = asyncio.run(_run(scope, [_agent_step(scope, "crash")]))
+
+    class CrashingProvider(MockProvider):
+        async def complete(self, request):
+            self.calls.append(request)
+            raise RuntimeError("injected_generic_provider_crash")
+
+    provider = CrashingProvider(_result().model_dump_json())
+    url = _url(scope, run_id)
+    with TestClient(
+        create_app(provider_registry=ProviderRegistry((provider,))), raise_server_exceptions=False
+    ) as client:
+        assert client.post(url).status_code == 500
+
+    async def state():
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                step = await session.scalar(
+                    select(WorkflowStepRun).where(WorkflowStepRun.workflow_run_id == run_id)
+                )
+                assert step.agent_run_id is not None
+                agent = await session.get(AgentRun, step.agent_run_id)
+                model = await session.get(ModelRun, agent.model_run_id)
+                return step.status, agent.status, model.status
+        finally:
+            await database.dispose()
+
+    assert asyncio.run(state()) == ("RUNNING", "RUNNING", "RUNNING")
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        assert client.post(url).json()["outcome"] == "WAITING_FOR_HUMAN"
+    monkeypatch.setattr(mutation_resume, "_CONTINUATION_LEASE", timedelta(0))
+    with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+        assert client.post(url).json()["outcome"] == "WORKFLOW_FAILED"
+        assert client.post(url).json()["outcome"] == "WORKFLOW_FAILED"
+    assert asyncio.run(state()) == ("FAILED", "FAILED", "FAILED")
+    assert len(provider.calls) == 1

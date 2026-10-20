@@ -169,6 +169,17 @@ async def dispatch(
             minimum_contract_enforcement_grade=ContractEnforcementGrade.PROVIDER_ENFORCED,
         ),
     )
+
+    async def link_created_agent(agent_run: AgentRun) -> None:
+        await workflow_service.link_agent_run(
+            session,
+            tenant_id=run.tenant_id,
+            workspace_id=run.workspace_id,
+            run_id=run.id,
+            step_run_id=step_run.id,
+            agent_run_id=agent_run.id,
+        )
+
     if role == "developer_manager":
         response = await manager_service.plan(
             session,
@@ -177,19 +188,9 @@ async def dispatch(
             workspace_id=run.workspace_id,
             data=DeveloperManagerPlanningRequest(**common),
             result_shape_constraints=FIXED_MANAGER_RESULT_CONSTRAINTS,
+            on_run_created=link_created_agent,
         )
     elif role == "developer_worker":
-
-        async def link_created_agent(agent_run: AgentRun) -> None:
-            await workflow_service.link_agent_run(
-                session,
-                tenant_id=run.tenant_id,
-                workspace_id=run.workspace_id,
-                run_id=run.id,
-                step_run_id=step_run.id,
-                agent_run_id=agent_run.id,
-            )
-
         response = await developer_service.execute_assignment(
             session,
             registry=registry,
@@ -211,6 +212,7 @@ async def dispatch(
                     for index, value in enumerate(handoff.acceptance_criteria, start=1)
                 ],
             ),
+            on_run_created=link_created_agent,
         )
     return SpecializedExecution(response=response, role=role)
 

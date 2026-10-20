@@ -5,6 +5,19 @@ on:
     branches:
       - ci/i044a-validation
       - feature/i044-controlled-verification
+  pull_request:
+    paths:
+      - .github/workflows/i044a-validation.yml
+      - apps/api/src/novalton_api/modules/agents/**
+      - apps/api/src/novalton_api/modules/approvals/**
+      - apps/api/src/novalton_api/modules/developer_manager/**
+      - apps/api/src/novalton_api/modules/developer_worker/**
+      - apps/api/src/novalton_api/modules/orchestrator/**
+      - apps/api/src/novalton_api/modules/qa_worker/**
+      - apps/api/src/novalton_api/modules/tools/**
+      - apps/api/tests/**
+      - infra/verification/**
+      - docs/15-controlled-verification.md
   workflow_dispatch:
 
 permissions:
@@ -91,6 +104,10 @@ jobs:
             apps/api/tests/test_development_workflow.py::test_i044_reconciliation_cannot_authorize_late_provider_proposal \
             apps/api/tests/test_development_workflow.py::test_i044_interrupted_first_tool_fails_closed \
             apps/api/tests/test_development_workflow.py::test_i044_audited_concurrent_approval_resumes_apply_once \
+            apps/api/tests/test_development_workflow.py::test_initial_pretool_crash_recovery_is_durable_and_never_replays \
+            apps/api/tests/test_development_workflow.py::test_initial_pretool_recovery_rechecks_committed_proposal_after_agent_lock \
+            apps/api/tests/test_development_workflow.py::test_every_specialized_provider_crash_has_durable_workflow_link \
+            apps/api/tests/test_orchestrator.py::test_generic_agent_provider_crash_is_linked_before_dispatch_and_reclaimed \
             apps/api/tests/test_migrations.py::test_i044_immutable_verification_authority_round_trip
 
       - name: Run full API suite on novalton_test

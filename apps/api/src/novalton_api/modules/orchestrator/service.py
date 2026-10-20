@@ -16,6 +16,7 @@ from novalton_api.modules.agents.contracts import (
     ChallengeLevel,
     ModelRequirementHints,
 )
+from novalton_api.modules.agents.models import AgentRun
 from novalton_api.modules.agents.schemas import AgentRunStatus
 from novalton_api.modules.orchestrator import challenge_repository, specializations
 from novalton_api.modules.orchestrator.schemas import OrchestrationOutcome, OrchestrationResult
@@ -243,18 +244,33 @@ async def advance(
     # continuation. Aged claims fail closed; no provider or mutation is retried.
     from novalton_api.modules.approvals.mutation_resume import reconcile_stale_continuation
 
-    if await reconcile_stale_continuation(
+    await reconcile_stale_continuation(
         session,
         tenant_id=tenant_id,
         workspace_id=workspace_id,
         workflow_run_id=run.id,
-    ):
-        await session.refresh(run)
+    )
+    # A lost recovery race rolls back and expires ORM objects. Reload before
+    # reading even run.id; implicit async lazy loading would raise MissingGreenlet.
+    # A competitor may also have completed/cancelled/failed the workflow.
+    await session.refresh(run)
+    if run.status == WorkflowRunStatus.FAILED.value:
         return await _result(
             session,
             run,
             OrchestrationOutcome.WORKFLOW_FAILED,
-            reason_code="tool_continuation_interrupted",
+            reason_code=run.failure_code or "workflow_failed",
+        )
+    if run.status == WorkflowRunStatus.CANCELLED.value:
+        return await _result(
+            session, run, OrchestrationOutcome.CANCELLED, reason_code="workflow_cancelled"
+        )
+    if run.status == WorkflowRunStatus.COMPLETED.value:
+        return await _result(
+            session,
+            run,
+            OrchestrationOutcome.WORKFLOW_COMPLETED,
+            reason_code="workflow_already_completed",
         )
 
     ordered = await repository.ordered_step_runs(session, run_id=run.id)
@@ -407,6 +423,17 @@ async def advance(
             session, registry=registry, run=run, step_run=step_run, step=step
         )
         if specialized is None:
+
+            async def link_created_agent(agent_run: AgentRun) -> None:
+                await workflow_service.link_agent_run(
+                    session,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    run_id=run.id,
+                    step_run_id=step_run.id,
+                    agent_run_id=agent_run.id,
+                )
+
             executed = await agent_execution.execute(
                 session,
                 registry=registry,
@@ -414,6 +441,7 @@ async def advance(
                 workspace_id=workspace_id,
                 definition_id=step.agent_definition_id,
                 data=_agent_input(run, step),
+                on_run_created=link_created_agent,
             )
         else:
             executed = specialized.response

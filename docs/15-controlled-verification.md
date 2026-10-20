@@ -74,13 +74,23 @@ per-mutation continuation claim prevents an old approval replay from consuming a
 later correction wait. A crash after claiming fails closed; no automatic provider
 retry or reapplication occurs. Syntax output never grants another permission.
 
-The trusted workflow links the Developer AgentRun before provider/tool work.
+The trusted workflow links each Manager, Developer, QA and generic AgentRun before
+provider/tool work. An initially linked RUNNING AgentRun with no ToolCalls is
+also failed closed after the same one-hour lease on a later explicit `advance`.
+The AgentRun and step are locked and rechecked, and ToolCalls are reread after
+locking so a concurrently committed proposal prevents this pre-tool recovery.
+Active ModelRuns, AgentRun, step and workflow fail in one transaction. Neither
+provider calls nor tools are replayed. A completed AgentRun is not reclaimed by
+the pre-tool path, including a result waiting for human challenge resolution.
 Tool reservation, approval linkage and their Policy/audit records commit in one
 transaction. An interrupted pending proposal, running/finished first tool, applied
 mutation, denial or claimed continuation is failed closed on a later explicit
 `advance` after the fixed one-hour lease. Active continuations are not reclaimed
 before that lease; each governed provider continuation has a 300-second deadline.
-This recovery starts at durable tool activity, not generic pre-tool provider runs.
+This does not yet reclaim a RUNNING step with no linked AgentRun or an AgentRun
+still in CREATED: interruption before durable linkage/start requires explicit
+operator investigation. Recovery marks an abandoned run FAILED; it does not
+automatically retry an assignment or provide a durable task scheduler.
 
 Approved replacement preserves existing ordinary mode/group so the separate
 verification UID can still read admitted source. Foreign ownership, privileged
