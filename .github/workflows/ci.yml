@@ -163,3 +163,37 @@ jobs:
           path: recovery-export/
           retention-days: 90
           if-no-files-found: error
+  mission7-recovery-export:
+    name: Verified Mission 7 Git recovery export
+    if: github.event_name == 'pull_request' && github.head_ref == 'feature/mission7-saas-financial'
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify complete bundle and source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir recovery-export
+          git branch mission7-export HEAD
+          git bundle create recovery-export/Novalton_OS_Mission_7.bundle refs/heads/mission7-export
+          git bundle verify recovery-export/Novalton_OS_Mission_7.bundle
+          git clone --quiet --branch mission7-export recovery-export/Novalton_OS_Mission_7.bundle "$RUNNER_TEMP/mission7-restore"
+          test "$(git rev-parse HEAD)" = "$(git -C "$RUNNER_TEMP/mission7-restore" rev-parse HEAD)"
+          test "$(git rev-parse HEAD^{tree})" = "$(git -C "$RUNNER_TEMP/mission7-restore" rev-parse HEAD^{tree})"
+          git archive --format=zip --prefix=novalton-os/ --output=recovery-export/Novalton_OS_Mission_7_Sources.zip HEAD
+          git rev-parse HEAD > recovery-export/HEAD.txt
+          git log --reverse --format='%H %s' 818491f509e9cd4a8392a02ea3228065102d5ee0..HEAD > recovery-export/COMMITS.txt
+          cp docs/23-mission-7-handoff.md recovery-export/MISSION_8_REPRISE.md
+          cd recovery-export
+          sha256sum Novalton_OS_Mission_7.bundle Novalton_OS_Mission_7_Sources.zip HEAD.txt COMMITS.txt MISSION_8_REPRISE.md > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Novalton_OS_Mission_7_${{ github.event.pull_request.head.sha || github.sha }}
+          path: recovery-export/
+          retention-days: 90
+          if-no-files-found: error

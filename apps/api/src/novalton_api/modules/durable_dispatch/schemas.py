@@ -1,5 +1,6 @@
 """Bounded trusted-operator enqueue input; never registered as a model tool."""
 
+from decimal import Decimal
 from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
@@ -16,6 +17,9 @@ class DispatchRequest(BaseModel):
     max_attempts: int = Field(default=8, ge=0, le=64)
     max_model_calls: int = Field(default=24, ge=0, le=128)
     allow_unknown_cost: bool = False
+    max_estimated_exposure: Decimal | None = Field(
+        default=None, gt=0, max_digits=20, decimal_places=10
+    )
     dependencies: tuple[UUID, ...] = Field(default=(), max_length=32)
 
     @model_validator(mode="after")
@@ -24,4 +28,6 @@ class DispatchRequest(BaseModel):
             raise ValueError("duplicate dependency")
         if self.eligible_at is not None and self.eligible_at > self.deadline:
             raise ValueError("eligibility exceeds deadline")
+        if self.max_estimated_exposure is not None and self.allow_unknown_cost:
+            raise ValueError("an estimated exposure limit requires known prices")
         return self

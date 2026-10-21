@@ -3,7 +3,8 @@
 from asyncio import Event
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+from decimal import ROUND_CEILING, Decimal
 from uuid import UUID
 
 from sqlalchemy import func, select, update
@@ -17,6 +18,7 @@ from novalton_api.modules.durable_dispatch.models import (
     TaskDispatch,
 )
 from novalton_api.modules.durable_dispatch.operator import require_active_dispatch_operator
+from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.workflows.models import WorkflowStepRun
 
 
@@ -122,26 +124,65 @@ async def require_workflow(session: AsyncSession, workflow_run_id: UUID) -> None
     await binding_for_reservation(session, workflow_run_id)
 
 
-async def reserve_model(session: AsyncSession, *, agent_run_id: UUID, price_known: bool) -> None:
+async def reserve_model(
+    session: AsyncSession,
+    *,
+    agent_run_id: UUID,
+    price_known: bool,
+    model: ModelDefinition | None = None,
+    output_tokens: int | None = None,
+) -> Decimal | None:
     workflow_run_id = await session.scalar(
         select(WorkflowStepRun.workflow_run_id).where(WorkflowStepRun.agent_run_id == agent_run_id)
     )
     if workflow_run_id is None:
         if current_claim.get() is not None:
             raise denied("dispatch_scope_mismatch")
-        return
+        return None
     row = await binding_for_reservation(session, workflow_run_id)
     if row is None:
-        return
+        return None
     if row.model_call_count >= row.max_model_calls:
         raise denied("dispatch_model_budget_exhausted")
     if not price_known and not row.allow_unknown_cost:
         raise denied("dispatch_unknown_model_cost")
+    exposure = None
+    if row.max_estimated_exposure is not None:
+        now = await database_now(session)
+        if (
+            model is None
+            or not price_known
+            or model.context_window is None
+            or model.last_verified_at is None
+            or model.last_verified_at < now - timedelta(hours=24)
+            or model.last_verified_at > now + timedelta(minutes=5)
+            or model.currency != "USD"
+        ):
+            raise denied("dispatch_exposure_unbounded")
+        assert model.input_price_per_million is not None
+        assert model.output_price_per_million is not None
+        # The initial ModelRun is reserved before the agent selects its output
+        # budget. Charge the catalog maximum (or the API's 65,536 token ceiling).
+        # This is an exposure estimate, never a provider billing guarantee.
+        output_bound = max(output_tokens or 0, model.max_output_tokens or 65_536)
+        exposure = (
+            (
+                Decimal(model.context_window) * model.input_price_per_million
+                + Decimal(output_bound) * model.output_price_per_million
+            )
+            / Decimal(1_000_000)
+        ).quantize(Decimal("0.0000000001"), rounding=ROUND_CEILING)
+        if exposure >= Decimal("9999999999"):
+            raise denied("dispatch_exposure_unbounded")
+        if row.reserved_estimated_exposure + exposure > row.max_estimated_exposure:
+            raise denied("dispatch_exposure_budget_exhausted")
+        row.reserved_estimated_exposure += exposure
     row.model_call_count += 1
     row.updated_at = await database_now(session)
     # Counter and ModelRun creation are committed by model_usage.start_run.
     # A rollback consumes neither; a crash after commit never refunds it.
     await session.flush()
+    return exposure
 
 
 async def require_effect_capacity(session: AsyncSession, workflow_run_id: UUID) -> None:

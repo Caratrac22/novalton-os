@@ -1,6 +1,7 @@
 """Scheduling evidence; workflow, provider and tool records remain execution truth."""
 
 from datetime import datetime
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import (
@@ -10,6 +11,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    Numeric,
     String,
     UniqueConstraint,
     text,
@@ -81,6 +83,13 @@ class TaskDispatch(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_dispatch_model_budget",
         ),
         CheckConstraint(
+            "(max_estimated_exposure IS NULL AND reserved_estimated_exposure >= 0) "
+            "OR (max_estimated_exposure > 0 AND reserved_estimated_exposure >= 0 "
+            "AND reserved_estimated_exposure <= max_estimated_exposure "
+            "AND NOT allow_unknown_cost)",
+            name="ck_dispatch_estimated_exposure",
+        ),
+        CheckConstraint(
             "(status = 'LEASED' AND owner IS NOT NULL AND lease_expires_at IS NOT NULL "
             "AND activation_generation IS NOT NULL) OR (status <> 'LEASED' "
             "AND owner IS NULL AND lease_expires_at IS NULL)",
@@ -125,6 +134,10 @@ class TaskDispatch(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     model_call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_model_calls: Mapped[int] = mapped_column(Integer, nullable=False)
     allow_unknown_cost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    max_estimated_exposure: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    reserved_estimated_exposure: Mapped[Decimal] = mapped_column(
+        Numeric(20, 10), nullable=False, default=Decimal(0)
+    )
     owner: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

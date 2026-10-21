@@ -24,6 +24,7 @@ from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.durable_dispatch import provisioning, service
 from novalton_api.modules.durable_dispatch.identity import (
     HumanOperator,
+    TenantOperatorMembership,
     WorkspaceOperatorPermission,
 )
 from novalton_api.modules.durable_dispatch.operator import authenticate_operator
@@ -38,6 +39,11 @@ def remove_successors(*identifiers):
         await session.execute(
             delete(WorkspaceOperatorPermission).where(
                 WorkspaceOperatorPermission.user_id.in_(identifiers)
+            )
+        )
+        await session.execute(
+            delete(TenantOperatorMembership).where(
+                TenantOperatorMembership.user_id.in_(identifiers)
             )
         )
         await session.execute(delete(HumanOperator).where(HumanOperator.id.in_(identifiers)))
@@ -212,3 +218,96 @@ def test_provisioning_revocation_fences_late_generation(scope):
     with pytest.raises(ApplicationError):
         tick(scope, provider)
     assert snapshot(scope, row.id)[0].attempt_count == 1
+
+
+def test_tenant_membership_revocation_fences_late_provider_and_is_idempotent(scope):
+    provider = QueueProvider([_manager()])
+    row, _, _ = enqueue(scope, provider)
+    entered, released = threading.Event(), threading.Event()
+    original = provider.complete
+
+    async def delayed(request):
+        entered.set()
+        assert await asyncio.to_thread(released.wait, 15)
+        return await original(request)
+
+    provider.complete = delayed
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        worker = executor.submit(tick, scope, provider)
+        assert entered.wait(15)
+        try:
+            actor = operator_for(scope)
+            assert db_call(
+                lambda session: provisioning.revoke_tenant_membership(
+                    session,
+                    operator=actor,
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    subject_id=actor.user_id,
+                )
+            )
+        finally:
+            released.set()
+        with pytest.raises(ApplicationError) as interrupted:
+            worker.result(timeout=20)
+        assert interrupted.value.status_code == 403
+    dispatch, attempts, models = snapshot(scope, row.id)
+    assert (dispatch.status, len(attempts), len(models), len(provider.calls)) == (
+        "BLOCKED",
+        1,
+        1,
+        1,
+    )
+    assert models[0].status == "SUCCEEDED"
+    with pytest.raises(ApplicationError):
+        tick(scope, provider)
+
+
+def test_membership_denies_reused_session_and_foreign_tenant(scope):
+    actor = operator_for(scope)
+
+    async def check(session):
+        await actor.require_human(
+            session,
+            "dispatch.read",
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+        )
+        await session.commit()
+        membership = await session.scalar(
+            select(TenantOperatorMembership).where(
+                TenantOperatorMembership.user_id == actor.user_id,
+                TenantOperatorMembership.tenant_id == scope.tenant_id,
+            )
+        )
+        assert membership is not None and membership.active
+        await session.commit()
+        assert await asyncio.to_thread(
+            db_call,
+            lambda other: provisioning.revoke_tenant_membership(
+                other,
+                operator=actor,
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                subject_id=actor.user_id,
+            ),
+        )
+        with pytest.raises(ApplicationError):
+            await actor.require_human(
+                session,
+                "dispatch.read",
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+            )
+        assert membership.active is False
+
+    db_call(check)
+    with pytest.raises(ApplicationError):
+        db_call(
+            lambda session: actor.require_human(
+                session,
+                "dispatch.read",
+                tenant_id=uuid4(),
+                workspace_id=scope.workspace_id,
+            )
+        )
