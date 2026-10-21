@@ -547,6 +547,7 @@ def test_revoked_activation_grant_stops_worker_claims_after_engaged_provider(sco
         active = executor.submit(tick, scope, provider)
         assert entered.wait(15)
         try:
+
             async def revoke(session):
                 await session.execute(
                     update(WorkspaceOperatorPermission)
