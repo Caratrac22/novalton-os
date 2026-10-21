@@ -22,6 +22,7 @@ from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.modules.durable_dispatch import provisioning, repository, service
 from novalton_api.modules.durable_dispatch.models import DispatchAttempt, TaskDispatch
 from novalton_api.modules.model_usage.models import ModelRun
+from novalton_api.modules.workflows.models import WorkflowStepRun
 
 pytest_plugins = ["test_durable_dispatch"]
 
@@ -531,13 +532,35 @@ def test_lost_heartbeat_preserves_one_result_while_an_independent_workflow_finis
     assert lost.value.code == "dispatch_claim_lost"
     expire(blocked.id)
     assert tick(scope, independent) is None
-    first, attempts, models = snapshot(scope, blocked.id)
-    second, completed_attempts, completed_models = snapshot(scope, finished.id)
+    first, attempts, _ = snapshot(scope, blocked.id)
+    second, completed_attempts, _ = snapshot(scope, finished.id)
+
+    async def evidence(session):
+        return list(
+            await session.execute(
+                select(WorkflowStepRun.workflow_run_id, ModelRun.status)
+                .join(ModelRun, ModelRun.agent_run_id == WorkflowStepRun.agent_run_id)
+                .where(
+                    WorkflowStepRun.workflow_run_id.in_(
+                        [blocked.workflow_run_id, finished.workflow_run_id]
+                    )
+                )
+            )
+        )
+
+    model_evidence = db_call(evidence)
+    blocked_models = [
+        status for workflow_id, status in model_evidence if workflow_id == blocked.workflow_run_id
+    ]
+    finished_models = [
+        status for workflow_id, status in model_evidence if workflow_id == finished.workflow_run_id
+    ]
     assert first.status == "BLOCKED"
-    assert len(attempts) == len(models) == len(slow.calls) == 1
-    assert models[0].status == "SUCCEEDED"
+    assert len(attempts) == len(blocked_models) == len(slow.calls) == 1
+    assert blocked_models == ["SUCCEEDED"]
     assert second.status == "DONE"
-    assert len(completed_attempts) == len(completed_models) == len(independent.calls) == 3
+    assert len(completed_attempts) == len(finished_models) == len(independent.calls) == 3
+    assert finished_models == ["SUCCEEDED"] * 3
     assert independent.calls.count("qa") == 1
     with capsys.disabled():
         print(
