@@ -34,6 +34,7 @@ from novalton_api.modules.durable_dispatch.models import (
 from novalton_api.modules.durable_dispatch.operator import (
     OperatorAuthority,
     require_active_dispatch_operator,
+    require_configured_activator,
 )
 from novalton_api.modules.durable_dispatch.schemas import DispatchRequest
 from novalton_api.modules.orchestrator import service as orchestrator_service
@@ -60,6 +61,7 @@ async def configure_workspace(
     await operator.require_human(
         session, "activation.configure", tenant_id=tenant_id, workspace_id=workspace_id
     )
+    require_configured_activator(operator)
     workspace = await get_workspace_by_tenant_and_id(
         session, tenant_id=tenant_id, workspace_id=workspace_id
     )

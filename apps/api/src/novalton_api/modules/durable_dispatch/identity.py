@@ -3,7 +3,15 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,7 +44,8 @@ class FederatedOperatorIdentity(Base):
     )
 
     user_id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), ForeignKey("human_operators.id", ondelete="RESTRICT"),
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("human_operators.id", ondelete="RESTRICT"),
         primary_key=True,
     )
     issuer: Mapped[str] = mapped_column(String(512), nullable=False)

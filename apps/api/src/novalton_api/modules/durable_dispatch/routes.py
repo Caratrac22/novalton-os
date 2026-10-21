@@ -28,7 +28,9 @@ class ActivationInput(BaseModel):
 
 
 async def verified_operator(
-    tenant_id: UUID, workspace_id: UUID, session: Session,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    session: Session,
     authorization: Annotated[str | None, Header()] = None,
 ) -> OperatorAuthority:
     if authorization is None or not authorization.startswith("Bearer "):
@@ -135,22 +137,28 @@ async def attempts(
 
 @router.get("/requests/{dispatch_id}/workflow")
 async def workflow_evidence(
-    tenant_id: UUID, workspace_id: UUID, dispatch_id: UUID,
-    session: Session, operator: Operator,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    dispatch_id: UUID,
+    session: Session,
+    operator: Operator,
 ):
     await operator.require_human(
         session, "dispatch.read", tenant_id=tenant_id, workspace_id=workspace_id
     )
     workflow_id = await session.scalar(
         select(TaskDispatch.workflow_run_id).where(
-            TaskDispatch.id == dispatch_id, TaskDispatch.tenant_id == tenant_id,
+            TaskDispatch.id == dispatch_id,
+            TaskDispatch.tenant_id == tenant_id,
             TaskDispatch.workspace_id == workspace_id,
         )
     )
     if workflow_id is None:
         raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
     return await get_operator_view(
-        session, tenant_id=tenant_id, workspace_id=workspace_id,
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
         workflow_run_id=workflow_id,
     )
 

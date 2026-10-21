@@ -202,14 +202,37 @@ class OperatorAuthority:
 
 
 def federated_operator_authority(
-    *, user: HumanOperator, issuer: str, subject: str, expires_at: datetime,
-    tenant_id: UUID, workspace_id: UUID,
+    *,
+    user: HumanOperator,
+    issuer: str,
+    subject: str,
+    expires_at: datetime,
+    tenant_id: UUID,
+    workspace_id: UUID,
 ) -> OperatorAuthority:
     """Construct only after an external signature and an exact subject binding are verified."""
     return OperatorAuthority(
-        _SEAL, "", user.label, user.id, tenant_id, workspace_id, PERMISSIONS,
-        issuer=issuer, subject=subject, expires_at=expires_at,
+        _SEAL,
+        "",
+        user.label,
+        user.id,
+        tenant_id,
+        workspace_id,
+        PERMISSIONS,
+        issuer=issuer,
+        subject=subject,
+        expires_at=expires_at,
     )
+
+
+def require_configured_activator(operator: OperatorAuthority) -> None:
+    """The bounded worker can be activated only for its configured human principal."""
+    _, _, user_id, tenant_id, workspace_id, _ = _configured()
+    if (
+        operator.user_id != user_id
+        or (operator.tenant_id, operator.workspace_id) != (tenant_id, workspace_id)
+    ):
+        raise _forbidden()
 
 
 async def require_active_dispatch_operator(
