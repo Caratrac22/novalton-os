@@ -22,7 +22,8 @@ restoring this branch in the next session.
 - A server-configured, at-most-ten-workspace allowlist gives the `/operator`
   console an explicit selector. Selecting a scope requires an Origin-checked
   POST and a successful authenticated backend read of that exact scope. Every
-  subsequent read/action remains authorized by the backend. The existing
+  subsequent read/action remains authorized by the backend. The selector only
+  renders scopes for which that session passes a backend read. The existing
   Manager/Developer/QA, ModelRun, attempt, approval and explicit resolution
   views remain in use; no authority moved into the browser.
 - OpenRouter's completion `id` is stored separately from its request header
@@ -95,6 +96,12 @@ login, 403 for cross-origin workspace mutation and 403 for an in-origin request
 without a human session; the console rendered its unavailable state. This is
 not a completed authenticated browser/API journey. Record final CI run IDs and
 artifact ID in the release report after publication.
+
+A second local HTTP smoke test used a deterministic mock API and dummy bearer
+token. It rendered a workflow list and Manager/Developer/QA detail, hid a
+foreign configured workspace, displayed unverified cost evidence and proxied
+an Origin-checked cancellation to the mock (200). This verifies the Next.js
+route wiring only; the mock did not authenticate a human or execute a workflow.
 
 Next: configure and validate an actual IdP over HTTPS, complete a browser/API
 journey with real human identity, review ID-token sign-out/revocation and
