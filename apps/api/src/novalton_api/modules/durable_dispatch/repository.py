@@ -484,3 +484,62 @@ async def finish(
     await _close(session, row, *target, post_status=status, step_run_id=step_id)
     await session.commit()
     return True
+
+
+async def reconciled_completion(
+    session: AsyncSession, claimed: DispatchClaim, result: OrchestrationResult
+) -> bool:
+    """Recognize the same terminal claim settled by a concurrent reconciler.
+
+    This never grants a claim or allows another advance. An expired, cancelled,
+    revoked or replaced generation cannot masquerade as the caller's success.
+    """
+    if (
+        result.workflow_run_id != claimed.workflow_run_id
+        or result.outcome.value != "WORKFLOW_COMPLETED"
+        or result.workflow_status.value != "COMPLETED"
+        or (claimed.lost is not None and claimed.lost.is_set())
+    ):
+        return False
+    configured = await activation(
+        session, tenant_id=claimed.tenant_id, workspace_id=claimed.workspace_id
+    )
+    if (
+        configured is None
+        or not configured.enabled
+        or configured.generation != claimed.activation_generation
+    ):
+        await session.rollback()
+        return False
+    row = await session.scalar(
+        select(TaskDispatch).where(
+            TaskDispatch.id == claimed.dispatch_id,
+            TaskDispatch.tenant_id == claimed.tenant_id,
+            TaskDispatch.workspace_id == claimed.workspace_id,
+            TaskDispatch.workflow_run_id == claimed.workflow_run_id,
+            TaskDispatch.generation == claimed.generation,
+            TaskDispatch.activation_generation == claimed.activation_generation,
+            TaskDispatch.status == "DONE",
+            TaskDispatch.stop_reason == "workflow_completed",
+        )
+    )
+    attempt = await session.scalar(
+        select(DispatchAttempt).where(
+            DispatchAttempt.dispatch_id == claimed.dispatch_id,
+            DispatchAttempt.workflow_run_id == claimed.workflow_run_id,
+            DispatchAttempt.generation == claimed.generation,
+            DispatchAttempt.owner == claimed.owner,
+            DispatchAttempt.outcome == "DONE",
+            DispatchAttempt.reason_code == "workflow_completed",
+            DispatchAttempt.post_status == "COMPLETED",
+        )
+    )
+    status = await _workflow_status(session, row) if row is not None else None
+    matched = bool(
+        row is not None
+        and attempt is not None
+        and status == "COMPLETED"
+        and result.workflow_step_run_id == attempt.workflow_step_run_id
+    )
+    await session.rollback()
+    return matched

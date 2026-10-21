@@ -298,6 +298,44 @@ def test_one_tick_reuses_advance_and_three_ticks_reach_real_qa_completion(scope)
     assert db_call(task_status) == "BACKLOG"
 
 
+def test_terminal_reconciler_settles_the_same_qa_claim_without_replay(scope, monkeypatch):
+    provider = QueueProvider([_manager(), _worker(), _qa("PASS")])
+    row, _, _ = enqueue(scope, provider, max_attempts=3, max_model_calls=3)
+    assert tick(scope, provider).outcome.value == "STEP_COMPLETED"
+    assert tick(scope, provider).outcome.value == "STEP_COMPLETED"
+    finish = repository.finish
+    terminal = {}
+
+    async def reconcile_before_finish(session, claimed, *, result=None):
+        if result is not None and result.outcome.value == "WORKFLOW_COMPLETED":
+            terminal["claim"], terminal["result"] = claimed, result
+            database = Database.from_settings(Settings.from_environment())
+            try:
+                async with database.session_factory() as other:
+                    assert (
+                        await repository.reconcile(
+                            other, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+                        )
+                        == 1
+                    )
+            finally:
+                await database.dispose()
+        return await finish(session, claimed, result=result)
+
+    monkeypatch.setattr(repository, "finish", reconcile_before_finish)
+    assert tick(scope, provider).outcome.value == "WORKFLOW_COMPLETED"
+    persisted, attempts, models = snapshot(scope, row.id)
+    assert persisted.status == "DONE" and persisted.attempt_count == 3
+    assert [attempt.outcome for attempt in attempts] == ["READY", "READY", "DONE"]
+    assert len(models) == len(provider.calls) == 3
+    assert tick(scope, provider) is None
+    assert not db_call(
+        lambda session: repository.reconciled_completion(
+            session, replace(terminal["claim"], owner=uuid4()), terminal["result"]
+        )
+    )
+
+
 def test_controlled_multi_task_loop_skips_exhausted_task_across_fresh_sessions(scope):
     provider = QueueProvider([_manager(), _worker(), _qa("PASS")])
     stopped, _, _ = enqueue(other_task(scope), provider, priority=50, max_attempts=0)
