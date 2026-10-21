@@ -8,11 +8,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from test_development_workflow import (
@@ -39,6 +40,11 @@ from novalton_api.modules.durable_dispatch.authority import (
     current_claim,
     require_workflow,
 )
+from novalton_api.modules.durable_dispatch.cost_evidence import list_cost_exposure
+from novalton_api.modules.durable_dispatch.identity import (
+    HumanOperator,
+    WorkspaceOperatorPermission,
+)
 from novalton_api.modules.durable_dispatch.models import (
     DispatchActivation,
     DispatchAttempt,
@@ -56,7 +62,7 @@ from novalton_api.modules.policy import service as policy_service
 from novalton_api.modules.policy.schemas import PolicyEffect, PolicyRuleCreate
 from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tools.models import ToolCall
-from novalton_api.modules.workflows.models import WorkflowRun
+from novalton_api.modules.workflows.models import WorkflowPlan, WorkflowRun
 from novalton_api.modules.workflows.service import create_run as create_workflow_run
 
 
@@ -79,15 +85,57 @@ _TEST_PERMISSIONS = (
 
 
 def configure_operator(scope, monkeypatch):
+    user_id = uuid5(NAMESPACE_URL, f"novalton-test-operator:{scope.workspace_id}")
+
+    async def seed(session):
+        await session.execute(
+            insert(HumanOperator)
+            .values(id=user_id, label="test-operator", active=True)
+            .on_conflict_do_nothing(index_elements=[HumanOperator.id])
+        )
+        for permission in _TEST_PERMISSIONS.split(","):
+            await session.execute(
+                insert(WorkspaceOperatorPermission)
+                .values(
+                    user_id=user_id,
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    permission=permission,
+                    active=True,
+                )
+                .on_conflict_do_nothing()
+            )
+        await session.commit()
+
+    db_call(seed)
     monkeypatch.setenv(
         "NOVALTON_DISPATCH_OPERATOR_KEY_SHA256",
         hashlib.sha256(_TEST_OPERATOR_KEY.encode()).hexdigest(),
     )
     monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_ID", "test-operator")
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_USER_ID", str(user_id))
     monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_TENANT_ID", str(scope.tenant_id))
     monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_WORKSPACE_ID", str(scope.workspace_id))
     monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_PERMISSIONS", _TEST_PERMISSIONS)
     get_settings.cache_clear()
+
+
+def cleanup_operator(scope):
+    async def cleanup(session):
+        await session.execute(
+            delete(WorkspaceOperatorPermission).where(
+                WorkspaceOperatorPermission.tenant_id == scope.tenant_id
+            )
+        )
+        await session.execute(
+            delete(HumanOperator).where(
+                HumanOperator.id
+                == uuid5(NAMESPACE_URL, f"novalton-test-operator:{scope.workspace_id}")
+            )
+        )
+        await session.commit()
+
+    db_call(cleanup)
 
 
 def operator_for(scope):
@@ -123,6 +171,17 @@ def scope(monkeypatch):
         await session.execute(delete(TaskDispatch).where(TaskDispatch.tenant_id == value.tenant_id))
         await session.execute(
             delete(DispatchActivation).where(DispatchActivation.tenant_id == value.tenant_id)
+        )
+        await session.execute(
+            delete(WorkspaceOperatorPermission).where(
+                WorkspaceOperatorPermission.tenant_id == value.tenant_id
+            )
+        )
+        await session.execute(
+            delete(HumanOperator).where(
+                HumanOperator.id
+                == uuid5(NAMESPACE_URL, f"novalton-test-operator:{value.workspace_id}")
+            )
         )
         await session.commit()
 
@@ -259,13 +318,46 @@ def test_controlled_multi_task_loop_skips_exhausted_task_across_fresh_sessions(s
     assert tick(scope, provider) is None
 
 
+def test_explicit_bounded_batch_stops_cleanly_and_resumes_independent_work(scope):
+    provider = QueueProvider([_manager(), _worker(), _qa("PASS")])
+    exhausted, _, _ = enqueue(other_task(scope), provider, priority=50, max_attempts=0)
+    active, _, _ = enqueue(scope, provider, priority=10, max_attempts=3, max_model_calls=3)
+
+    async def batch(session, stopped):
+        stop = asyncio.Event()
+        if stopped:
+            stop.set()
+        return await service.run_batch(
+            async_sessionmaker(session.bind, expire_on_commit=False),
+            registry=ProviderRegistry((provider,)),
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            max_iterations=3,
+            stop=stop,
+            lease_seconds=60,
+        )
+
+    assert db_call(lambda session: batch(session, True)) == []
+    assert snapshot(scope, active.id)[0].attempt_count == 0
+    results = db_call(lambda session: batch(session, False))
+    assert [item.outcome.value for item in results] == [
+        "STEP_COMPLETED",
+        "STEP_COMPLETED",
+        "WORKFLOW_COMPLETED",
+    ]
+    assert snapshot(scope, active.id)[0].status == "DONE"
+    assert snapshot(scope, exhausted.id)[0].status == "BLOCKED"
+    assert db_call(lambda session: batch(session, False)) == []
+    assert len(provider.calls) == 3
+
+
 def test_operator_credential_permissions_and_scope_fail_closed(scope, monkeypatch):
     with pytest.raises(ApplicationError) as wrong:
         authenticate_operator("x" * 40)
     assert wrong.value.code == "dispatch_operator_forbidden"
     with pytest.raises(ApplicationError):
         OperatorAuthority(
-            object(), "0" * 64, "forged", scope.tenant_id, scope.workspace_id, frozenset()
+            object(), "0" * 64, "forged", uuid4(), scope.tenant_id, scope.workspace_id, frozenset()
         )
     verified = operator_for(scope)
     with pytest.raises(ApplicationError) as foreign:
@@ -336,6 +428,203 @@ def test_operator_credential_permissions_and_scope_fail_closed(scope, monkeypatc
         )
         == []
     )
+
+
+def test_human_identity_and_workspace_grant_revoke_an_issued_capability(scope, monkeypatch):
+    actor = operator_for(scope)
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_USER_ID", str(uuid4()))
+    get_settings.cache_clear()
+    with pytest.raises(ApplicationError):
+        db_call(
+            lambda session: service.list_dispatches(
+                session, operator=actor, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+            )
+        )
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_USER_ID", str(actor.user_id))
+    get_settings.cache_clear()
+
+    async def revoke(session):
+        await session.execute(
+            update(WorkspaceOperatorPermission)
+            .where(
+                WorkspaceOperatorPermission.user_id == actor.user_id,
+                WorkspaceOperatorPermission.workspace_id == scope.workspace_id,
+                WorkspaceOperatorPermission.permission == "dispatch.read",
+            )
+            .values(active=False, revoked_at=func.clock_timestamp())
+        )
+        await session.commit()
+
+    db_call(revoke)
+    with pytest.raises(ApplicationError) as denied:
+        db_call(
+            lambda session: service.list_dispatches(
+                session, operator=actor, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+            )
+        )
+    assert denied.value.status_code == 403
+
+    async def disable_user(session):
+        await session.execute(
+            update(HumanOperator).where(HumanOperator.id == actor.user_id).values(active=False)
+        )
+        await session.commit()
+
+    db_call(disable_user)
+    with pytest.raises(ApplicationError):
+        db_call(
+            lambda session: service.configure_workspace(
+                session,
+                operator=actor,
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                enabled=False,
+            )
+        )
+
+
+def test_revocation_waits_for_inflight_human_decision_then_blocks_new_decisions(scope):
+    actor = operator_for(scope)
+    checked, release, revoked = threading.Event(), threading.Event(), threading.Event()
+
+    def hold_authorized_decision():
+        async def hold(session):
+            await actor.require_human(
+                session, "dispatch.read", tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+            )
+            checked.set()
+            assert await asyncio.to_thread(release.wait, 15)
+            await session.commit()
+            assert await asyncio.to_thread(revoked.wait, 15)
+            with pytest.raises(ApplicationError):
+                await actor.require_human(
+                    session,
+                    "dispatch.read",
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                )
+
+        db_call(hold)
+
+    def revoke():
+        async def change(session):
+            await session.execute(
+                update(WorkspaceOperatorPermission)
+                .where(
+                    WorkspaceOperatorPermission.user_id == actor.user_id,
+                    WorkspaceOperatorPermission.workspace_id == scope.workspace_id,
+                    WorkspaceOperatorPermission.permission == "dispatch.read",
+                )
+                .values(active=False, revoked_at=func.clock_timestamp())
+            )
+            await session.commit()
+
+        db_call(change)
+        revoked.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(hold_authorized_decision)
+        assert checked.wait(15)
+        second = executor.submit(revoke)
+        assert not revoked.wait(0.2)
+        release.set()
+        first.result(timeout=15)
+        second.result(timeout=15)
+    with pytest.raises(ApplicationError) as error:
+        db_call(
+            lambda session: service.list_dispatches(
+                session, operator=actor, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+            )
+        )
+    assert error.value.status_code == 403
+
+
+def test_revoked_activation_grant_stops_worker_claims_after_engaged_provider(scope):
+    provider = QueueProvider([_manager(), _worker()])
+    row, _, _ = enqueue(scope, provider)
+    entered, released = threading.Event(), threading.Event()
+    original = provider.complete
+
+    async def delayed(request):
+        entered.set()
+        assert await asyncio.to_thread(released.wait, 15)
+        return await original(request)
+
+    provider.complete = delayed
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        active = executor.submit(tick, scope, provider)
+        assert entered.wait(15)
+        try:
+
+            async def revoke(session):
+                await session.execute(
+                    update(WorkspaceOperatorPermission)
+                    .where(
+                        WorkspaceOperatorPermission.user_id == operator_for(scope).user_id,
+                        WorkspaceOperatorPermission.workspace_id == scope.workspace_id,
+                        WorkspaceOperatorPermission.permission == "activation.configure",
+                    )
+                    .values(active=False, revoked_at=func.clock_timestamp())
+                )
+                await session.commit()
+
+            db_call(revoke)
+        finally:
+            released.set()
+        with pytest.raises(ApplicationError) as interrupted:
+            active.result(timeout=20)
+        assert interrupted.value.status_code == 403
+
+    persisted, attempts, models = snapshot(scope, row.id)
+    assert (persisted.status, len(attempts), len(models), len(provider.calls)) == (
+        "BLOCKED",
+        1,
+        1,
+        1,
+    )
+    assert attempts[0].outcome == "BLOCKED"
+    assert models[0].status == "SUCCEEDED"
+    with pytest.raises(ApplicationError) as forbidden:
+        tick(scope, provider)
+    assert forbidden.value.status_code == 403
+    assert snapshot(scope, row.id)[0].attempt_count == 1
+    assert len(provider.calls) == 1
+
+
+def test_operator_http_boundary_authenticates_human_and_rejects_cross_workspace(scope):
+    base = f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}/dispatch"
+    with TestClient(create_app()) as client:
+        assert client.get(f"{base}/requests").status_code == 401
+        assert (
+            client.get(
+                f"{base}/requests", headers={"X-User-Id": str(operator_for(scope).user_id)}
+            ).status_code
+            == 401
+        )
+        assert (
+            client.get(
+                f"{base}/requests", headers={"Authorization": "Bearer " + "x" * 40}
+            ).status_code
+            == 403
+        )
+        headers = {"Authorization": f"Bearer {_TEST_OPERATOR_KEY}"}
+        assert client.get(f"{base}/requests", headers=headers).json() == []
+        assert (
+            client.get(
+                f"/api/v1/tenants/{scope.tenant_id}/workspaces/{uuid4()}/dispatch/requests",
+                headers=headers,
+            ).status_code
+            == 403
+        )
+        provider = QueueProvider([])
+        row, _, _ = enqueue(scope, provider)
+        response = client.get(f"{base}/requests", headers=headers)
+        assert response.status_code == 200
+        assert [item["id"] for item in response.json()] == [str(row.id)]
+        assert client.get(f"{base}/requests/{row.id}/attempts", headers=headers).json() == []
+        assert client.get(f"{base}/requests/{row.id}/cost-evidence", headers=headers).json() == []
+        cancelled = client.post(f"{base}/requests/{row.id}/cancel", headers=headers)
+        assert cancelled.status_code == 200 and cancelled.json()["status"] == "CANCELLED"
 
 
 def test_operator_read_and_repeated_cancel_leave_one_audited_fence(scope):
@@ -506,6 +795,168 @@ def test_bounded_capacity_claims_are_unique_and_lost_workers_never_replay(scope,
     assert measurement["collisions"] == 0
     with capsys.disabled():
         print("dispatch_capacity " + json.dumps(measurement, sort_keys=True), flush=True)
+
+
+@pytest.mark.parametrize("count", [50, 100, 200])
+def test_sustained_claims_with_arrivals_and_uncertain_recovery(scope, capsys, count):
+    """Queue-only PostgreSQL workload; it deliberately sends no model request."""
+
+    async def seed(session, start, size):
+        tasks = [
+            Task(project_id=scope.project_id, title=f"Load task {i}")
+            for i in range(start, start + size)
+        ]
+        session.add_all(tasks)
+        await session.flush()
+        plans = [
+            WorkflowPlan(
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                project_id=scope.project_id,
+                task_id=task.id,
+                version=1,
+                title="Synthetic claim-only plan",
+            )
+            for task in tasks
+        ]
+        session.add_all(plans)
+        await session.flush()
+        runs = [
+            WorkflowRun(
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                project_id=scope.project_id,
+                task_id=task.id,
+                workflow_plan_id=plan.id,
+                plan_version=1,
+                status="CREATED",
+            )
+            for task, plan in zip(tasks, plans, strict=True)
+        ]
+        session.add_all(runs)
+        await session.flush()
+        session.add_all(
+            [
+                TaskDispatch(
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    project_id=scope.project_id,
+                    task_id=task.id,
+                    workflow_run_id=run.id,
+                    request_key=f"load-{count}-{i}",
+                    input_fingerprint="0" * 64,
+                    priority=i % 3 - 1,
+                    eligible_at=datetime.now(UTC),
+                    deadline=datetime.now(UTC) + timedelta(hours=1),
+                    status="READY",
+                    max_attempts=1,
+                    max_model_calls=1,
+                )
+                for i, (task, run) in enumerate(zip(tasks, runs, strict=True), start=start)
+            ]
+        )
+        await session.commit()
+
+    db_call(lambda session: seed(session, 0, count - 10))
+    latencies: list[float] = []
+    identifiers: list[UUID] = []
+    guard = threading.Lock()
+    errors: list[str] = []
+
+    def worker():
+        async def run():
+            database = Database.from_settings(Settings.from_environment())
+            try:
+                until = time.monotonic() + 90
+                while time.monotonic() < until:
+                    with guard:
+                        if len(identifiers) == count:
+                            return
+                    started = time.perf_counter()
+                    async with database.session_factory() as session:
+                        item = await service.claim_next(
+                            session,
+                            tenant_id=scope.tenant_id,
+                            workspace_id=scope.workspace_id,
+                            owner=uuid4(),
+                        )
+                    if item is None:
+                        await asyncio.sleep(0.01)
+                        continue
+                    with guard:
+                        identifiers.append(item.dispatch_id)
+                        latencies.append(time.perf_counter() - started)
+                raise TimeoutError("bounded claim workload did not complete")
+            finally:
+                await database.dispose()
+
+        try:
+            asyncio.run(run())
+        except Exception as exc:
+            with guard:
+                errors.append(type(exc).__name__)
+
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(worker) for _ in range(6)]
+        time.sleep(0.02)
+        db_call(lambda session: seed(session, count - 10, 10))
+        for future in futures:
+            future.result(timeout=100)
+    elapsed = time.perf_counter() - started
+    assert errors == []
+    assert len(identifiers) == len(set(identifiers)) == count
+
+    async def expire_and_reconcile(session, only_half):
+        selected = identifiers[: count // 2] if only_half else identifiers
+        await session.execute(
+            update(TaskDispatch)
+            .where(TaskDispatch.id.in_(selected), TaskDispatch.status == "LEASED")
+            .values(lease_expires_at=func.clock_timestamp() - text("interval '1 second'"))
+        )
+        await session.commit()
+        changed = 0
+        for _ in range(20):
+            changed += await repository.reconcile(
+                session, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+            )
+        return changed
+
+    first = db_call(lambda session: expire_and_reconcile(session, True))
+    assert first == count // 2
+    second = db_call(lambda session: expire_and_reconcile(session, False))
+    assert second == count - first
+
+    async def evidence(session):
+        return list(
+            await session.execute(
+                select(TaskDispatch.status, TaskDispatch.attempt_count, DispatchAttempt.outcome)
+                .join(DispatchAttempt, DispatchAttempt.dispatch_id == TaskDispatch.id)
+                .where(TaskDispatch.tenant_id == scope.tenant_id)
+            )
+        )
+
+    assert [tuple(row) for row in db_call(evidence)] == [("BLOCKED", 1, "BLOCKED")] * count
+    assert claim(scope) is None
+    ordered = sorted(latencies)
+
+    def percentile(p):
+        return round(ordered[min(len(ordered) - 1, int((len(ordered) - 1) * p))] * 1000, 2)
+
+    measurement = {
+        "tasks": count,
+        "workers": 6,
+        "claim_elapsed_seconds": round(elapsed, 3),
+        "claim_per_second": round(count / elapsed, 2),
+        "claim_p50_ms": percentile(0.50),
+        "claim_p95_ms": percentile(0.95),
+        "claim_p99_ms": percentile(0.99),
+        "collisions": count - len(set(identifiers)),
+        "postgres_errors": len(errors),
+        "uncertain_blocked": first + second,
+    }
+    with capsys.disabled():
+        print("dispatch_sustained " + json.dumps(measurement, sort_keys=True), flush=True)
 
 
 def test_priority_aging_bounds_starvation_against_new_high_priority_work(scope):
@@ -819,6 +1270,18 @@ def test_crash_after_model_reservation_keeps_uncertain_evidence_and_never_replay
     assert attempts[0].workflow_step_run_id is not None
     recorded_step = attempts[0].workflow_step_run_id
     assert len(models) == 1 and models[0].status == "RUNNING"
+    exposure = db_call(
+        lambda session: list_cost_exposure(
+            session,
+            operator=operator_for(scope),
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            dispatch_id=row.id,
+        )
+    )
+    assert len(exposure) == 1
+    assert exposure[0].classification == "EXTERNAL_OUTCOME_UNKNOWN"
+    assert exposure[0].observed_cost is None
     assert current_claim.get() is None
     expire(row.id)
     assert tick(scope, provider) is None
@@ -952,6 +1415,16 @@ def test_unknown_model_cost_requires_explicit_operator_policy(scope, allow_unkno
         assert result.outcome.value == "STEP_COMPLETED"
         assert len(models) == len(provider.calls) == persisted.model_call_count == 1
         assert models[0].actual_cost is None
+        exposure = db_call(
+            lambda session: list_cost_exposure(
+                session,
+                operator=operator_for(scope),
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                dispatch_id=row.id,
+            )
+        )
+        assert [item.classification for item in exposure] == ["ACTUAL_COST_UNKNOWN"]
     else:
         assert result.outcome.value == "WORKFLOW_FAILED"
         assert persisted.status == "BLOCKED"
@@ -1077,6 +1550,7 @@ def test_scoped_foreign_keys_and_dependency_scope_fail_closed(scope, monkeypatch
 
         db_call(cleanup)
     finally:
+        cleanup_operator(other)
         asyncio.run(_cleanup(other))
     assert provider.calls == []
 

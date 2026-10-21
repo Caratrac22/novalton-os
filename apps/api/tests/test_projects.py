@@ -135,6 +135,8 @@ def test_project_metadata_has_workspace_scope_and_constraints() -> None:
         "task_dispatches",
         "dispatch_dependencies",
         "dispatch_attempts",
+        "human_operators",
+        "workspace_operator_permissions",
     }
     table = Base.metadata.tables["projects"]
     names = {constraint.name for constraint in table.constraints}

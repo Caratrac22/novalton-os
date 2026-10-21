@@ -1,8 +1,9 @@
 # Controlled durable task dispatch
 
-Status: controlled operator foundation, Missions 3–4. No daemon, public
-scheduling route or model-callable scheduling tool is installed. The operator
-must invoke one iteration explicitly. Live-provider acceptance is outstanding.
+Status: controlled operator foundation, Missions 3–5. No daemon or
+model-callable scheduling tool is installed. A narrow credential-authenticated
+human route controls dispatch decisions; worker execution remains a trusted
+internal entry point. Live-provider acceptance is outstanding.
 
 ## Execution and activation
 
@@ -17,23 +18,34 @@ Two independent controls are required to claim autonomous work:
 1. Server configuration `NOVALTON_DURABLE_DISPATCH_ENABLED=true` (default false).
 2. A verified operator calls `service.configure_workspace(..., enabled=True)`.
 
-These are internal Python entry points, not HTTP/agent permissions. A trusted
-adapter presents a high-entropy credential to `authenticate_operator`; the
+An operator presents a high-entropy credential to `authenticate_operator`; the
 server compares its SHA-256 digest in constant time with
 `NOVALTON_DISPATCH_OPERATOR_KEY_SHA256`. The server also requires configured
-operator ID, tenant ID, workspace ID and explicit permission names under
-`NOVALTON_DISPATCH_OPERATOR_*`. A UUID alone never authenticates the caller.
-The returned capability is rechecked at each service boundary against current
-configuration. Credential rotation needs configuration reload in each process;
-workspace activation revocation is the distributed claim fence.
+operator ID, durable user UUID, tenant ID, workspace ID and explicit permission
+names under `NOVALTON_DISPATCH_OPERATOR_*`. A UUID alone never authenticates the
+caller. Migration `20261021_0035` adds a durable human principal and explicit
+per-workspace permission rows. Each decision rechecks the active user, label and
+exact permission under shared PostgreSQL locks until commit. A concurrent
+revocation waits for an in-flight decision and bars subsequent ones. Credential
+rotation needs configuration reload in each process; workspace activation
+revocation is the distributed worker claim fence.
 
 Permissions are `activation.configure`, `dispatch.enqueue`, `dispatch.read`,
 `dispatch.cancel` and `dispatch.resolve`. Activation, enqueue, cancel and
-resolution decisions append scoped records with the verified operator identity.
+resolution decisions append scoped records with the verified user UUID.
 Every activation change increments a generation. Disabling and re-enabling a
 workspace cannot restore an old claim. Use the workspace control to revoke
 authority across running processes; an environment variable is process-local
 configuration, not a distributed revocation signal.
+
+The `/api/v1/tenants/{tenant_id}/workspaces/{workspace_id}/dispatch` routes
+accept only the configured bearer credential and recheck database membership
+through the service layer. Missing credentials and forged identity headers fail
+closed. The routes expose activation, requests, bounded attempts, cost evidence,
+cancellation and explicit fresh-workflow resolution. They do not run a provider.
+Provisioning the user and permissions is a trusted deployment task; no signup,
+password, session or grant-management route was added. TLS and credential
+custody belong to deployment.
 
 After the existing database/profile checks and Alembic migration, the operator
 can use the application's existing session and configured provider registry:
@@ -134,6 +146,11 @@ time budgets, not a monetary ceiling or an exactly-once billing promise. Existin
 output-token ceilings, finite correction limits, exact mutation approvals,
 I-042 commit proofs and I-043 publication reconciliation are unchanged.
 
+`list_cost_exposure` reports bounded ModelRun evidence: observed cost, estimate
+overrun, unknown actual cost, or uncertain external outcome. A lost response or
+FAILED/CANCELLED invocation is never classified as free. This is observation,
+not an atomic monetary reservation or a provider billing guarantee.
+
 Heartbeats and completion require the exact scoped owner/generation. A heartbeat
 never shortens an existing lease or exceeds the deadline. The default lease is
 one hour. The controlled runner can renew it during a single iteration through
@@ -142,6 +159,11 @@ lease. A failed renewal marks its in-process claim lost and bars further
 reservations. A worker crash or unknown renewal leaves persisted LEASED evidence
 that becomes BLOCKED after expiration, without replay. No permanent heartbeat
 service is started. A shorter operator-selected lease may stop a long iteration.
+
+`run_batch` is an explicit, at-most-64-iteration internal prototype. A stop
+signal prevents the next claim and lets the active tick persist its real result;
+each tick uses a fresh session, owner and optional heartbeat, and calls the
+existing `orchestrator.service.advance` once. No background service is installed.
 
 ## Recovery and human decisions
 

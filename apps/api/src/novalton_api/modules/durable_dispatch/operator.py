@@ -9,8 +9,15 @@ import hashlib
 import hmac
 from uuid import UUID
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from novalton_api.core.config import get_settings
 from novalton_api.core.exceptions import ApplicationError
+from novalton_api.modules.durable_dispatch.identity import (
+    HumanOperator,
+    WorkspaceOperatorPermission,
+)
 
 PERMISSIONS = frozenset(
     {
@@ -30,11 +37,12 @@ def _forbidden() -> ApplicationError:
     )
 
 
-def _configured() -> tuple[str, str, UUID, UUID, frozenset[str]]:
+def _configured() -> tuple[str, str, UUID, UUID, UUID, frozenset[str]]:
     settings = get_settings()
     values = (
         settings.durable_dispatch_operator_key_sha256,
         settings.durable_dispatch_operator_id,
+        settings.durable_dispatch_operator_user_id,
         settings.durable_dispatch_operator_tenant_id,
         settings.durable_dispatch_operator_workspace_id,
     )
@@ -47,22 +55,33 @@ def _configured() -> tuple[str, str, UUID, UUID, frozenset[str]]:
     )
     if not permissions or not permissions <= PERMISSIONS:
         raise _forbidden()
-    digest, actor_id, tenant_id, workspace_id = values
+    digest, actor_id, user_id, tenant_id, workspace_id = values
     assert isinstance(digest, str) and isinstance(actor_id, str)
+    assert isinstance(user_id, UUID)
     assert isinstance(tenant_id, UUID) and isinstance(workspace_id, UUID)
-    return digest, actor_id, tenant_id, workspace_id, permissions
+    return digest, actor_id, user_id, tenant_id, workspace_id, permissions
 
 
 class OperatorAuthority:
     """Opaque in-process result of successful credential verification."""
 
-    __slots__ = ("_seal", "_digest", "actor_id", "tenant_id", "workspace_id", "permissions")
+    __slots__ = (
+        "_seal",
+        "_digest",
+        "_label",
+        "user_id",
+        "actor_id",
+        "tenant_id",
+        "workspace_id",
+        "permissions",
+    )
 
     def __init__(
         self,
         seal: object,
         digest: str,
         actor_id: str,
+        user_id: UUID,
         tenant_id: UUID,
         workspace_id: UUID,
         permissions: frozenset[str],
@@ -71,23 +90,100 @@ class OperatorAuthority:
             raise _forbidden()
         self._seal = seal
         self._digest = digest
-        self.actor_id = actor_id
+        self._label = actor_id
+        self.user_id = user_id
+        self.actor_id = str(user_id)
         self.tenant_id = tenant_id
         self.workspace_id = workspace_id
         self.permissions = permissions
 
     def require(self, permission: str, *, tenant_id: UUID, workspace_id: UUID) -> None:
-        digest, actor_id, configured_tenant, configured_workspace, permissions = _configured()
+        digest, actor_id, configured_user, configured_tenant, configured_workspace, permissions = (
+            _configured()
+        )
         if (
             self._seal is not _SEAL
             or not hmac.compare_digest(self._digest, digest)
-            or self.actor_id != actor_id
+            or self._label != actor_id
+            or self.user_id != configured_user
             or (self.tenant_id, self.workspace_id) != (configured_tenant, configured_workspace)
             or self.permissions != permissions
             or (tenant_id, workspace_id) != (configured_tenant, configured_workspace)
             or permission not in permissions
         ):
             raise _forbidden()
+
+    async def require_human(
+        self, session: AsyncSession, permission: str, *, tenant_id: UUID, workspace_id: UUID
+    ) -> None:
+        """Lock persisted membership through the decision's commit.
+
+        A revocation UPDATE takes the conflicting lock. A previously issued
+        capability never outlives an inactive user or workspace permission.
+        """
+        self.require(permission, tenant_id=tenant_id, workspace_id=workspace_id)
+        user = await session.scalar(
+            select(HumanOperator)
+            .where(HumanOperator.id == self.user_id)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+        grant = await session.scalar(
+            select(WorkspaceOperatorPermission)
+            .where(
+                WorkspaceOperatorPermission.user_id == self.user_id,
+                WorkspaceOperatorPermission.tenant_id == tenant_id,
+                WorkspaceOperatorPermission.workspace_id == workspace_id,
+                WorkspaceOperatorPermission.permission == permission,
+            )
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+        if (
+            user is None
+            or not user.active
+            or user.label != self._label
+            or grant is None
+            or not grant.active
+        ):
+            raise _forbidden()
+
+
+async def require_active_dispatch_operator(
+    session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID
+) -> None:
+    """Fence new worker reservations when the activating human is revoked.
+
+    Workers have no plaintext human credential. Their configured identity and
+    activation permission are checked in the same transaction as the claim or
+    provider reservation; shared locks serialize a concurrent revocation.
+    Already engaged provider responses may still record their actual outcome.
+    """
+    _, label, user_id, configured_tenant, configured_workspace, permissions = _configured()
+    if (tenant_id, workspace_id) != (
+        configured_tenant,
+        configured_workspace,
+    ) or "activation.configure" not in permissions:
+        raise _forbidden()
+    user = await session.scalar(
+        select(HumanOperator)
+        .where(HumanOperator.id == user_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    grant = await session.scalar(
+        select(WorkspaceOperatorPermission)
+        .where(
+            WorkspaceOperatorPermission.user_id == user_id,
+            WorkspaceOperatorPermission.tenant_id == tenant_id,
+            WorkspaceOperatorPermission.workspace_id == workspace_id,
+            WorkspaceOperatorPermission.permission == "activation.configure",
+        )
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    if user is None or not user.active or user.label != label or grant is None or not grant.active:
+        raise _forbidden()
 
 
 def authenticate_operator(credential: str) -> OperatorAuthority:
@@ -96,10 +192,10 @@ def authenticate_operator(credential: str) -> OperatorAuthority:
     The plaintext credential is never retained, persisted, logged or audited.
     Rotate the configured digest to revoke previously issued capabilities.
     """
-    digest, actor_id, tenant_id, workspace_id, permissions = _configured()
+    digest, actor_id, user_id, tenant_id, workspace_id, permissions = _configured()
     if not isinstance(credential, str) or len(credential) < 32:
         raise _forbidden()
     candidate = hashlib.sha256(credential.encode("utf-8")).hexdigest()
     if not hmac.compare_digest(candidate, digest):
         raise _forbidden()
-    return OperatorAuthority(_SEAL, digest, actor_id, tenant_id, workspace_id, permissions)
+    return OperatorAuthority(_SEAL, digest, actor_id, user_id, tenant_id, workspace_id, permissions)

@@ -5,7 +5,7 @@ import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -31,7 +31,10 @@ from novalton_api.modules.durable_dispatch.models import (
     DispatchDependency,
     TaskDispatch,
 )
-from novalton_api.modules.durable_dispatch.operator import OperatorAuthority
+from novalton_api.modules.durable_dispatch.operator import (
+    OperatorAuthority,
+    require_active_dispatch_operator,
+)
 from novalton_api.modules.durable_dispatch.schemas import DispatchRequest
 from novalton_api.modules.orchestrator import service as orchestrator_service
 from novalton_api.modules.orchestrator.schemas import OrchestrationResult
@@ -54,7 +57,9 @@ async def configure_workspace(
     Every explicit change rotates activation generation, including disable then
     re-enable. An old claim can never regain authority from a new activation.
     """
-    operator.require("activation.configure", tenant_id=tenant_id, workspace_id=workspace_id)
+    await operator.require_human(
+        session, "activation.configure", tenant_id=tenant_id, workspace_id=workspace_id
+    )
     workspace = await get_workspace_by_tenant_and_id(
         session, tenant_id=tenant_id, workspace_id=workspace_id
     )
@@ -123,7 +128,9 @@ async def enqueue(
     data: DispatchRequest,
 ) -> TaskDispatch:
     """Bind a fresh explicit WorkflowRun; never create a workflow from task metadata."""
-    operator.require("dispatch.enqueue", tenant_id=tenant_id, workspace_id=workspace_id)
+    await operator.require_human(
+        session, "dispatch.enqueue", tenant_id=tenant_id, workspace_id=workspace_id
+    )
     await lock_workflow(session, data.workflow_run_id)
     run = await session.scalar(
         select(WorkflowRun)
@@ -249,7 +256,9 @@ async def list_dispatches(
     limit: int = 50,
 ) -> list[TaskDispatch]:
     """Bounded scoped observation, never a scheduling decision."""
-    operator.require("dispatch.read", tenant_id=tenant_id, workspace_id=workspace_id)
+    await operator.require_human(
+        session, "dispatch.read", tenant_id=tenant_id, workspace_id=workspace_id
+    )
     if not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
     return list(
@@ -271,7 +280,9 @@ async def list_attempts(
     dispatch_id: UUID,
     limit: int = 50,
 ) -> list[DispatchAttempt]:
-    operator.require("dispatch.read", tenant_id=tenant_id, workspace_id=workspace_id)
+    await operator.require_human(
+        session, "dispatch.read", tenant_id=tenant_id, workspace_id=workspace_id
+    )
     if not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
     row = await session.scalar(
@@ -302,7 +313,9 @@ async def cancel_dispatch(
     dispatch_id: UUID,
 ) -> TaskDispatch:
     """Cancel the actual workflow under its fence, then project queue state."""
-    operator.require("dispatch.cancel", tenant_id=tenant_id, workspace_id=workspace_id)
+    await operator.require_human(
+        session, "dispatch.cancel", tenant_id=tenant_id, workspace_id=workspace_id
+    )
     binding = await session.scalar(
         select(TaskDispatch.workflow_run_id).where(
             TaskDispatch.id == dispatch_id,
@@ -363,8 +376,12 @@ async def resolve_blocked(
     data: DispatchRequest,
 ) -> TaskDispatch:
     """Explicit decision to use a new workflow; the old attempt is never replayed."""
-    operator.require("dispatch.resolve", tenant_id=tenant_id, workspace_id=workspace_id)
-    operator.require("dispatch.enqueue", tenant_id=tenant_id, workspace_id=workspace_id)
+    await operator.require_human(
+        session, "dispatch.resolve", tenant_id=tenant_id, workspace_id=workspace_id
+    )
+    await operator.require_human(
+        session, "dispatch.enqueue", tenant_id=tenant_id, workspace_id=workspace_id
+    )
     previous = await session.scalar(
         select(TaskDispatch).where(
             TaskDispatch.id == blocked_id,
@@ -442,6 +459,7 @@ async def claim_next(
 ) -> DispatchClaim | None:
     if not get_settings().durable_dispatch_enabled:
         raise denied("dispatch_disabled")
+    await require_active_dispatch_operator(session, tenant_id=tenant_id, workspace_id=workspace_id)
     return await repository.claim(
         session,
         tenant_id=tenant_id,
@@ -542,3 +560,43 @@ async def run_once(
         if renewal is not None:
             await renewal
         current_claim.reset(token)
+
+
+async def run_batch(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    registry: ProviderRegistry,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    max_iterations: int,
+    stop: asyncio.Event,
+    lease_seconds: int = 3600,
+) -> list[OrchestrationResult]:
+    """Explicit bounded multi-tick runner, with no daemon or automatic retry.
+
+    Each iteration has a fresh session and claim owner. A stop request prevents
+    the next claim but lets the current iteration persist its actual result.
+    An idle tick ends the batch; a later invocation may observe human decisions
+    or newly enqueued independent work. Attempts, not this in-memory list, are
+    the durable execution record.
+    """
+    if not 1 <= max_iterations <= 64:
+        raise ValueError("max_iterations must be between 1 and 64")
+    results: list[OrchestrationResult] = []
+    for _ in range(max_iterations):
+        if stop.is_set():
+            break
+        async with session_factory() as session:
+            result = await run_once(
+                session,
+                registry=registry,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                owner=uuid4(),
+                lease_seconds=lease_seconds,
+                heartbeat_session_factory=session_factory,
+            )
+        if result is None:
+            break
+        results.append(result)
+    return results

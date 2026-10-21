@@ -16,6 +16,7 @@ from novalton_api.modules.durable_dispatch.models import (
     DispatchAttempt,
     TaskDispatch,
 )
+from novalton_api.modules.durable_dispatch.operator import require_active_dispatch_operator
 from novalton_api.modules.workflows.models import WorkflowStepRun
 
 
@@ -67,6 +68,7 @@ async def binding_for_reservation(
             raise denied("dispatch_scope_mismatch")
         return None
     identifier, tenant_id, workspace_id = scope
+    await require_active_dispatch_operator(session, tenant_id=tenant_id, workspace_id=workspace_id)
     activation = await session.scalar(
         select(DispatchActivation)
         .where(
