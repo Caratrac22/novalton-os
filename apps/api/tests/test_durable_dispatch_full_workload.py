@@ -10,9 +10,8 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
-
 from test_development_workflow import _manager, _qa, _worker
-from test_durable_dispatch import db_call, enqueue, other_task, scope  # noqa: F401
+from test_durable_dispatch import db_call, enqueue, other_task
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
@@ -21,6 +20,8 @@ from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.modules.durable_dispatch import service
 from novalton_api.modules.durable_dispatch.models import DispatchAttempt, TaskDispatch
 from novalton_api.modules.model_usage.models import ModelRun
+
+pytest_plugins = ["test_durable_dispatch"]
 
 
 class RoleProvider:

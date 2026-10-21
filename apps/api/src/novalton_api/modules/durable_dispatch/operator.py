@@ -114,7 +114,13 @@ class OperatorAuthority:
             raise _forbidden()
 
     async def require_human(
-        self, session: AsyncSession, permission: str, *, tenant_id: UUID, workspace_id: UUID
+        self,
+        session: AsyncSession,
+        permission: str,
+        *,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        exclusive: bool = False,
     ) -> None:
         """Lock persisted membership through the decision's commit.
 
@@ -125,7 +131,7 @@ class OperatorAuthority:
         user = await session.scalar(
             select(HumanOperator)
             .where(HumanOperator.id == self.user_id)
-            .with_for_update(read=True)
+            .with_for_update(read=not exclusive)
             .execution_options(populate_existing=True)
         )
         grant = await session.scalar(
@@ -136,7 +142,7 @@ class OperatorAuthority:
                 WorkspaceOperatorPermission.workspace_id == workspace_id,
                 WorkspaceOperatorPermission.permission == permission,
             )
-            .with_for_update(read=True)
+            .with_for_update(read=not exclusive)
             .execution_options(populate_existing=True)
         )
         if (
