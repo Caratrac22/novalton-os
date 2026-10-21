@@ -34,15 +34,15 @@ class Base(DeclarativeBase):
 from novalton_api.modules.agents.models import AgentDefinition, AgentRun  # noqa: E402, F401
 from novalton_api.modules.approvals.models import ApprovalRequest  # noqa: E402, F401
 from novalton_api.modules.audit.models import AuditRecord  # noqa: E402, F401
+from novalton_api.modules.durable_dispatch.identity import (  # noqa: E402, F401, I001
+    HumanOperator,
+    WorkspaceOperatorPermission,
+)
 from novalton_api.modules.durable_dispatch.models import (  # noqa: E402, F401
     DispatchActivation,
     DispatchAttempt,
     DispatchDependency,
     TaskDispatch,
-)
-from novalton_api.modules.durable_dispatch.identity import (  # noqa: E402, F401, I001
-    HumanOperator,
-    WorkspaceOperatorPermission,
 )
 from novalton_api.modules.git_changesets.models import GitCommitAction  # noqa: E402, F401
 from novalton_api.modules.github_publications.models import (  # noqa: E402, I001

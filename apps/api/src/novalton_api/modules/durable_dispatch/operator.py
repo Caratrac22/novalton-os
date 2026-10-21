@@ -65,7 +65,16 @@ def _configured() -> tuple[str, str, UUID, UUID, UUID, frozenset[str]]:
 class OperatorAuthority:
     """Opaque in-process result of successful credential verification."""
 
-    __slots__ = ("_seal", "_digest", "_label", "user_id", "actor_id", "tenant_id", "workspace_id", "permissions")
+    __slots__ = (
+        "_seal",
+        "_digest",
+        "_label",
+        "user_id",
+        "actor_id",
+        "tenant_id",
+        "workspace_id",
+        "permissions",
+    )
 
     def __init__(
         self,
@@ -89,7 +98,9 @@ class OperatorAuthority:
         self.permissions = permissions
 
     def require(self, permission: str, *, tenant_id: UUID, workspace_id: UUID) -> None:
-        digest, actor_id, configured_user, configured_tenant, configured_workspace, permissions = _configured()
+        digest, actor_id, configured_user, configured_tenant, configured_workspace, permissions = (
+            _configured()
+        )
         if (
             self._seal is not _SEAL
             or not hmac.compare_digest(self._digest, digest)
@@ -124,7 +135,13 @@ class OperatorAuthority:
             )
             .with_for_update(read=True)
         )
-        if user is None or not user.active or user.label != self._label or grant is None or not grant.active:
+        if (
+            user is None
+            or not user.active
+            or user.label != self._label
+            or grant is None
+            or not grant.active
+        ):
             raise _forbidden()
 
 

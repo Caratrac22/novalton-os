@@ -61,7 +61,7 @@ from novalton_api.modules.policy import service as policy_service
 from novalton_api.modules.policy.schemas import PolicyEffect, PolicyRuleCreate
 from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tools.models import ToolCall
-from novalton_api.modules.workflows.models import WorkflowRun
+from novalton_api.modules.workflows.models import WorkflowPlan, WorkflowRun
 from novalton_api.modules.workflows.service import create_run as create_workflow_run
 
 
@@ -128,7 +128,8 @@ def cleanup_operator(scope):
         )
         await session.execute(
             delete(HumanOperator).where(
-                HumanOperator.id == uuid5(NAMESPACE_URL, f"novalton-test-operator:{scope.workspace_id}")
+                HumanOperator.id
+                == uuid5(NAMESPACE_URL, f"novalton-test-operator:{scope.workspace_id}")
             )
         )
         await session.commit()
@@ -177,7 +178,8 @@ def scope(monkeypatch):
         )
         await session.execute(
             delete(HumanOperator).where(
-                HumanOperator.id == uuid5(NAMESPACE_URL, f"novalton-test-operator:{value.workspace_id}")
+                HumanOperator.id
+                == uuid5(NAMESPACE_URL, f"novalton-test-operator:{value.workspace_id}")
             )
         )
         await session.commit()
@@ -427,6 +429,7 @@ def test_human_identity_and_workspace_grant_revoke_an_issued_capability(scope, m
             )
         )
     assert denied.value.status_code == 403
+
     async def disable_user(session):
         await session.execute(
             update(HumanOperator).where(HumanOperator.id == actor.user_id).values(active=False)
@@ -662,6 +665,168 @@ def test_bounded_capacity_claims_are_unique_and_lost_workers_never_replay(scope,
     assert measurement["collisions"] == 0
     with capsys.disabled():
         print("dispatch_capacity " + json.dumps(measurement, sort_keys=True), flush=True)
+
+
+@pytest.mark.parametrize("count", [50, 100, 200])
+def test_sustained_claims_with_arrivals_and_uncertain_recovery(scope, capsys, count):
+    """Queue-only PostgreSQL workload; it deliberately sends no model request."""
+
+    async def seed(session, start, size):
+        tasks = [
+            Task(project_id=scope.project_id, title=f"Load task {i}")
+            for i in range(start, start + size)
+        ]
+        session.add_all(tasks)
+        await session.flush()
+        plans = [
+            WorkflowPlan(
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                project_id=scope.project_id,
+                task_id=task.id,
+                version=1,
+                title="Synthetic claim-only plan",
+            )
+            for task in tasks
+        ]
+        session.add_all(plans)
+        await session.flush()
+        runs = [
+            WorkflowRun(
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                project_id=scope.project_id,
+                task_id=task.id,
+                workflow_plan_id=plan.id,
+                plan_version=1,
+                status="CREATED",
+            )
+            for task, plan in zip(tasks, plans, strict=True)
+        ]
+        session.add_all(runs)
+        await session.flush()
+        session.add_all(
+            [
+                TaskDispatch(
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    project_id=scope.project_id,
+                    task_id=task.id,
+                    workflow_run_id=run.id,
+                    request_key=f"load-{count}-{i}",
+                    input_fingerprint="0" * 64,
+                    priority=i % 3 - 1,
+                    eligible_at=datetime.now(UTC),
+                    deadline=datetime.now(UTC) + timedelta(hours=1),
+                    status="READY",
+                    max_attempts=1,
+                    max_model_calls=1,
+                )
+                for i, (task, run) in enumerate(zip(tasks, runs, strict=True), start=start)
+            ]
+        )
+        await session.commit()
+
+    db_call(lambda session: seed(session, 0, count - 10))
+    latencies: list[float] = []
+    identifiers: list[UUID] = []
+    guard = threading.Lock()
+    errors: list[str] = []
+
+    def worker():
+        async def run():
+            database = Database.from_settings(Settings.from_environment())
+            try:
+                until = time.monotonic() + 90
+                while time.monotonic() < until:
+                    with guard:
+                        if len(identifiers) == count:
+                            return
+                    started = time.perf_counter()
+                    async with database.session_factory() as session:
+                        item = await service.claim_next(
+                            session,
+                            tenant_id=scope.tenant_id,
+                            workspace_id=scope.workspace_id,
+                            owner=uuid4(),
+                        )
+                    if item is None:
+                        await asyncio.sleep(0.01)
+                        continue
+                    with guard:
+                        identifiers.append(item.dispatch_id)
+                        latencies.append(time.perf_counter() - started)
+                raise TimeoutError("bounded claim workload did not complete")
+            finally:
+                await database.dispose()
+
+        try:
+            asyncio.run(run())
+        except Exception as exc:
+            with guard:
+                errors.append(type(exc).__name__)
+
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(worker) for _ in range(6)]
+        time.sleep(0.02)
+        db_call(lambda session: seed(session, count - 10, 10))
+        for future in futures:
+            future.result(timeout=100)
+    elapsed = time.perf_counter() - started
+    assert errors == []
+    assert len(identifiers) == len(set(identifiers)) == count
+
+    async def expire_and_reconcile(session, only_half):
+        selected = identifiers[: count // 2] if only_half else identifiers
+        await session.execute(
+            update(TaskDispatch)
+            .where(TaskDispatch.id.in_(selected), TaskDispatch.status == "LEASED")
+            .values(lease_expires_at=func.clock_timestamp() - text("interval '1 second'"))
+        )
+        await session.commit()
+        changed = 0
+        for _ in range(20):
+            changed += await repository.reconcile(
+                session, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+            )
+        return changed
+
+    first = db_call(lambda session: expire_and_reconcile(session, True))
+    assert first == count // 2
+    second = db_call(lambda session: expire_and_reconcile(session, False))
+    assert second == count - first
+
+    async def evidence(session):
+        return list(
+            await session.execute(
+                select(TaskDispatch.status, TaskDispatch.attempt_count, DispatchAttempt.outcome)
+                .join(DispatchAttempt, DispatchAttempt.dispatch_id == TaskDispatch.id)
+                .where(TaskDispatch.tenant_id == scope.tenant_id)
+            )
+        )
+
+    assert [tuple(row) for row in db_call(evidence)] == [("BLOCKED", 1, "BLOCKED")] * count
+    assert claim(scope) is None
+    ordered = sorted(latencies)
+
+    def percentile(p):
+        return round(ordered[min(len(ordered) - 1, int((len(ordered) - 1) * p))] * 1000, 2)
+
+    measurement = {
+        "tasks": count,
+        "workers": 6,
+        "claim_elapsed_seconds": round(elapsed, 3),
+        "claim_per_second": round(count / elapsed, 2),
+        "claim_p50_ms": percentile(0.50),
+        "claim_p95_ms": percentile(0.95),
+        "claim_p99_ms": percentile(0.99),
+        "collisions": count - len(set(identifiers)),
+        "postgres_errors": len(errors),
+        "uncertain_blocked": first + second,
+    }
+    with capsys.disabled():
+        print("dispatch_sustained " + json.dumps(measurement, sort_keys=True), flush=True)
 
 
 def test_priority_aging_bounds_starvation_against_new_high_priority_work(scope):
