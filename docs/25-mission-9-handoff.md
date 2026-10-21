@@ -39,6 +39,10 @@ restoring this branch in the next session.
 - Migration `20261021_0039` adds the generation identity and observation table,
   and guards downgrades containing evidence. The audit updated `certifi` and
   `urllib3` in the API lockfile to patched versions.
+- A bounded two-worker test loses a heartbeat during Manager generation. A
+  second workflow completes Manager, Developer and QA while the first provider
+  response remains outstanding. The late result is persisted, its claim becomes
+  blocked after expiration, and no step is replayed.
 
 ## Configuration and safety
 
@@ -83,8 +87,9 @@ signature, origin checks and the existing console controls. Build, lint,
 typecheck and npm audit passed locally. Three isolated Python JWKS/metadata
 tests passed; local PostgreSQL is unavailable, so CI must prove the new
 migration, row-lock concurrency, full API suite and I-044A/B. `next start`
-could not open a listener in this restricted container (`uv_interface_addresses`
-error); no live browser session was observed. Record final CI run IDs and
+could not be reached across the container network namespace, even after a
+test-only shim for the `uv_interface_addresses` error; no live browser session
+was observed. Record final CI run IDs and
 artifact ID in the release report after publication.
 
 Next: configure and validate an actual IdP over HTTPS, complete a browser/API
