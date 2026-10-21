@@ -1,6 +1,7 @@
 """Bounded cost observations; estimates never claim an enforceable spend ceiling."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -17,10 +18,15 @@ from novalton_api.modules.workflows.models import WorkflowStepRun
 @dataclass(frozen=True)
 class CostExposure:
     model_run_id: UUID
+    model_definition_id: UUID | None
     status: str
     classification: str
     estimated_cost: Decimal | None
-    observed_cost: Decimal | None
+    catalog_priced_usage: Decimal | None
+    reserved_estimated_exposure: Decimal | None
+    price_verified_at_snapshot: datetime | None
+    input_price_per_million_snapshot: Decimal | None
+    output_price_per_million_snapshot: Decimal | None
     currency: str | None
 
 
@@ -29,13 +35,23 @@ def _classification(run: ModelRun) -> str:
         return "EXTERNAL_OUTCOME_UNKNOWN"
     if run.status != "SUCCEEDED":
         return "EXTERNAL_COST_UNCERTAIN"
+    if (
+        run.provider_resolved_model_id is not None
+        and run.provider_resolved_model_id != run.provider_model_id
+    ):
+        return "CATALOG_MODEL_MISMATCH_COST_UNCERTAIN"
     if run.actual_cost is None:
-        return "ACTUAL_COST_UNKNOWN"
+        return "CATALOG_PRICED_USAGE_UNKNOWN"
+    if (
+        run.reserved_estimated_exposure is not None
+        and run.actual_cost > run.reserved_estimated_exposure
+    ):
+        return "RESERVED_ESTIMATE_EXCEEDED"
     if run.estimated_cost is None:
-        return "RECONCILED_UNESTIMATED"
+        return "CATALOG_PRICED_UNESTIMATED"
     if run.actual_cost > run.estimated_cost:
-        return "ESTIMATE_EXCEEDED"
-    return "RECONCILED"
+        return "CATALOG_ESTIMATE_EXCEEDED"
+    return "CATALOG_PRICED_USAGE"
 
 
 async def list_cost_exposure(
@@ -80,10 +96,15 @@ async def list_cost_exposure(
     return [
         CostExposure(
             model_run_id=run.id,
+            model_definition_id=run.model_definition_id,
             status=run.status,
             classification=_classification(run),
             estimated_cost=run.estimated_cost,
-            observed_cost=run.actual_cost,
+            catalog_priced_usage=run.actual_cost,
+            reserved_estimated_exposure=run.reserved_estimated_exposure,
+            price_verified_at_snapshot=run.price_verified_at_snapshot,
+            input_price_per_million_snapshot=run.input_price_per_million_snapshot,
+            output_price_per_million_snapshot=run.output_price_per_million_snapshot,
             currency=run.currency,
         )
         for run in runs

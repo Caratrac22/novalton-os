@@ -136,6 +136,7 @@ def test_project_metadata_has_workspace_scope_and_constraints() -> None:
         "dispatch_dependencies",
         "dispatch_attempts",
         "human_operators",
+        "tenant_operator_memberships",
         "workspace_operator_permissions",
     }
     table = Base.metadata.tables["projects"]

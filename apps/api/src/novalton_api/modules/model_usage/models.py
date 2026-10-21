@@ -143,6 +143,10 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_model_runs_estimated_cost_non_negative",
         ),
         CheckConstraint(
+            "reserved_estimated_exposure IS NULL OR reserved_estimated_exposure >= 0",
+            name="ck_model_runs_reserved_exposure",
+        ),
+        CheckConstraint(
             "actual_cost IS NULL OR actual_cost >= 0", name="ck_model_runs_actual_cost_non_negative"
         ),
         CheckConstraint(
@@ -270,6 +274,8 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     output_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     estimated_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    reserved_estimated_exposure: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    price_verified_at_snapshot: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     actual_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
     input_price_per_million_snapshot: Mapped[Decimal | None] = mapped_column(
         Numeric(20, 10), nullable=True

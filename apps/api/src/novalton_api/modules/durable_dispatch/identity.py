@@ -21,6 +21,35 @@ class HumanOperator(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
+class TenantOperatorMembership(Base):
+    """Explicit human membership; workspace grants narrow its authority."""
+
+    __tablename__ = "tenant_operator_memberships"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('OWNER','ADMIN','MEMBER','VIEWER')", name="ck_operator_membership_role"
+        ),
+        CheckConstraint(
+            "(active AND revoked_at IS NULL) OR (NOT active AND revoked_at IS NOT NULL)",
+            name="ck_operator_membership_revocation",
+        ),
+    )
+
+    user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("human_operators.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class WorkspaceOperatorPermission(Base):
     __tablename__ = "workspace_operator_permissions"
     __table_args__ = (

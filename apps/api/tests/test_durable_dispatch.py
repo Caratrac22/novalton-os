@@ -8,6 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
@@ -43,6 +44,7 @@ from novalton_api.modules.durable_dispatch.authority import (
 from novalton_api.modules.durable_dispatch.cost_evidence import list_cost_exposure
 from novalton_api.modules.durable_dispatch.identity import (
     HumanOperator,
+    TenantOperatorMembership,
     WorkspaceOperatorPermission,
 )
 from novalton_api.modules.durable_dispatch.models import (
@@ -93,6 +95,11 @@ def configure_operator(scope, monkeypatch):
             .values(id=user_id, label="test-operator", active=True)
             .on_conflict_do_nothing(index_elements=[HumanOperator.id])
         )
+        await session.execute(
+            insert(TenantOperatorMembership)
+            .values(user_id=user_id, tenant_id=scope.tenant_id, role="MEMBER", active=True)
+            .on_conflict_do_nothing()
+        )
         for permission in _TEST_PERMISSIONS.split(","):
             await session.execute(
                 insert(WorkspaceOperatorPermission)
@@ -125,6 +132,11 @@ def cleanup_operator(scope):
         await session.execute(
             delete(WorkspaceOperatorPermission).where(
                 WorkspaceOperatorPermission.tenant_id == scope.tenant_id
+            )
+        )
+        await session.execute(
+            delete(TenantOperatorMembership).where(
+                TenantOperatorMembership.tenant_id == scope.tenant_id
             )
         )
         await session.execute(
@@ -175,6 +187,11 @@ def scope(monkeypatch):
         await session.execute(
             delete(WorkspaceOperatorPermission).where(
                 WorkspaceOperatorPermission.tenant_id == value.tenant_id
+            )
+        )
+        await session.execute(
+            delete(TenantOperatorMembership).where(
+                TenantOperatorMembership.tenant_id == value.tenant_id
             )
         )
         await session.execute(
@@ -1319,7 +1336,7 @@ def test_crash_after_model_reservation_keeps_uncertain_evidence_and_never_replay
     )
     assert len(exposure) == 1
     assert exposure[0].classification == "EXTERNAL_OUTCOME_UNKNOWN"
-    assert exposure[0].observed_cost is None
+    assert exposure[0].catalog_priced_usage is None
     assert current_claim.get() is None
     expire(row.id)
     assert tick(scope, provider) is None
@@ -1462,11 +1479,132 @@ def test_unknown_model_cost_requires_explicit_operator_policy(scope, allow_unkno
                 dispatch_id=row.id,
             )
         )
-        assert [item.classification for item in exposure] == ["ACTUAL_COST_UNKNOWN"]
+        assert [item.classification for item in exposure] == ["CATALOG_PRICED_USAGE_UNKNOWN"]
     else:
         assert result.outcome.value == "WORKFLOW_FAILED"
         assert persisted.status == "BLOCKED"
         assert models == provider.calls == []
+
+
+def test_estimated_exposure_is_reserved_and_never_refunded_on_crash(scope):
+    class WorkerLost(BaseException):
+        pass
+
+    async def price(session):
+        await session.execute(
+            update(ModelDefinition)
+            .where(ModelDefinition.id == scope.model_id)
+            .values(last_verified_at=datetime.now(UTC))
+        )
+        await session.commit()
+
+    db_call(price)
+    provider = QueueProvider([])
+    row, _, _ = enqueue(scope, provider, max_estimated_exposure=Decimal("0.20"))
+
+    async def lost(request):
+        provider.calls.append(request)
+        raise WorkerLost()
+
+    provider.complete = lost
+    with pytest.raises(WorkerLost):
+        tick(scope, provider)
+    dispatch, _, models = snapshot(scope, row.id)
+    assert dispatch.reserved_estimated_exposure == Decimal("0.1935360000")
+    assert dispatch.model_call_count == 1
+    assert len(models) == 1 and models[0].status == "RUNNING"
+    assert models[0].reserved_estimated_exposure == dispatch.reserved_estimated_exposure
+    assert models[0].price_verified_at_snapshot is not None
+    expire(row.id)
+    assert tick(scope, provider) is None
+    assert snapshot(scope, row.id)[0].reserved_estimated_exposure == Decimal("0.1935360000")
+    assert len(provider.calls) == 1
+
+
+def test_estimated_exposure_refuses_stale_tariff_before_provider(scope):
+    provider = QueueProvider([_manager()])
+    row, _, _ = enqueue(scope, provider, max_estimated_exposure=Decimal("1"))
+    result = tick(scope, provider)
+    assert result.outcome.value == "WORKFLOW_FAILED"
+    persisted, _, models = snapshot(scope, row.id)
+    assert persisted.status == "BLOCKED"
+    assert persisted.reserved_estimated_exposure == 0
+    assert provider.calls == models == []
+
+
+def test_estimated_exposure_limit_rejects_next_step_without_refunding_first(scope):
+    async def price(session):
+        await session.execute(
+            update(ModelDefinition)
+            .where(ModelDefinition.id == scope.model_id)
+            .values(last_verified_at=datetime.now(UTC))
+        )
+        await session.commit()
+
+    db_call(price)
+    provider = QueueProvider([_manager(), _worker()])
+    row, _, _ = enqueue(scope, provider, max_estimated_exposure=Decimal("0.20"))
+    assert tick(scope, provider).outcome.value == "STEP_COMPLETED"
+    assert tick(scope, provider).outcome.value == "WORKFLOW_FAILED"
+    persisted, _, models = snapshot(scope, row.id)
+    assert persisted.status == "BLOCKED"
+    assert persisted.model_call_count == len(models) == len(provider.calls) == 1
+    assert persisted.reserved_estimated_exposure == Decimal("0.1935360000")
+    assert models[0].actual_cost is not None
+    assert tick(scope, provider) is None
+
+
+def test_estimated_exposure_downgrade_keeps_configured_budget(scope):
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    row, _, _ = enqueue(scope, QueueProvider([]), max_estimated_exposure=Decimal("1"))
+    config = Config(Path(__file__).parents[1] / "alembic.ini")
+    with pytest.raises(RuntimeError, match="estimated_exposure_downgrade_has_history"):
+        command.downgrade(config, "20261021_0036")
+
+    async def retained(session):
+        version = await session.scalar(text("SELECT version_num FROM alembic_version"))
+        dispatch = await session.get(TaskDispatch, row.id)
+        return version, dispatch.max_estimated_exposure
+
+    assert db_call(retained) == ("20261021_0037", Decimal("1"))
+
+
+def test_concurrent_workers_reserve_estimated_exposure_once(scope):
+    async def price(session):
+        await session.execute(
+            update(ModelDefinition)
+            .where(ModelDefinition.id == scope.model_id)
+            .values(last_verified_at=datetime.now(UTC))
+        )
+        await session.commit()
+
+    db_call(price)
+    provider = QueueProvider([_manager()])
+    row, _, _ = enqueue(scope, provider, max_estimated_exposure=Decimal("0.20"))
+    entered, released = threading.Event(), threading.Event()
+    original = provider.complete
+
+    async def delayed(request):
+        entered.set()
+        assert await asyncio.to_thread(released.wait, 15)
+        return await original(request)
+
+    provider.complete = delayed
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(tick, scope, provider)
+        assert entered.wait(15)
+        try:
+            assert executor.submit(tick, scope, provider).result(timeout=15) is None
+        finally:
+            released.set()
+        assert first.result(timeout=20).outcome.value == "STEP_COMPLETED"
+    persisted, attempts, models = snapshot(scope, row.id)
+    assert persisted.reserved_estimated_exposure == Decimal("0.1935360000")
+    assert persisted.model_call_count == len(attempts) == len(models) == len(provider.calls) == 1
 
 
 def test_global_switch_and_workspace_activation_are_both_required(scope, monkeypatch):

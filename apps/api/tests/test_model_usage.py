@@ -182,6 +182,33 @@ def test_missing_usage_stays_null_and_does_not_fabricate_actual_cost(scope: Scop
     assert completed.estimated_cost == Decimal("0.0100000000")
 
 
+def test_different_resolved_model_keeps_usage_but_has_unknown_catalog_cost(scope: Scope) -> None:
+    run = asyncio.run(_start(scope))
+
+    async def complete() -> ModelRun:
+        database = Database.from_settings(Settings())
+        try:
+            async with database.session_factory() as session:
+                return await service.mark_succeeded(
+                    session,
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    model_run_id=run.id,
+                    result=_result(
+                        model_id=run.provider_model_id,
+                        provider_resolved_model_id="different-priced-model",
+                    ),
+                )
+        finally:
+            await database.dispose()
+
+    completed = asyncio.run(complete())
+    assert (completed.input_tokens, completed.output_tokens) == (100, 20)
+    assert completed.provider_resolved_model_id == "different-priced-model"
+    assert completed.actual_cost is None
+    assert completed.estimated_cost == Decimal("0.0100000000")
+
+
 def test_bounded_contract_diagnostics_are_persisted_and_exposed(scope: Scope) -> None:
     run = asyncio.run(
         _start(

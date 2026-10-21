@@ -12,6 +12,7 @@ from novalton_api.modules.audit.service import append_record
 from novalton_api.modules.durable_dispatch.authority import database_now, denied
 from novalton_api.modules.durable_dispatch.identity import (
     HumanOperator,
+    TenantOperatorMembership,
     WorkspaceOperatorPermission,
 )
 from novalton_api.modules.durable_dispatch.operator import PERMISSIONS, OperatorAuthority
@@ -90,6 +91,14 @@ async def rotate_operator(
             revoked_count += 1
     successor = HumanOperator(id=successor_id, label=successor_label, active=True)
     session.add(successor)
+    session.add(
+        TenantOperatorMembership(
+            user_id=successor_id,
+            tenant_id=tenant_id,
+            role="MEMBER",
+            active=True,
+        )
+    )
     session.add_all(
         WorkspaceOperatorPermission(
             user_id=successor_id,
@@ -173,6 +182,59 @@ async def revoke_permission(
             actor_id=operator.actor_id,
             outcome="success",
             metadata={"subject_id": str(subject_id), "permission": permission},
+        ),
+        commit=False,
+    )
+    await session.commit()
+    return True
+
+
+async def revoke_tenant_membership(
+    session: AsyncSession,
+    *,
+    operator: OperatorAuthority,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    subject_id: UUID,
+) -> bool:
+    """Fence all of a human's workspaces in this tenant at the next reservation.
+
+    A provider call already committed to ModelRun may record its eventual result,
+    while its subsequent continuation must recheck the membership.
+    """
+    await operator.require_human(
+        session,
+        "activation.configure",
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        exclusive=True,
+    )
+    membership = await session.scalar(
+        select(TenantOperatorMembership)
+        .where(
+            TenantOperatorMembership.user_id == subject_id,
+            TenantOperatorMembership.tenant_id == tenant_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if membership is None:
+        raise denied("dispatch_operator_membership_missing")
+    if not membership.active:
+        await session.commit()
+        return False
+    membership.active = False
+    membership.revoked_at = await database_now(session)
+    await append_record(
+        session,
+        data=AuditRecordCreate(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            action="dispatch.operator.membership.revoke",
+            actor_type="local_user",
+            actor_id=operator.actor_id,
+            outcome="success",
+            metadata={"subject_id": str(subject_id)},
         ),
         commit=False,
     )

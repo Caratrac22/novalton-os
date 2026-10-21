@@ -47,6 +47,8 @@ def _record(row) -> dict[str, object]:
         "generation": row.generation,
         "attempt_count": row.attempt_count,
         "model_call_count": row.model_call_count,
+        "max_estimated_exposure": row.max_estimated_exposure,
+        "reserved_estimated_exposure": row.reserved_estimated_exposure,
         "stop_reason": row.stop_reason,
     }
 
@@ -123,10 +125,16 @@ async def costs(
     return [
         {
             "model_run_id": item.model_run_id,
+            "model_definition_id": item.model_definition_id,
             "status": item.status,
             "classification": item.classification,
             "estimated_cost": item.estimated_cost,
-            "observed_cost": item.observed_cost,
+            "catalog_priced_usage": item.catalog_priced_usage,
+            "reserved_estimated_exposure": item.reserved_estimated_exposure,
+            "price_verified_at_snapshot": item.price_verified_at_snapshot,
+            "input_price_per_million_snapshot": item.input_price_per_million_snapshot,
+            "output_price_per_million_snapshot": item.output_price_per_million_snapshot,
+            "provider_billing_verified": False,
             "currency": item.currency,
         }
         for item in await list_cost_exposure(

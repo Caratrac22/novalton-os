@@ -204,6 +204,7 @@ async def enqueue(
         max_attempts=data.max_attempts,
         max_model_calls=data.max_model_calls,
         allow_unknown_cost=data.allow_unknown_cost,
+        max_estimated_exposure=data.max_estimated_exposure,
     )
     session.add(row)
     try:
@@ -236,6 +237,9 @@ async def enqueue(
                     "max_attempts": row.max_attempts,
                     "max_model_calls": row.max_model_calls,
                     "allow_unknown_cost": row.allow_unknown_cost,
+                    "max_estimated_exposure": str(row.max_estimated_exposure)
+                    if row.max_estimated_exposure is not None
+                    else None,
                 },
             ),
             commit=False,

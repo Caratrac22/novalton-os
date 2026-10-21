@@ -11,14 +11,14 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select
 from test_development_workflow import _manager, _qa, _worker
-from test_durable_dispatch import db_call, enqueue, other_task
+from test_durable_dispatch import db_call, enqueue, operator_for, other_task, snapshot, tick
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.contracts import GenerationRequest, GenerationResult
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
-from novalton_api.modules.durable_dispatch import service
+from novalton_api.modules.durable_dispatch import provisioning, service
 from novalton_api.modules.durable_dispatch.models import DispatchAttempt, TaskDispatch
 from novalton_api.modules.model_usage.models import ModelRun
 
@@ -55,6 +55,55 @@ class RoleProvider:
             total_tokens=15,
             duration_ms=1,
         )
+
+
+@pytest.mark.parametrize("step_index", [0, 1, 2])
+def test_membership_revocation_during_each_role_preserves_late_model_evidence(scope, step_index):
+    provider = RoleProvider()
+    row, _, _ = enqueue(scope, provider, max_attempts=3, max_model_calls=3)
+    for _ in range(step_index):
+        assert tick(scope, provider).outcome.value == "STEP_COMPLETED"
+    entered, released = threading.Event(), threading.Event()
+    complete = provider.complete
+
+    async def delayed(request):
+        entered.set()
+        assert await asyncio.to_thread(released.wait, 15)
+        return await complete(request)
+
+    provider.complete = delayed
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        active = executor.submit(tick, scope, provider)
+        assert entered.wait(15)
+        try:
+            actor = operator_for(scope)
+            assert db_call(
+                lambda session: provisioning.revoke_tenant_membership(
+                    session,
+                    operator=actor,
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    subject_id=actor.user_id,
+                )
+            )
+        finally:
+            released.set()
+        with pytest.raises(ApplicationError) as interrupted:
+            active.result(timeout=20)
+        assert interrupted.value.status_code == 403
+    dispatch, attempts, models = snapshot(scope, row.id)
+    assert dispatch.status == "BLOCKED"
+    assert (
+        dispatch.attempt_count
+        == len(attempts)
+        == len(models)
+        == len(provider.calls)
+        == step_index + 1
+    )
+    assert all(model.status == "SUCCEEDED" for model in models)
+    assert provider.calls == ["manager", "developer", "qa"][: step_index + 1]
+    with pytest.raises(ApplicationError):
+        tick(scope, provider)
 
 
 @pytest.mark.parametrize("count", [10, 25, 50])
@@ -166,3 +215,125 @@ def test_complete_workflows_with_six_workers(scope, capsys, count):
     }
     with capsys.disabled():
         print("dispatch_complete " + json.dumps(measurement, sort_keys=True), flush=True)
+
+
+def test_progressive_complete_workflows_with_mixed_generation_latency(scope, capsys):
+    """Bounded arrival stream; measure completed workflows, including queue time."""
+    provider = RoleProvider()
+    complete = provider.complete
+
+    async def delayed(request):
+        # Deterministic short and long local generations, never a paid provider.
+        await asyncio.sleep(0.003 if len(provider.calls) % 3 else 0.025)
+        return await complete(request)
+
+    provider.complete = delayed
+    registry = ProviderRegistry((provider,))
+    count = 12
+    rows = []
+    completed = set()
+    errors = []
+    lock = threading.Lock()
+    feeding = threading.Event()
+    feeding.set()
+
+    def worker():
+        async def execute():
+            database = Database.from_settings(Settings.from_environment())
+            try:
+                deadline = time.monotonic() + 120
+                while time.monotonic() < deadline:
+                    with lock:
+                        if not feeding.is_set() and len(completed) == count:
+                            return
+                    async with database.session_factory() as session:
+                        result = await service.run_once(
+                            session,
+                            registry=registry,
+                            tenant_id=scope.tenant_id,
+                            workspace_id=scope.workspace_id,
+                            owner=uuid4(),
+                        )
+                    if result is None:
+                        await asyncio.sleep(0.01)
+                    elif result.outcome.value == "WORKFLOW_COMPLETED":
+                        with lock:
+                            completed.add(result.workflow_run_id)
+                raise TimeoutError("progressive workflow stream did not finish")
+            finally:
+                await database.dispose()
+
+        try:
+            asyncio.run(execute())
+        except Exception as exc:
+            with lock:
+                errors.append(exc.code if isinstance(exc, ApplicationError) else type(exc).__name__)
+
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(worker) for _ in range(4)]
+        for index in range(count):
+            task_scope = scope if index == 0 else other_task(scope)
+            row, _, _ = enqueue(
+                task_scope,
+                provider,
+                priority=index % 3 - 1,
+                max_attempts=3,
+                max_model_calls=3,
+            )
+            rows.append(row)
+            time.sleep(0.03)
+        feeding.clear()
+        for future in futures:
+            future.result(timeout=125)
+    elapsed = time.perf_counter() - started
+    assert errors == []
+    assert len(completed) == count
+
+    async def evidence(session):
+        return list(
+            await session.execute(
+                select(
+                    TaskDispatch.id,
+                    TaskDispatch.status,
+                    TaskDispatch.created_at,
+                    func.max(DispatchAttempt.completed_at),
+                    func.count(DispatchAttempt.id),
+                )
+                .join(DispatchAttempt, DispatchAttempt.dispatch_id == TaskDispatch.id)
+                .where(TaskDispatch.id.in_([row.id for row in rows]))
+                .group_by(TaskDispatch.id)
+            )
+        )
+
+    records = db_call(evidence)
+    assert len(records) == count
+    assert all(status == "DONE" and attempts == 3 for _, status, _, _, attempts in records)
+    assert len(provider.calls) == count * 3
+    latencies = sorted(
+        (finished - created).total_seconds() for _, _, created, finished, _ in records
+    )
+
+    def percentile(frac):
+        return round(latencies[min(count - 1, int((count - 1) * frac))], 3)
+
+    with capsys.disabled():
+        print(
+            "dispatch_progressive "
+            + json.dumps(
+                {
+                    "complete_workflows": count,
+                    "workers": 4,
+                    "elapsed_seconds": round(elapsed, 3),
+                    "completed_per_second": round(count / elapsed, 2),
+                    "end_to_end_p50_seconds": round(median(latencies), 3),
+                    "end_to_end_p95_seconds": percentile(0.95),
+                    "end_to_end_p99_seconds": percentile(0.99),
+                    "model_runs": len(provider.calls),
+                    "errors": len(errors),
+                    "arrival_interval_seconds": 0.03,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )

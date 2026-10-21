@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.context import get_correlation_id
@@ -12,7 +13,7 @@ from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.contracts import GenerationResult
 from novalton_api.infrastructure.providers.errors import ProviderFailure
 from novalton_api.modules.durable_dispatch.authority import reserve_model
-from novalton_api.modules.model_catalog.repository import get_model
+from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_usage import repository
 from novalton_api.modules.model_usage.models import ModelRun
 from novalton_api.modules.model_usage.schemas import (
@@ -58,7 +59,12 @@ async def start_run(
         session, tenant_id=tenant_id, workspace_id=workspace_id, project_id=data.project_id
     )
     model = (
-        await get_model(session, model_id=data.model_definition_id)
+        await session.scalar(
+            select(ModelDefinition)
+            .where(ModelDefinition.id == data.model_definition_id)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
         if data.model_definition_id
         else None
     )
@@ -81,9 +87,11 @@ async def start_run(
         await require_agent_workflow(
             session, tenant_id=tenant_id, workspace_id=workspace_id, agent_run_id=data.agent_run_id
         )
-        await reserve_model(
+        reserved_exposure = await reserve_model(
             session,
             agent_run_id=data.agent_run_id,
+            model=model,
+            output_tokens=data.execution_max_output_tokens,
             price_known=(
                 model is not None
                 and model.input_price_per_million is not None
@@ -123,6 +131,8 @@ async def start_run(
         status=ModelRunStatus.RUNNING.value,
         correlation_id=get_correlation_id(),
         estimated_cost=data.estimated_cost,
+        reserved_estimated_exposure=reserved_exposure if data.agent_run_id else None,
+        price_verified_at_snapshot=model.last_verified_at if model is not None else None,
         input_price_per_million_snapshot=(
             model.input_price_per_million if model is not None else None
         ),
@@ -181,6 +191,13 @@ async def set_execution_diagnostics(
 
 
 def _actual_cost(run: ModelRun, result: GenerationResult) -> Decimal | None:
+    if (
+        result.provider_resolved_model_id is not None
+        and result.provider_resolved_model_id != run.provider_model_id
+    ):
+        # A different resolved model may have a different tariff. Preserve
+        # the usage tokens but leave the catalog-derived amount unknown.
+        return None
     if result.input_tokens is None or result.output_tokens is None:
         return None
     if (

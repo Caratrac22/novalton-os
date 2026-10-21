@@ -16,6 +16,7 @@ from novalton_api.core.config import get_settings
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.modules.durable_dispatch.identity import (
     HumanOperator,
+    TenantOperatorMembership,
     WorkspaceOperatorPermission,
 )
 
@@ -134,6 +135,15 @@ class OperatorAuthority:
             .with_for_update(read=not exclusive)
             .execution_options(populate_existing=True)
         )
+        membership = await session.scalar(
+            select(TenantOperatorMembership)
+            .where(
+                TenantOperatorMembership.user_id == self.user_id,
+                TenantOperatorMembership.tenant_id == tenant_id,
+            )
+            .with_for_update(read=not exclusive)
+            .execution_options(populate_existing=True)
+        )
         grant = await session.scalar(
             select(WorkspaceOperatorPermission)
             .where(
@@ -149,6 +159,8 @@ class OperatorAuthority:
             user is None
             or not user.active
             or user.label != self._label
+            or membership is None
+            or not membership.active
             or grant is None
             or not grant.active
         ):
@@ -177,6 +189,15 @@ async def require_active_dispatch_operator(
         .with_for_update(read=True)
         .execution_options(populate_existing=True)
     )
+    membership = await session.scalar(
+        select(TenantOperatorMembership)
+        .where(
+            TenantOperatorMembership.user_id == user_id,
+            TenantOperatorMembership.tenant_id == tenant_id,
+        )
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
     grant = await session.scalar(
         select(WorkspaceOperatorPermission)
         .where(
@@ -188,7 +209,15 @@ async def require_active_dispatch_operator(
         .with_for_update(read=True)
         .execution_options(populate_existing=True)
     )
-    if user is None or not user.active or user.label != label or grant is None or not grant.active:
+    if (
+        user is None
+        or not user.active
+        or user.label != label
+        or membership is None
+        or not membership.active
+        or grant is None
+        or not grant.active
+    ):
         raise _forbidden()
 
 
