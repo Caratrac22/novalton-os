@@ -1,6 +1,7 @@
 """Issuer-pinned JWKS rotation, unknown-key throttling and signature enforcement."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 import jwt
@@ -91,3 +92,26 @@ def test_jwks_rejects_malformed_or_unsigned_keys(monkeypatch):
             await oidc_keys.signing_key(issuer=ISSUER, jwks_uri=URI, token="not.a.jwt")
 
     asyncio.run(run())
+
+
+def test_concurrent_cold_jwks_fetch_works_across_event_loops(monkeypatch):
+    key = _key()
+    token = _token(key, "concurrent")
+    calls = []
+
+    async def fetch(uri):
+        calls.append(uri)
+        await asyncio.sleep(0.05)
+        return {"concurrent": key.public_key()}
+
+    monkeypatch.setattr(oidc_keys, "_fetch", fetch)
+    monkeypatch.setattr(oidc_keys, "_cached_uri", None)
+    monkeypatch.setattr(oidc_keys, "_fetching_uris", set())
+
+    def verify():
+        resolved = asyncio.run(oidc_keys.signing_key(issuer=ISSUER, jwks_uri=URI, token=token))
+        return jwt.decode(token, resolved, algorithms=["RS256"], audience="operator")["sub"]
+
+    with ThreadPoolExecutor(max_workers=6) as workers:
+        assert list(workers.map(lambda _: verify(), range(6))) == ["human"] * 6
+    assert calls == [URI]

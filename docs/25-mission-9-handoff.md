@@ -18,7 +18,8 @@ restoring this branch in the next session.
   for every request. An optional same-origin HTTPS JWKS URI permits bounded
   rotation instead of the original pinned PEM; exactly one key source is
   configured. The public key cache expires in 60 seconds; unknown keys refresh
-  at most once in five seconds.
+  at most once in five seconds. Concurrent cold lookups across event loops
+  share one in-flight issuer fetch without holding a lock across network I/O.
 - A server-configured, at-most-ten-workspace allowlist gives the `/operator`
   console an explicit selector. Selecting a scope requires an Origin-checked
   POST and a successful authenticated backend read of that exact scope. Every
