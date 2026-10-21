@@ -867,6 +867,35 @@ async def test_timeout_is_classified_without_retry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_interrupted_response_stream_closes_and_never_retries() -> None:
+    calls = 0
+    closed = False
+
+    class Interrupted(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"choices":['
+            raise httpx.ReadError("private upstream fragment")
+
+        async def aclose(self):
+            nonlocal closed
+            closed = True
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, stream=Interrupted())
+
+    async with OpenAICompatibleProvider(
+        config(), transport=httpx.MockTransport(handler)
+    ) as provider:
+        with pytest.raises(ProviderError) as error:
+            await provider.complete(request())
+    assert error.value.failure == ProviderFailure.TRANSIENT
+    assert "private upstream fragment" not in str(error.value)
+    assert closed and calls == 1
+
+
+@pytest.mark.asyncio
 async def test_malformed_and_refusal_responses_are_classified() -> None:
     responses = iter(
         [

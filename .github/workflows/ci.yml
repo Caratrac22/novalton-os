@@ -92,7 +92,7 @@ jobs:
       - run: npm audit --audit-level=high
   recovery-export:
     name: Verified Git recovery export
-    if: github.event_name == 'pull_request' && github.head_ref == 'feature/mission4-operator-dispatch'
+    if: github.event_name == 'pull_request' && github.head_ref == 'feature/mission5-identity-capacity'
     needs: [backend, frontend]
     runs-on: ubuntu-latest
     steps:
@@ -106,26 +106,26 @@ jobs:
         run: |
           set -euo pipefail
           mkdir recovery-export
-          git branch mission4-export HEAD
-          git bundle create recovery-export/Novalton_OS_Mission_4.bundle refs/heads/mission4-export
-          git bundle verify recovery-export/Novalton_OS_Mission_4.bundle
-          git clone --quiet --branch mission4-export recovery-export/Novalton_OS_Mission_4.bundle "$RUNNER_TEMP/mission4-restore"
-          test "$(git rev-parse HEAD)" = "$(git -C "$RUNNER_TEMP/mission4-restore" rev-parse HEAD)"
-          test "$(git rev-parse HEAD^{tree})" = "$(git -C "$RUNNER_TEMP/mission4-restore" rev-parse HEAD^{tree})"
-          git archive --format=zip --prefix=novalton-os/ --output=recovery-export/Novalton_OS_Mission_4_Sources.zip HEAD
+          git branch mission5-export HEAD
+          git bundle create recovery-export/Novalton_OS_Mission_5.bundle refs/heads/mission5-export
+          git bundle verify recovery-export/Novalton_OS_Mission_5.bundle
+          git clone --quiet --branch mission5-export recovery-export/Novalton_OS_Mission_5.bundle "$RUNNER_TEMP/mission5-restore"
+          test "$(git rev-parse HEAD)" = "$(git -C "$RUNNER_TEMP/mission5-restore" rev-parse HEAD)"
+          test "$(git rev-parse HEAD^{tree})" = "$(git -C "$RUNNER_TEMP/mission5-restore" rev-parse HEAD^{tree})"
+          git archive --format=zip --prefix=novalton-os/ --output=recovery-export/Novalton_OS_Mission_5_Sources.zip HEAD
           git rev-parse HEAD > recovery-export/HEAD.txt
-          git log --reverse --format='%H %s' 57de4a40bdab4735a747c2af8baf518f86a3d367..HEAD > recovery-export/COMMITS.txt
-          if test -f docs/20-mission-4-handoff.md; then
-            cp docs/20-mission-4-handoff.md recovery-export/MISSION_5_REPRISE.md
+          git log --reverse --format='%H %s' 997bc8a0584e654199db8e672433380b180128b9..HEAD > recovery-export/COMMITS.txt
+          if test -f docs/21-mission-5-handoff.md; then
+            cp docs/21-mission-5-handoff.md recovery-export/MISSION_6_REPRISE.md
           fi
           cd recovery-export
-          sha256sum Novalton_OS_Mission_4.bundle Novalton_OS_Mission_4_Sources.zip HEAD.txt COMMITS.txt > SHA256SUMS
-          if test -f MISSION_5_REPRISE.md; then
-            sha256sum MISSION_5_REPRISE.md >> SHA256SUMS
+          sha256sum Novalton_OS_Mission_5.bundle Novalton_OS_Mission_5_Sources.zip HEAD.txt COMMITS.txt > SHA256SUMS
+          if test -f MISSION_6_REPRISE.md; then
+            sha256sum MISSION_6_REPRISE.md >> SHA256SUMS
           fi
       - uses: actions/upload-artifact@v4
         with:
-          name: Novalton_OS_Mission_4_${{ github.event.pull_request.head.sha || github.sha }}
+          name: Novalton_OS_Mission_5_${{ github.event.pull_request.head.sha || github.sha }}
           path: recovery-export/
           retention-days: 90
           if-no-files-found: error

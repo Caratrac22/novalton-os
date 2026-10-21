@@ -36,6 +36,7 @@ from novalton_api.main import create_app
 from novalton_api.modules.approvals.models import ApprovalRequest
 from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.durable_dispatch import repository, service
+from novalton_api.modules.durable_dispatch.cost_evidence import list_cost_exposure
 from novalton_api.modules.durable_dispatch.authority import (
     current_claim,
     require_workflow,
@@ -317,6 +318,37 @@ def test_controlled_multi_task_loop_skips_exhausted_task_across_fresh_sessions(s
     assert tick(scope, provider) is None
 
 
+def test_explicit_bounded_batch_stops_cleanly_and_resumes_independent_work(scope):
+    provider = QueueProvider([_manager(), _worker(), _qa("PASS")])
+    exhausted, _, _ = enqueue(other_task(scope), provider, priority=50, max_attempts=0)
+    active, _, _ = enqueue(scope, provider, priority=10, max_attempts=3, max_model_calls=3)
+
+    async def batch(session, stopped):
+        stop = asyncio.Event()
+        if stopped:
+            stop.set()
+        return await service.run_batch(
+            async_sessionmaker(session.bind, expire_on_commit=False),
+            registry=ProviderRegistry((provider,)),
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            max_iterations=3,
+            stop=stop,
+            lease_seconds=60,
+        )
+
+    assert db_call(lambda session: batch(session, True)) == []
+    assert snapshot(scope, active.id)[0].attempt_count == 0
+    results = db_call(lambda session: batch(session, False))
+    assert [item.outcome.value for item in results] == [
+        "STEP_COMPLETED", "STEP_COMPLETED", "WORKFLOW_COMPLETED"
+    ]
+    assert snapshot(scope, active.id)[0].status == "DONE"
+    assert snapshot(scope, exhausted.id)[0].status == "BLOCKED"
+    assert db_call(lambda session: batch(session, False)) == []
+    assert len(provider.calls) == 3
+
+
 def test_operator_credential_permissions_and_scope_fail_closed(scope, monkeypatch):
     with pytest.raises(ApplicationError) as wrong:
         authenticate_operator("x" * 40)
@@ -495,6 +527,33 @@ def test_revocation_waits_for_inflight_human_decision_then_blocks_new_decisions(
             )
         )
     assert error.value.status_code == 403
+
+
+def test_operator_http_boundary_authenticates_human_and_rejects_cross_workspace(scope):
+    base = f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}/dispatch"
+    with TestClient(create_app()) as client:
+        assert client.get(f"{base}/requests").status_code == 401
+        assert client.get(
+            f"{base}/requests", headers={"X-User-Id": str(operator_for(scope).user_id)}
+        ).status_code == 401
+        assert client.get(
+            f"{base}/requests", headers={"Authorization": "Bearer " + "x" * 40}
+        ).status_code == 403
+        headers = {"Authorization": f"Bearer {_TEST_OPERATOR_KEY}"}
+        assert client.get(f"{base}/requests", headers=headers).json() == []
+        assert client.get(
+            f"/api/v1/tenants/{scope.tenant_id}/workspaces/{uuid4()}/dispatch/requests",
+            headers=headers,
+        ).status_code == 403
+        provider = QueueProvider([])
+        row, _, _ = enqueue(scope, provider)
+        response = client.get(f"{base}/requests", headers=headers)
+        assert response.status_code == 200
+        assert [item["id"] for item in response.json()] == [str(row.id)]
+        assert client.get(f"{base}/requests/{row.id}/attempts", headers=headers).json() == []
+        assert client.get(f"{base}/requests/{row.id}/cost-evidence", headers=headers).json() == []
+        cancelled = client.post(f"{base}/requests/{row.id}/cancel", headers=headers)
+        assert cancelled.status_code == 200 and cancelled.json()["status"] == "CANCELLED"
 
 
 def test_operator_read_and_repeated_cancel_leave_one_audited_fence(scope):
@@ -1140,6 +1199,18 @@ def test_crash_after_model_reservation_keeps_uncertain_evidence_and_never_replay
     assert attempts[0].workflow_step_run_id is not None
     recorded_step = attempts[0].workflow_step_run_id
     assert len(models) == 1 and models[0].status == "RUNNING"
+    exposure = db_call(
+        lambda session: list_cost_exposure(
+            session,
+            operator=operator_for(scope),
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            dispatch_id=row.id,
+        )
+    )
+    assert len(exposure) == 1
+    assert exposure[0].classification == "EXTERNAL_OUTCOME_UNKNOWN"
+    assert exposure[0].observed_cost is None
     assert current_claim.get() is None
     expire(row.id)
     assert tick(scope, provider) is None
@@ -1273,6 +1344,16 @@ def test_unknown_model_cost_requires_explicit_operator_policy(scope, allow_unkno
         assert result.outcome.value == "STEP_COMPLETED"
         assert len(models) == len(provider.calls) == persisted.model_call_count == 1
         assert models[0].actual_cost is None
+        exposure = db_call(
+            lambda session: list_cost_exposure(
+                session,
+                operator=operator_for(scope),
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                dispatch_id=row.id,
+            )
+        )
+        assert [item.classification for item in exposure] == ["ACTUAL_COST_UNKNOWN"]
     else:
         assert result.outcome.value == "WORKFLOW_FAILED"
         assert persisted.status == "BLOCKED"

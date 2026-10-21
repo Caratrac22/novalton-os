@@ -5,7 +5,7 @@ import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -556,3 +556,43 @@ async def run_once(
         if renewal is not None:
             await renewal
         current_claim.reset(token)
+
+
+async def run_batch(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    registry: ProviderRegistry,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    max_iterations: int,
+    stop: asyncio.Event,
+    lease_seconds: int = 3600,
+) -> list[OrchestrationResult]:
+    """Explicit bounded multi-tick runner, with no daemon or automatic retry.
+
+    Each iteration has a fresh session and claim owner. A stop request prevents
+    the next claim but lets the current iteration persist its actual result.
+    An idle tick ends the batch; a later invocation may observe human decisions
+    or newly enqueued independent work. Attempts, not this in-memory list, are
+    the durable execution record.
+    """
+    if not 1 <= max_iterations <= 64:
+        raise ValueError("max_iterations must be between 1 and 64")
+    results: list[OrchestrationResult] = []
+    for _ in range(max_iterations):
+        if stop.is_set():
+            break
+        async with session_factory() as session:
+            result = await run_once(
+                session,
+                registry=registry,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                owner=uuid4(),
+                lease_seconds=lease_seconds,
+                heartbeat_session_factory=session_factory,
+            )
+        if result is None:
+            break
+        results.append(result)
+    return results
