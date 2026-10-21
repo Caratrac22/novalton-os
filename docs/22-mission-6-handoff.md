@@ -35,12 +35,22 @@ and I-044 checks before treating the branch as validated.
 
 ## Evidence and limits
 
-Read the final CI job's `dispatch_complete` lines for measured throughput and
-p50/p95/p99 end-to-end latency. The provider is deterministic and local; these
-numbers measure real workflow and database transitions, not external model
-latency, sustained production fairness or an SLA. Existing tests separately
-cover priority aging, dependencies, waiting humans, cancellation, heartbeat
-loss, uncertainty and restart without replay.
+I-044A/B run `39603244992` passed 840 API tests over 51 files on disposable
+PostgreSQL 16, including this bounded workload. Its `dispatch_complete` lines
+reported:
+
+| Complete workflows | Six-worker elapsed | Completed/s | End-to-end p50 | p95 | p99 | ModelRuns | Errors |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | 4.154 s | 2.41 | 3.249 s | 4.793 s | 4.793 s | 30 | 0 |
+| 25 | 11.521 s | 2.17 | 10.009 s | 11.968 s | 11.970 s | 75 | 0 |
+| 50 | 21.549 s | 2.32 | 16.840 s | 22.444 s | 22.642 s | 150 | 0 |
+
+The provider is deterministic and local; these numbers measure actual
+workflow and database transitions, not external model latency, sustained
+production fairness or an SLA. Setup of each workflow is outside the worker
+elapsed time, while the end-to-end latency begins at dispatch creation.
+Existing tests separately cover priority aging, dependencies, waiting humans,
+cancellation, heartbeat loss, uncertainty and restart without replay.
 
 Issue #70's general SaaS membership and authentication provider remain separate
 from this deliberately narrow operator credential. There is no password/session
