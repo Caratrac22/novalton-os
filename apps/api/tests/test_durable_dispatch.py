@@ -304,15 +304,20 @@ def test_terminal_reconciler_settles_the_same_qa_claim_without_replay(scope, mon
     assert tick(scope, provider).outcome.value == "STEP_COMPLETED"
     assert tick(scope, provider).outcome.value == "STEP_COMPLETED"
     finish = repository.finish
+    terminal = {}
 
     async def reconcile_before_finish(session, claimed, *, result=None):
         if result is not None and result.outcome.value == "WORKFLOW_COMPLETED":
+            terminal["claim"], terminal["result"] = claimed, result
             database = Database.from_settings(Settings.from_environment())
             try:
                 async with database.session_factory() as other:
-                    assert await repository.reconcile(
-                        other, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
-                    ) == 1
+                    assert (
+                        await repository.reconcile(
+                            other, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+                        )
+                        == 1
+                    )
             finally:
                 await database.dispose()
         return await finish(session, claimed, result=result)
@@ -324,6 +329,11 @@ def test_terminal_reconciler_settles_the_same_qa_claim_without_replay(scope, mon
     assert [attempt.outcome for attempt in attempts] == ["READY", "READY", "DONE"]
     assert len(models) == len(provider.calls) == 3
     assert tick(scope, provider) is None
+    assert not db_call(
+        lambda session: repository.reconciled_completion(
+            session, replace(terminal["claim"], owner=uuid4()), terminal["result"]
+        )
+    )
 
 
 def test_controlled_multi_task_loop_skips_exhausted_task_across_fresh_sessions(scope):
