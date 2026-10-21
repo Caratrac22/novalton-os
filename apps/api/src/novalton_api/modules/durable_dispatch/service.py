@@ -553,7 +553,8 @@ async def run_once(
         finished = await repository.finish(session, claimed, result=result)
         if not finished:
             await repository.reconcile(session, tenant_id=tenant_id, workspace_id=workspace_id)
-            raise denied("dispatch_claim_lost")
+            if not await repository.reconciled_completion(session, claimed, result):
+                raise denied("dispatch_claim_lost")
         return result
     finally:
         stopped.set()

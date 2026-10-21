@@ -13,6 +13,11 @@ and I-044 checks before treating the branch as validated.
   cases use six concurrent workers. The test counts completed workflows and
   ModelRuns and measures end-to-end latency separately from claim throughput.
   There is no simulated human approval in these success cases.
+- The first concurrent run exposed a terminal reconciliation race: another
+  worker could persist DONE for the QA claim before its owner finalized it.
+  The runner now recognizes completion only with the same dispatch generation,
+  owner, step, terminal attempt and completed workflow. Other lost claims still
+  fail closed. A deterministic regression forces this ordering.
 - A trusted internal provisioning service rotates a scoped operator to a fresh
   durable UUID. It validates the current credential-backed human and all
   delegated grants under exclusive PostgreSQL locks, provisions the successor,
