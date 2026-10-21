@@ -20,8 +20,28 @@ export function getWorkspaceScope(): WorkspaceScope {
   return { tenantId, workspaceId };
 }
 
-export function scopedApiPath(suffix: string): string {
-  const { tenantId, workspaceId } = getWorkspaceScope();
+export function operatorWorkspaceScopes(): WorkspaceScope[] {
+  const fallback = getWorkspaceScope();
+  const configured = process.env.NOVALTON_OPERATOR_WORKSPACE_SCOPES;
+  if (!configured) return [fallback];
+  const entries = configured.split(",");
+  if (entries.length < 1 || entries.length > 10) throw new Error("Invalid operator workspace configuration");
+  const scopes = entries.map((entry) => {
+    const [tenantId, workspaceId, extra] = entry.trim().split(":");
+    if (extra || !UUID_PATTERN.test(tenantId) || !UUID_PATTERN.test(workspaceId)) throw new Error("Invalid operator workspace configuration");
+    return { tenantId, workspaceId };
+  });
+  if (new Set(scopes.map((scope) => scope.workspaceId)).size !== scopes.length) throw new Error("Duplicate operator workspace");
+  return scopes;
+}
+
+export function selectedOperatorScope(workspaceId: string | undefined): WorkspaceScope {
+  const scopes = operatorWorkspaceScopes();
+  return scopes.find((scope) => scope.workspaceId === workspaceId) ?? scopes[0];
+}
+
+export function scopedApiPath(suffix: string, scope = getWorkspaceScope()): string {
+  const { tenantId, workspaceId } = scope;
   const base = `/api/v1/tenants/${tenantId}/workspaces/${workspaceId}`;
   return suffix ? `${base}/${suffix.replace(/^\/+/, "")}` : base;
 }

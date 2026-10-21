@@ -316,6 +316,7 @@ class GenerationResult(BaseModel):
     output_tokens: int | None = Field(default=None, ge=0)
     total_tokens: int | None = Field(default=None, ge=0)
     provider_request_id: str | None = Field(default=None, min_length=1, max_length=128)
+    provider_generation_id: str | None = Field(default=None, min_length=1, max_length=128)
     duration_ms: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")

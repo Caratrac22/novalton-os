@@ -180,7 +180,12 @@ async def costs(
             "input_price_per_million_snapshot": item.input_price_per_million_snapshot,
             "output_price_per_million_snapshot": item.output_price_per_million_snapshot,
             "provider_billing_verified": False,
-            "provider_billing_status": "BILLING_UNVERIFIED",
+            "provider_billing_status": "PROVIDER_REPORTED_USAGE"
+            if item.provider_reported_cost is not None
+            else "BILLING_UNVERIFIED",
+            "provider_generation_id": item.provider_generation_id,
+            "provider_reported_cost": item.provider_reported_cost,
+            "provider_reported_at": item.provider_reported_at,
             "currency": item.currency,
         }
         for item in await list_cost_exposure(

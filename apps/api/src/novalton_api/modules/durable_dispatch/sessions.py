@@ -13,6 +13,7 @@ from novalton_api.modules.durable_dispatch.identity import (
     FederatedOperatorIdentity,
     HumanOperator,
 )
+from novalton_api.modules.durable_dispatch.oidc_keys import signing_key
 from novalton_api.modules.durable_dispatch.operator import (
     OperatorAuthority,
     federated_operator_authority,
@@ -34,22 +35,30 @@ async def authenticate_session(
 ) -> OperatorAuthority:
     """Use only configured RS256 verification; a browser assertion is never an identity."""
     settings = get_settings()
-    issuer, audience, public_key = (
+    issuer, audience, public_key, jwks_uri = (
         settings.operator_oidc_issuer,
         settings.operator_oidc_audience,
         settings.operator_oidc_public_key_pem,
+        settings.operator_oidc_jwks_uri,
     )
     if (
-        not all((issuer, audience, public_key))
+        not issuer
+        or not audience
+        or (bool(public_key) == bool(jwks_uri))
         or not issuer.startswith("https://")
         or not token
         or len(token) > 8192
     ):
         raise _unauthorized()
     try:
+        key = (
+            await signing_key(issuer=issuer, jwks_uri=jwks_uri, token=token)
+            if jwks_uri
+            else public_key
+        )
         claims = jwt.decode(
             token,
-            public_key,
+            key,
             algorithms=["RS256"],
             issuer=issuer,
             audience=audience,

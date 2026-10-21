@@ -5,7 +5,7 @@ import { OperatorActions } from "./operator-actions";
 export const dynamic = "force-dynamic";
 
 type Detail = { workflow_plan?: { title?: string }; workflow_run?: { status?: string }; step_details?: Array<{ specialization_role?: string | null; agent_run?: { status?: string; model_runs?: Array<{ id?: string; status?: string; provider_model_id?: string }> } | null; challenge?: { challenge_level?: string; decision?: string | null } | null }> };
-type Cost = { model_run_id: string; classification: string; catalog_priced_usage: string | null; reserved_estimated_exposure: string | null; provider_billing_status: string };
+type Cost = { model_run_id: string; classification: string; catalog_priced_usage: string | null; reserved_estimated_exposure: string | null; provider_reported_cost: string | null; provider_billing_status: string };
 type Attempt = { generation: number; outcome: string | null; reason_code: string | null };
 
 export default async function OperatorDetail({ params }: { params: Promise<{ dispatchId: string }> }) {
@@ -33,7 +33,7 @@ export default async function OperatorDetail({ params }: { params: Promise<{ dis
       <ul>{step.agent_run?.model_runs?.map((model) => <li key={model.id}>{model.provider_model_id} · {model.status} · ModelRun {model.id}</li>)}</ul>
     </li>)}</ul></section>
     <section><h2>Financial evidence</h2><p>Reserved catalog exposure: {row.reserved_estimated_exposure} USD. Provider billing is unverified.</p>
-      <ul>{evidence.map((item) => <li key={item.model_run_id}>{item.model_run_id}: {item.classification}; catalog-priced usage {item.catalog_priced_usage ?? "unknown"}; reserved {item.reserved_estimated_exposure ?? "none"}; billing {item.provider_billing_status}</li>)}</ul></section>
+      <ul>{evidence.map((item) => <li key={item.model_run_id}>{item.model_run_id}: {item.classification}; catalog-priced usage {item.catalog_priced_usage ?? "unknown"}; reserved {item.reserved_estimated_exposure ?? "none"}; provider-reported cost {item.provider_reported_cost ?? "unknown"}; billing {item.provider_billing_status}</li>)}</ul></section>
     <section><h2>Attempts</h2><ul>{history.map((item) => <li key={item.generation}>#{item.generation}: {item.outcome ?? "pending"} {item.reason_code ?? ""}</li>)}</ul></section>
     <OperatorActions dispatchId={dispatchId} status={row.status} />
   </main>;
