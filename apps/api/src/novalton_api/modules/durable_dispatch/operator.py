@@ -123,7 +123,10 @@ class OperatorAuthority:
         """
         self.require(permission, tenant_id=tenant_id, workspace_id=workspace_id)
         user = await session.scalar(
-            select(HumanOperator).where(HumanOperator.id == self.user_id).with_for_update(read=True)
+            select(HumanOperator)
+            .where(HumanOperator.id == self.user_id)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
         )
         grant = await session.scalar(
             select(WorkspaceOperatorPermission)
@@ -134,6 +137,7 @@ class OperatorAuthority:
                 WorkspaceOperatorPermission.permission == permission,
             )
             .with_for_update(read=True)
+            .execution_options(populate_existing=True)
         )
         if (
             user is None
@@ -162,7 +166,10 @@ async def require_active_dispatch_operator(
     ) or "activation.configure" not in permissions:
         raise _forbidden()
     user = await session.scalar(
-        select(HumanOperator).where(HumanOperator.id == user_id).with_for_update(read=True)
+        select(HumanOperator)
+        .where(HumanOperator.id == user_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
     )
     grant = await session.scalar(
         select(WorkspaceOperatorPermission)
@@ -173,6 +180,7 @@ async def require_active_dispatch_operator(
             WorkspaceOperatorPermission.permission == "activation.configure",
         )
         .with_for_update(read=True)
+        .execution_options(populate_existing=True)
     )
     if user is None or not user.active or user.label != label or grant is None or not grant.active:
         raise _forbidden()

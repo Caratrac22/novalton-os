@@ -495,6 +495,14 @@ def test_revocation_waits_for_inflight_human_decision_then_blocks_new_decisions(
             checked.set()
             assert await asyncio.to_thread(release.wait, 15)
             await session.commit()
+            assert await asyncio.to_thread(revoked.wait, 15)
+            with pytest.raises(ApplicationError):
+                await actor.require_human(
+                    session,
+                    "dispatch.read",
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                )
 
         db_call(hold)
 
