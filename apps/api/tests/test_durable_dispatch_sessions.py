@@ -205,6 +205,46 @@ def test_bound_session_fenced_after_revocation_with_reused_session(scope, federa
     asyncio.run(work())
 
 
+def test_permission_revoke_fences_reused_federated_session(scope, federated):
+    async def work():
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                actor = await authenticate_session(
+                    session,
+                    token=federated(),
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                )
+                await service.list_dispatches(
+                    session,
+                    operator=actor,
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                )
+                await session.commit()
+                assert await provisioning.revoke_permission(
+                    session,
+                    operator=operator_for(scope),
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    subject_id=operator_for(scope).user_id,
+                    permission="dispatch.read",
+                )
+                with pytest.raises(ApplicationError) as denied:
+                    await service.list_dispatches(
+                        session,
+                        operator=actor,
+                        tenant_id=scope.tenant_id,
+                        workspace_id=scope.workspace_id,
+                    )
+                assert denied.value.status_code == 403
+        finally:
+            await database.dispose()
+
+    asyncio.run(work())
+
+
 def test_concurrent_session_decision_serializes_revoke(scope, federated):
     acquired, release, revoked = threading.Event(), threading.Event(), threading.Event()
 
