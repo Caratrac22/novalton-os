@@ -152,6 +152,7 @@ async def reserve_model(
         if (
             model is None
             or not price_known
+            or model.status != "AVAILABLE"
             or model.context_window is None
             or model.last_verified_at is None
             or model.last_verified_at < now - timedelta(hours=24)

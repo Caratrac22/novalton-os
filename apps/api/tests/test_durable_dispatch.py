@@ -1554,6 +1554,25 @@ def test_estimated_exposure_limit_rejects_next_step_without_refunding_first(scop
     assert tick(scope, provider) is None
 
 
+def test_estimated_exposure_downgrade_keeps_configured_budget(scope):
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    row, _, _ = enqueue(scope, QueueProvider([]), max_estimated_exposure=Decimal("1"))
+    config = Config(Path(__file__).parents[1] / "alembic.ini")
+    with pytest.raises(RuntimeError, match="estimated_exposure_downgrade_has_history"):
+        command.downgrade(config, "20261021_0036")
+
+    async def retained(session):
+        version = await session.scalar(text("SELECT version_num FROM alembic_version"))
+        dispatch = await session.get(TaskDispatch, row.id)
+        return version, dispatch.max_estimated_exposure
+
+    assert db_call(retained) == ("20261021_0037", Decimal("1"))
+
+
 def test_concurrent_workers_reserve_estimated_exposure_once(scope):
     async def price(session):
         await session.execute(

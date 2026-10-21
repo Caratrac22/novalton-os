@@ -29,7 +29,10 @@ artifact before using this branch as a new base.
 - The existing complete-workflow benchmark remains intact. A second bounded
   workload adds progressive arrivals and varied deterministic provider delays,
   measuring completed Manager → Developer → QA workflows and end-to-end
-  latency. It does not use a paid provider.
+  latency. Additional tests revoke tenant membership while each of Manager,
+  Developer and QA is generating and check that the committed ModelRun result
+  cannot regain continuation authority. Two concurrent workers are checked
+  against one estimated exposure reservation. None uses a paid provider.
 - GitHub Actions now builds, verifies and uploads a complete Mission 7 Git
   bundle, source ZIP and SHA-256 manifest after both CI jobs pass.
 
@@ -50,6 +53,9 @@ idempotency contract is available. Unknown or stale prices are rejected when
 this optional budget is enabled. The existing count/deadline budget and
 default refusal of unknown pricing remain in force for all dispatches.
 Uncertain provider calls remain charged to their reservation, never zeroed.
+If a returned resolved model differs from the catalog route, token usage is
+retained but the catalog-derived cost is left unknown. Evidence flags the
+model mismatch or a catalog-priced amount exceeding a reservation.
 No strict monetary spending guarantee is claimed.
 
 The OpenRouter transport already sends `Accept-Encoding: identity`, and the
@@ -61,13 +67,34 @@ real provider acceptance; never replay an old failed workflow.
 
 ## Validation and recovery
 
-Local Python compilation, Ruff formatting/lint and `git diff --check` passed
-before publication. Local PostgreSQL and pytest are unavailable; GitHub
-Actions on disposable `novalton_test` is the authoritative integration gate.
-The Mission 7 PR's latest successful CI and I-044A/B runs, including their
-run IDs and measured `dispatch_complete`/`dispatch_progressive` output, must
-be recorded here after completion. Do not infer production capacity from
-these short CI workloads. The recovery artifact must contain `HEAD.txt`,
+Local Python compilation, Ruff formatting/lint and `git diff --check` passed.
+Local PostgreSQL and pytest are unavailable; GitHub Actions on disposable
+`novalton_test` is the authoritative integration gate. The first PR CI run
+`39613467600` ran migrations, backend lint, frontend tests/lint/typecheck/
+build/audit and the dispatch workload successfully. Its full backend suite
+failed two stale test assertions about the new table and downgrade revision;
+the second run (`39614568540`) then exposed an Alembic transactional rollback
+expectation in the downgrade test. That expectation was corrected without
+weakening the history guard. These are the first run's
+complete-workflow measurements, comparable in test shape to Mission 6 run
+`39603244992` (both six-worker, deterministic local provider, Python 3.13.15,
+PostgreSQL 16 CI runs; different hosted runners and dates):
+
+| Workflows | Mission 6 completed/s | First Mission 7 completed/s | Mission 7 p50 / p95 / p99 | Models / errors |
+| ---: | ---: | ---: | --- | --- |
+| 10 | 2.41 | 2.78 | 3.016 / 4.247 / 4.247 s | 30 / 0 |
+| 25 | 2.17 | 2.15 | 10.133 / 12.022 / 12.058 s | 75 / 0 |
+| 50 | 2.32 | 2.72 | 14.637 / 19.549 / 19.853 s | 150 / 0 |
+
+The separate progressive-arrival run completed 12 workflows (36 ModelRuns,
+four workers, arrivals at 0.03 s intervals, local delays 0.003/0.025 s) in
+6.196 s: 1.94 completed/s, p50 1.311 s, p95/p99 1.512 s and zero errors.
+Its elapsed interval includes arrivals and setup, so it is not directly
+comparable to the six-worker benchmark's elapsed interval. Hosted runner
+capacity is uncontrolled; these short runs are not production guarantees.
+
+The latest PR CI and I-044A/B status must be verified from the GitHub PR after
+the final changes. The recovery artifact must contain `HEAD.txt`,
 `COMMITS.txt`, `SHA256SUMS`, `MISSION_8_REPRISE.md`, the full `.bundle`, and
 the source `.zip`. Check artifact HEAD against the PR head.
 

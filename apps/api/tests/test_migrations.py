@@ -340,7 +340,9 @@ def test_durable_dispatch_downgrade_preserves_enqueued_history(monkeypatch):
                 async with database.session_factory() as session:
                     assert await session.get(TaskDispatch, identifier) is not None
                     revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-                    assert revision == "20261021_0036"
+                    # Alembic rolls the whole downgrade command back when the
+                    # membership history guard rejects it.
+                    assert revision == "20261021_0037"
             finally:
                 await database.dispose()
 

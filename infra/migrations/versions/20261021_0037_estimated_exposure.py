@@ -35,6 +35,11 @@ def downgrade() -> None:
         text(
             "SELECT EXISTS (SELECT 1 FROM model_runs WHERE reserved_estimated_exposure IS NOT NULL)"
         )
+    ) or connection.scalar(
+        text(
+            "SELECT EXISTS (SELECT 1 FROM task_dispatches "
+            "WHERE max_estimated_exposure IS NOT NULL OR reserved_estimated_exposure <> 0)"
+        )
     ):
         raise RuntimeError("estimated_exposure_downgrade_has_history")
     op.execute(
