@@ -459,9 +459,7 @@ async def claim_next(
 ) -> DispatchClaim | None:
     if not get_settings().durable_dispatch_enabled:
         raise denied("dispatch_disabled")
-    await require_active_dispatch_operator(
-        session, tenant_id=tenant_id, workspace_id=workspace_id
-    )
+    await require_active_dispatch_operator(session, tenant_id=tenant_id, workspace_id=workspace_id)
     return await repository.claim(
         session,
         tenant_id=tenant_id,

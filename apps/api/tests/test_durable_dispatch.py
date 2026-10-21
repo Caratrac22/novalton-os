@@ -565,9 +565,7 @@ def test_revoked_activation_grant_stops_worker_claims_after_engaged_provider(sco
         assert active.result(timeout=20).outcome.value == "STEP_COMPLETED"
 
     persisted, attempts, models = snapshot(scope, row.id)
-    assert (persisted.status, len(attempts), len(models), len(provider.calls)) == (
-        "READY", 1, 1, 1
-    )
+    assert (persisted.status, len(attempts), len(models), len(provider.calls)) == ("READY", 1, 1, 1)
     with pytest.raises(ApplicationError) as forbidden:
         tick(scope, provider)
     assert forbidden.value.status_code == 403

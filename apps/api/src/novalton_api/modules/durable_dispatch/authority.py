@@ -68,9 +68,7 @@ async def binding_for_reservation(
             raise denied("dispatch_scope_mismatch")
         return None
     identifier, tenant_id, workspace_id = scope
-    await require_active_dispatch_operator(
-        session, tenant_id=tenant_id, workspace_id=workspace_id
-    )
+    await require_active_dispatch_operator(session, tenant_id=tenant_id, workspace_id=workspace_id)
     activation = await session.scalar(
         select(DispatchActivation)
         .where(
