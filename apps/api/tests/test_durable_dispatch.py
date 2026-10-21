@@ -36,11 +36,11 @@ from novalton_api.main import create_app
 from novalton_api.modules.approvals.models import ApprovalRequest
 from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.durable_dispatch import repository, service
-from novalton_api.modules.durable_dispatch.cost_evidence import list_cost_exposure
 from novalton_api.modules.durable_dispatch.authority import (
     current_claim,
     require_workflow,
 )
+from novalton_api.modules.durable_dispatch.cost_evidence import list_cost_exposure
 from novalton_api.modules.durable_dispatch.identity import (
     HumanOperator,
     WorkspaceOperatorPermission,
@@ -341,7 +341,9 @@ def test_explicit_bounded_batch_stops_cleanly_and_resumes_independent_work(scope
     assert snapshot(scope, active.id)[0].attempt_count == 0
     results = db_call(lambda session: batch(session, False))
     assert [item.outcome.value for item in results] == [
-        "STEP_COMPLETED", "STEP_COMPLETED", "WORKFLOW_COMPLETED"
+        "STEP_COMPLETED",
+        "STEP_COMPLETED",
+        "WORKFLOW_COMPLETED",
     ]
     assert snapshot(scope, active.id)[0].status == "DONE"
     assert snapshot(scope, exhausted.id)[0].status == "BLOCKED"
@@ -533,18 +535,27 @@ def test_operator_http_boundary_authenticates_human_and_rejects_cross_workspace(
     base = f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}/dispatch"
     with TestClient(create_app()) as client:
         assert client.get(f"{base}/requests").status_code == 401
-        assert client.get(
-            f"{base}/requests", headers={"X-User-Id": str(operator_for(scope).user_id)}
-        ).status_code == 401
-        assert client.get(
-            f"{base}/requests", headers={"Authorization": "Bearer " + "x" * 40}
-        ).status_code == 403
+        assert (
+            client.get(
+                f"{base}/requests", headers={"X-User-Id": str(operator_for(scope).user_id)}
+            ).status_code
+            == 401
+        )
+        assert (
+            client.get(
+                f"{base}/requests", headers={"Authorization": "Bearer " + "x" * 40}
+            ).status_code
+            == 403
+        )
         headers = {"Authorization": f"Bearer {_TEST_OPERATOR_KEY}"}
         assert client.get(f"{base}/requests", headers=headers).json() == []
-        assert client.get(
-            f"/api/v1/tenants/{scope.tenant_id}/workspaces/{uuid4()}/dispatch/requests",
-            headers=headers,
-        ).status_code == 403
+        assert (
+            client.get(
+                f"/api/v1/tenants/{scope.tenant_id}/workspaces/{uuid4()}/dispatch/requests",
+                headers=headers,
+            ).status_code
+            == 403
+        )
         provider = QueueProvider([])
         row, _, _ = enqueue(scope, provider)
         response = client.get(f"{base}/requests", headers=headers)

@@ -56,7 +56,10 @@ async def activation(
     tenant_id: UUID, workspace_id: UUID, data: ActivationInput, session: Session, operator: Operator
 ):
     row = await service.configure_workspace(
-        session, operator=operator, tenant_id=tenant_id, workspace_id=workspace_id,
+        session,
+        operator=operator,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
         enabled=data.enabled,
     )
     return {"enabled": row.enabled, "generation": row.generation}
@@ -87,8 +90,12 @@ async def list_requests(
 
 @router.get("/requests/{dispatch_id}/attempts")
 async def attempts(
-    tenant_id: UUID, workspace_id: UUID, dispatch_id: UUID,
-    session: Session, operator: Operator, limit: int = 50,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    dispatch_id: UUID,
+    session: Session,
+    operator: Operator,
+    limit: int = 50,
 ):
     return [
         {
@@ -99,8 +106,12 @@ async def attempts(
             "completed_at": row.completed_at,
         }
         for row in await service.list_attempts(
-            session, operator=operator, tenant_id=tenant_id, workspace_id=workspace_id,
-            dispatch_id=dispatch_id, limit=limit,
+            session,
+            operator=operator,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            dispatch_id=dispatch_id,
+            limit=limit,
         )
     ]
 
@@ -119,7 +130,10 @@ async def costs(
             "currency": item.currency,
         }
         for item in await list_cost_exposure(
-            session, operator=operator, tenant_id=tenant_id, workspace_id=workspace_id,
+            session,
+            operator=operator,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
             dispatch_id=dispatch_id,
         )
     ]
@@ -131,7 +145,10 @@ async def cancel(
 ):
     return _record(
         await service.cancel_dispatch(
-            session, operator=operator, tenant_id=tenant_id, workspace_id=workspace_id,
+            session,
+            operator=operator,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
             dispatch_id=dispatch_id,
         )
     )
@@ -139,12 +156,20 @@ async def cancel(
 
 @router.post("/requests/{dispatch_id}/resolve", status_code=201)
 async def resolve(
-    tenant_id: UUID, workspace_id: UUID, dispatch_id: UUID, data: DispatchRequest,
-    session: Session, operator: Operator,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    dispatch_id: UUID,
+    data: DispatchRequest,
+    session: Session,
+    operator: Operator,
 ):
     return _record(
         await service.resolve_blocked(
-            session, operator=operator, tenant_id=tenant_id, workspace_id=workspace_id,
-            blocked_id=dispatch_id, data=data,
+            session,
+            operator=operator,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            blocked_id=dispatch_id,
+            data=data,
         )
     )
