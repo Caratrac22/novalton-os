@@ -113,6 +113,7 @@ class OperatorAuthority:
         ):
             raise _forbidden()
 
+
     async def require_human(
         self, session: AsyncSession, permission: str, *, tenant_id: UUID, workspace_id: UUID
     ) -> None:
@@ -143,6 +144,39 @@ class OperatorAuthority:
             or not grant.active
         ):
             raise _forbidden()
+
+
+async def require_active_dispatch_operator(
+    session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID
+) -> None:
+    """Fence new worker reservations when the activating human is revoked.
+
+    Workers have no plaintext human credential. Their configured identity and
+    activation permission are checked in the same transaction as the claim or
+    provider reservation; shared locks serialize a concurrent revocation.
+    Already engaged provider responses may still record their actual outcome.
+    """
+    _, label, user_id, configured_tenant, configured_workspace, permissions = _configured()
+    if (
+        (tenant_id, workspace_id) != (configured_tenant, configured_workspace)
+        or "activation.configure" not in permissions
+    ):
+        raise _forbidden()
+    user = await session.scalar(
+        select(HumanOperator).where(HumanOperator.id == user_id).with_for_update(read=True)
+    )
+    grant = await session.scalar(
+        select(WorkspaceOperatorPermission)
+        .where(
+            WorkspaceOperatorPermission.user_id == user_id,
+            WorkspaceOperatorPermission.tenant_id == tenant_id,
+            WorkspaceOperatorPermission.workspace_id == workspace_id,
+            WorkspaceOperatorPermission.permission == "activation.configure",
+        )
+        .with_for_update(read=True)
+    )
+    if user is None or not user.active or user.label != label or grant is None or not grant.active:
+        raise _forbidden()
 
 
 def authenticate_operator(credential: str) -> OperatorAuthority:

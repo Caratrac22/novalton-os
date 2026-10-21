@@ -31,7 +31,10 @@ from novalton_api.modules.durable_dispatch.models import (
     DispatchDependency,
     TaskDispatch,
 )
-from novalton_api.modules.durable_dispatch.operator import OperatorAuthority
+from novalton_api.modules.durable_dispatch.operator import (
+    OperatorAuthority,
+    require_active_dispatch_operator,
+)
 from novalton_api.modules.durable_dispatch.schemas import DispatchRequest
 from novalton_api.modules.orchestrator import service as orchestrator_service
 from novalton_api.modules.orchestrator.schemas import OrchestrationResult
@@ -456,6 +459,9 @@ async def claim_next(
 ) -> DispatchClaim | None:
     if not get_settings().durable_dispatch_enabled:
         raise denied("dispatch_disabled")
+    await require_active_dispatch_operator(
+        session, tenant_id=tenant_id, workspace_id=workspace_id
+    )
     return await repository.claim(
         session,
         tenant_id=tenant_id,

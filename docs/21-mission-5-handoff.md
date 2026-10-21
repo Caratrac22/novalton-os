@@ -18,6 +18,10 @@ read its attached CI and I-044A/B checks before treating this report as accepted
   registers a credential or manages grants. Audit decisions carry the verified
   user UUID. Provisioning is an explicit trusted deployment step; there is no
   password, OAuth, SaaS session store or tenant-wide membership inheritance.
+- Each new worker claim and provider/tool reservation rechecks the configured
+  activating human and active workspace activation grant under database locks.
+  Revoking that grant stops subsequent reservations. A provider call already
+  engaged may still persist its real result before the next claim is denied.
 - A bounded read of linked ModelRun evidence distinguishes known observed cost,
   unknown actual cost, estimate overrun and uncertain external outcome. A failed,
   cancelled or lost response is never assumed free. There is still **no atomic

@@ -531,6 +531,50 @@ def test_revocation_waits_for_inflight_human_decision_then_blocks_new_decisions(
     assert error.value.status_code == 403
 
 
+def test_revoked_activation_grant_stops_worker_claims_after_engaged_provider(scope):
+    provider = QueueProvider([_manager(), _worker()])
+    row, _, _ = enqueue(scope, provider)
+    entered, released = threading.Event(), threading.Event()
+    original = provider.complete
+
+    async def delayed(request):
+        entered.set()
+        assert await asyncio.to_thread(released.wait, 15)
+        return await original(request)
+
+    provider.complete = delayed
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        active = executor.submit(tick, scope, provider)
+        assert entered.wait(15)
+        try:
+            async def revoke(session):
+                await session.execute(
+                    update(WorkspaceOperatorPermission)
+                    .where(
+                        WorkspaceOperatorPermission.user_id == operator_for(scope).user_id,
+                        WorkspaceOperatorPermission.workspace_id == scope.workspace_id,
+                        WorkspaceOperatorPermission.permission == "activation.configure",
+                    )
+                    .values(active=False, revoked_at=func.clock_timestamp())
+                )
+                await session.commit()
+
+            db_call(revoke)
+        finally:
+            released.set()
+        assert active.result(timeout=20).outcome.value == "STEP_COMPLETED"
+
+    persisted, attempts, models = snapshot(scope, row.id)
+    assert (persisted.status, len(attempts), len(models), len(provider.calls)) == (
+        "READY", 1, 1, 1
+    )
+    with pytest.raises(ApplicationError) as forbidden:
+        tick(scope, provider)
+    assert forbidden.value.status_code == 403
+    assert snapshot(scope, row.id)[0].attempt_count == 1
+    assert len(provider.calls) == 1
+
+
 def test_operator_http_boundary_authenticates_human_and_rejects_cross_workspace(scope):
     base = f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}/dispatch"
     with TestClient(create_app()) as client:
