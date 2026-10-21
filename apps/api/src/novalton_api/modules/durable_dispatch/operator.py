@@ -7,6 +7,7 @@ The server stores only a SHA-256 digest of a high-entropy operator key.
 
 import hashlib
 import hmac
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from novalton_api.core.config import get_settings
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.modules.durable_dispatch.identity import (
+    FederatedOperatorIdentity,
     HumanOperator,
     TenantOperatorMembership,
     WorkspaceOperatorPermission,
@@ -75,6 +77,9 @@ class OperatorAuthority:
         "tenant_id",
         "workspace_id",
         "permissions",
+        "_issuer",
+        "_subject",
+        "_expires_at",
     )
 
     def __init__(
@@ -86,6 +91,9 @@ class OperatorAuthority:
         tenant_id: UUID,
         workspace_id: UUID,
         permissions: frozenset[str],
+        issuer: str | None = None,
+        subject: str | None = None,
+        expires_at: datetime | None = None,
     ) -> None:
         if seal is not _SEAL:
             raise _forbidden()
@@ -97,8 +105,21 @@ class OperatorAuthority:
         self.tenant_id = tenant_id
         self.workspace_id = workspace_id
         self.permissions = permissions
+        self._issuer = issuer
+        self._subject = subject
+        self._expires_at = expires_at
 
     def require(self, permission: str, *, tenant_id: UUID, workspace_id: UUID) -> None:
+        if self._issuer is not None:
+            if (
+                self._seal is not _SEAL
+                or self._expires_at is None
+                or datetime.now(UTC) >= self._expires_at
+                or (tenant_id, workspace_id) != (self.tenant_id, self.workspace_id)
+                or permission not in self.permissions
+            ):
+                raise _forbidden()
+            return
         digest, actor_id, configured_user, configured_tenant, configured_workspace, permissions = (
             _configured()
         )
@@ -155,6 +176,18 @@ class OperatorAuthority:
             .with_for_update(read=not exclusive)
             .execution_options(populate_existing=True)
         )
+        identity = None
+        if self._issuer is not None:
+            identity = await session.scalar(
+                select(FederatedOperatorIdentity)
+                .where(
+                    FederatedOperatorIdentity.user_id == self.user_id,
+                    FederatedOperatorIdentity.issuer == self._issuer,
+                    FederatedOperatorIdentity.subject == self._subject,
+                )
+                .with_for_update(read=not exclusive)
+                .execution_options(populate_existing=True)
+            )
         if (
             user is None
             or not user.active
@@ -163,8 +196,43 @@ class OperatorAuthority:
             or not membership.active
             or grant is None
             or not grant.active
+            or (self._issuer is not None and (identity is None or not identity.active))
         ):
             raise _forbidden()
+
+
+def federated_operator_authority(
+    *,
+    user: HumanOperator,
+    issuer: str,
+    subject: str,
+    expires_at: datetime,
+    tenant_id: UUID,
+    workspace_id: UUID,
+) -> OperatorAuthority:
+    """Construct only after an external signature and an exact subject binding are verified."""
+    return OperatorAuthority(
+        _SEAL,
+        "",
+        user.label,
+        user.id,
+        tenant_id,
+        workspace_id,
+        PERMISSIONS,
+        issuer=issuer,
+        subject=subject,
+        expires_at=expires_at,
+    )
+
+
+def require_configured_activator(operator: OperatorAuthority) -> None:
+    """The bounded worker can be activated only for its configured human principal."""
+    _, _, user_id, tenant_id, workspace_id, _ = _configured()
+    if operator.user_id != user_id or (operator.tenant_id, operator.workspace_id) != (
+        tenant_id,
+        workspace_id,
+    ):
+        raise _forbidden()
 
 
 async def require_active_dispatch_operator(

@@ -11,13 +11,163 @@ from novalton_api.modules.audit.schemas import AuditRecordCreate
 from novalton_api.modules.audit.service import append_record
 from novalton_api.modules.durable_dispatch.authority import database_now, denied
 from novalton_api.modules.durable_dispatch.identity import (
+    FederatedOperatorIdentity,
     HumanOperator,
     TenantOperatorMembership,
     WorkspaceOperatorPermission,
 )
+from novalton_api.modules.durable_dispatch.models import DispatchActivation
 from novalton_api.modules.durable_dispatch.operator import PERMISSIONS, OperatorAuthority
 
 _LABEL = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+async def bind_federated_subject(
+    session: AsyncSession,
+    *,
+    operator: OperatorAuthority,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    subject_id: UUID,
+    issuer: str,
+    subject: str,
+) -> FederatedOperatorIdentity:
+    """Trusted provisioning only; no endpoint accepts a browser-selected subject."""
+    if (
+        not isinstance(issuer, str)
+        or not issuer.startswith("https://")
+        or not 1 <= len(issuer) <= 512
+        or not isinstance(subject, str)
+        or not 1 <= len(subject) <= 256
+    ):
+        raise denied("operator_identity_invalid")
+    await operator.require_human(
+        session,
+        "activation.configure",
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        exclusive=True,
+    )
+    user = await session.scalar(
+        select(HumanOperator)
+        .where(HumanOperator.id == subject_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    membership = await session.scalar(
+        select(TenantOperatorMembership)
+        .where(
+            TenantOperatorMembership.user_id == subject_id,
+            TenantOperatorMembership.tenant_id == tenant_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if user is None or not user.active or membership is None or not membership.active:
+        raise denied("operator_identity_subject_unavailable")
+    existing = await session.get(FederatedOperatorIdentity, subject_id, with_for_update=True)
+    if existing is not None:
+        raise denied("operator_identity_already_bound")
+    identity = FederatedOperatorIdentity(
+        user_id=subject_id,
+        issuer=issuer,
+        subject=subject,
+        active=True,
+        revoked_at=None,
+    )
+    session.add(identity)
+    try:
+        await session.flush()
+    except IntegrityError:
+        await session.rollback()
+        raise denied("operator_identity_already_bound") from None
+    await append_record(
+        session,
+        data=AuditRecordCreate(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            action="dispatch.operator.identity.bind",
+            actor_type="local_user",
+            actor_id=operator.actor_id,
+            outcome="success",
+            metadata={"subject_id": str(subject_id), "issuer": issuer},
+        ),
+        commit=False,
+    )
+    await session.commit()
+    return identity
+
+
+async def revoke_federated_subject(
+    session: AsyncSession,
+    *,
+    operator: OperatorAuthority,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    subject_id: UUID,
+) -> bool:
+    """Revocation locks the binding and fences subsequent session decisions."""
+    await operator.require_human(
+        session,
+        "activation.configure",
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        exclusive=True,
+    )
+    membership = await session.scalar(
+        select(TenantOperatorMembership)
+        .where(
+            TenantOperatorMembership.user_id == subject_id,
+            TenantOperatorMembership.tenant_id == tenant_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if membership is None:
+        raise denied("operator_identity_subject_unavailable")
+    identity = await session.scalar(
+        select(FederatedOperatorIdentity)
+        .where(FederatedOperatorIdentity.user_id == subject_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if identity is None or not identity.active:
+        await session.commit()
+        return False
+    identity.active = False
+    identity.revoked_at = await database_now(session)
+    activation = await session.scalar(
+        select(DispatchActivation)
+        .where(
+            DispatchActivation.tenant_id == tenant_id,
+            DispatchActivation.workspace_id == workspace_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if activation is not None and activation.enabled:
+        activation.enabled = False
+        activation.generation += 1
+        activation.updated_at = await database_now(session)
+    await append_record(
+        session,
+        data=AuditRecordCreate(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            action="dispatch.operator.identity.revoke",
+            actor_type="local_user",
+            actor_id=operator.actor_id,
+            outcome="success",
+            metadata={
+                "subject_id": str(subject_id),
+                "dispatch_disabled": activation is not None and not activation.enabled,
+                "activation_generation": activation.generation if activation else None,
+            },
+        ),
+        commit=False,
+    )
+    await session.commit()
+    return True
 
 
 async def rotate_operator(
