@@ -105,6 +105,7 @@ class Settings(BaseModel):
         max_length=128,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
     )
+    durable_dispatch_operator_user_id: UUID | None = None
     durable_dispatch_operator_tenant_id: UUID | None = None
     durable_dispatch_operator_workspace_id: UUID | None = None
     durable_dispatch_operator_permissions: str = ""
@@ -149,6 +150,7 @@ class Settings(BaseModel):
         "durable_dispatch_enabled": "NOVALTON_DURABLE_DISPATCH_ENABLED",
         "durable_dispatch_operator_key_sha256": "NOVALTON_DISPATCH_OPERATOR_KEY_SHA256",
         "durable_dispatch_operator_id": "NOVALTON_DISPATCH_OPERATOR_ID",
+        "durable_dispatch_operator_user_id": "NOVALTON_DISPATCH_OPERATOR_USER_ID",
         "durable_dispatch_operator_tenant_id": "NOVALTON_DISPATCH_OPERATOR_TENANT_ID",
         "durable_dispatch_operator_workspace_id": "NOVALTON_DISPATCH_OPERATOR_WORKSPACE_ID",
         "durable_dispatch_operator_permissions": "NOVALTON_DISPATCH_OPERATOR_PERMISSIONS",

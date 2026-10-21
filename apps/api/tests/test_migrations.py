@@ -30,9 +30,10 @@ def test_alembic_configuration_loads_durable_dispatch_after_i044() -> None:
     revision = scripts.get_revision(head)
     predecessor = scripts.get_revision("20260902_0031")
 
-    assert head == "20261020_0034"
+    assert head == "20261021_0035"
     assert revision is not None
-    assert revision.down_revision == "20261020_0033"
+    assert revision.down_revision == "20261020_0034"
+    assert scripts.get_revision("20261020_0034").down_revision == "20261020_0033"
     assert scripts.get_revision("20261020_0033").down_revision == "20261011_0032"
     assert scripts.get_revision("20261011_0032").down_revision == "20260902_0031"
     assert predecessor is not None
@@ -288,7 +289,7 @@ def test_i044_immutable_verification_authority_round_trip():
 
 def test_durable_dispatch_downgrade_preserves_enqueued_history(monkeypatch):
     from test_development_workflow import QueueProvider, _cleanup, _create_vertical, _seed
-    from test_durable_dispatch import configure_operator, operator_for
+    from test_durable_dispatch import cleanup_operator, configure_operator, operator_for
 
     from novalton_api.modules.durable_dispatch import service as dispatch_service
     from novalton_api.modules.durable_dispatch.models import DispatchActivation, TaskDispatch
@@ -328,7 +329,7 @@ def test_durable_dispatch_downgrade_preserves_enqueued_history(monkeypatch):
 
     identifier = asyncio.run(enqueue())
     try:
-        with pytest.raises(RuntimeError, match="durable_dispatch_downgrade_has_history"):
+        with pytest.raises(RuntimeError, match="operator_identity_downgrade_has_history"):
             command.downgrade(config, "20261011_0032")
 
         async def preserved():
@@ -337,7 +338,7 @@ def test_durable_dispatch_downgrade_preserves_enqueued_history(monkeypatch):
                 async with database.session_factory() as session:
                     assert await session.get(TaskDispatch, identifier) is not None
                     revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-                    assert revision == "20261020_0034"
+                    assert revision == "20261021_0035"
             finally:
                 await database.dispose()
 
@@ -359,6 +360,7 @@ def test_durable_dispatch_downgrade_preserves_enqueued_history(monkeypatch):
                 await database.dispose()
 
         asyncio.run(cleanup())
+        cleanup_operator(value)
         asyncio.run(_cleanup(value))
         command.downgrade(config, "20261011_0032")
         command.upgrade(config, "head")

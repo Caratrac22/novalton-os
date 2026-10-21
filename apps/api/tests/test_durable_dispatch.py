@@ -8,11 +8,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from test_development_workflow import (
@@ -38,6 +39,10 @@ from novalton_api.modules.durable_dispatch import repository, service
 from novalton_api.modules.durable_dispatch.authority import (
     current_claim,
     require_workflow,
+)
+from novalton_api.modules.durable_dispatch.identity import (
+    HumanOperator,
+    WorkspaceOperatorPermission,
 )
 from novalton_api.modules.durable_dispatch.models import (
     DispatchActivation,
@@ -79,15 +84,56 @@ _TEST_PERMISSIONS = (
 
 
 def configure_operator(scope, monkeypatch):
+    user_id = uuid5(NAMESPACE_URL, f"novalton-test-operator:{scope.workspace_id}")
+
+    async def seed(session):
+        await session.execute(
+            insert(HumanOperator)
+            .values(id=user_id, label="test-operator", active=True)
+            .on_conflict_do_nothing(index_elements=[HumanOperator.id])
+        )
+        for permission in _TEST_PERMISSIONS.split(","):
+            await session.execute(
+                insert(WorkspaceOperatorPermission)
+                .values(
+                    user_id=user_id,
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    permission=permission,
+                    active=True,
+                )
+                .on_conflict_do_nothing()
+            )
+        await session.commit()
+
+    db_call(seed)
     monkeypatch.setenv(
         "NOVALTON_DISPATCH_OPERATOR_KEY_SHA256",
         hashlib.sha256(_TEST_OPERATOR_KEY.encode()).hexdigest(),
     )
     monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_ID", "test-operator")
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_USER_ID", str(user_id))
     monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_TENANT_ID", str(scope.tenant_id))
     monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_WORKSPACE_ID", str(scope.workspace_id))
     monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_PERMISSIONS", _TEST_PERMISSIONS)
     get_settings.cache_clear()
+
+
+def cleanup_operator(scope):
+    async def cleanup(session):
+        await session.execute(
+            delete(WorkspaceOperatorPermission).where(
+                WorkspaceOperatorPermission.tenant_id == scope.tenant_id
+            )
+        )
+        await session.execute(
+            delete(HumanOperator).where(
+                HumanOperator.id == uuid5(NAMESPACE_URL, f"novalton-test-operator:{scope.workspace_id}")
+            )
+        )
+        await session.commit()
+
+    db_call(cleanup)
 
 
 def operator_for(scope):
@@ -123,6 +169,16 @@ def scope(monkeypatch):
         await session.execute(delete(TaskDispatch).where(TaskDispatch.tenant_id == value.tenant_id))
         await session.execute(
             delete(DispatchActivation).where(DispatchActivation.tenant_id == value.tenant_id)
+        )
+        await session.execute(
+            delete(WorkspaceOperatorPermission).where(
+                WorkspaceOperatorPermission.tenant_id == value.tenant_id
+            )
+        )
+        await session.execute(
+            delete(HumanOperator).where(
+                HumanOperator.id == uuid5(NAMESPACE_URL, f"novalton-test-operator:{value.workspace_id}")
+            )
         )
         await session.commit()
 
@@ -265,7 +321,7 @@ def test_operator_credential_permissions_and_scope_fail_closed(scope, monkeypatc
     assert wrong.value.code == "dispatch_operator_forbidden"
     with pytest.raises(ApplicationError):
         OperatorAuthority(
-            object(), "0" * 64, "forged", scope.tenant_id, scope.workspace_id, frozenset()
+            object(), "0" * 64, "forged", uuid4(), scope.tenant_id, scope.workspace_id, frozenset()
         )
     verified = operator_for(scope)
     with pytest.raises(ApplicationError) as foreign:
@@ -336,6 +392,106 @@ def test_operator_credential_permissions_and_scope_fail_closed(scope, monkeypatc
         )
         == []
     )
+
+
+def test_human_identity_and_workspace_grant_revoke_an_issued_capability(scope, monkeypatch):
+    actor = operator_for(scope)
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_USER_ID", str(uuid4()))
+    get_settings.cache_clear()
+    with pytest.raises(ApplicationError):
+        db_call(
+            lambda session: service.list_dispatches(
+                session, operator=actor, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+            )
+        )
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_USER_ID", str(actor.user_id))
+    get_settings.cache_clear()
+
+    async def revoke(session):
+        await session.execute(
+            update(WorkspaceOperatorPermission)
+            .where(
+                WorkspaceOperatorPermission.user_id == actor.user_id,
+                WorkspaceOperatorPermission.workspace_id == scope.workspace_id,
+                WorkspaceOperatorPermission.permission == "dispatch.read",
+            )
+            .values(active=False, revoked_at=func.clock_timestamp())
+        )
+        await session.commit()
+
+    db_call(revoke)
+    with pytest.raises(ApplicationError) as denied:
+        db_call(
+            lambda session: service.list_dispatches(
+                session, operator=actor, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+            )
+        )
+    assert denied.value.status_code == 403
+    async def disable_user(session):
+        await session.execute(
+            update(HumanOperator).where(HumanOperator.id == actor.user_id).values(active=False)
+        )
+        await session.commit()
+
+    db_call(disable_user)
+    with pytest.raises(ApplicationError):
+        db_call(
+            lambda session: service.configure_workspace(
+                session,
+                operator=actor,
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                enabled=False,
+            )
+        )
+
+
+def test_revocation_waits_for_inflight_human_decision_then_blocks_new_decisions(scope):
+    actor = operator_for(scope)
+    checked, release, revoked = threading.Event(), threading.Event(), threading.Event()
+
+    def hold_authorized_decision():
+        async def hold(session):
+            await actor.require_human(
+                session, "dispatch.read", tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+            )
+            checked.set()
+            assert await asyncio.to_thread(release.wait, 15)
+            await session.commit()
+
+        db_call(hold)
+
+    def revoke():
+        async def change(session):
+            await session.execute(
+                update(WorkspaceOperatorPermission)
+                .where(
+                    WorkspaceOperatorPermission.user_id == actor.user_id,
+                    WorkspaceOperatorPermission.workspace_id == scope.workspace_id,
+                    WorkspaceOperatorPermission.permission == "dispatch.read",
+                )
+                .values(active=False, revoked_at=func.clock_timestamp())
+            )
+            await session.commit()
+
+        db_call(change)
+        revoked.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(hold_authorized_decision)
+        assert checked.wait(15)
+        second = executor.submit(revoke)
+        assert not revoked.wait(0.2)
+        release.set()
+        first.result(timeout=15)
+        second.result(timeout=15)
+    with pytest.raises(ApplicationError) as error:
+        db_call(
+            lambda session: service.list_dispatches(
+                session, operator=actor, tenant_id=scope.tenant_id, workspace_id=scope.workspace_id
+            )
+        )
+    assert error.value.status_code == 403
 
 
 def test_operator_read_and_repeated_cancel_leave_one_audited_fence(scope):
@@ -1077,6 +1233,7 @@ def test_scoped_foreign_keys_and_dependency_scope_fail_closed(scope, monkeypatch
 
         db_call(cleanup)
     finally:
+        cleanup_operator(other)
         asyncio.run(_cleanup(other))
     assert provider.calls == []
 
