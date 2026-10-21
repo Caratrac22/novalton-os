@@ -1570,7 +1570,7 @@ def test_estimated_exposure_downgrade_keeps_configured_budget(scope):
         dispatch = await session.get(TaskDispatch, row.id)
         return version, dispatch.max_estimated_exposure
 
-    assert db_call(retained) == ("20261021_0037", Decimal("1"))
+    assert db_call(retained) == ("20261021_0038", Decimal("1"))
 
 
 def test_concurrent_workers_reserve_estimated_exposure_once(scope):

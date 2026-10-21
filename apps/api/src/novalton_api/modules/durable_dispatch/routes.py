@@ -5,14 +5,18 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.database import get_async_session
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.modules.durable_dispatch import service
 from novalton_api.modules.durable_dispatch.cost_evidence import list_cost_exposure
+from novalton_api.modules.durable_dispatch.models import TaskDispatch
 from novalton_api.modules.durable_dispatch.operator import OperatorAuthority, authenticate_operator
 from novalton_api.modules.durable_dispatch.schemas import DispatchRequest
+from novalton_api.modules.durable_dispatch.sessions import authenticate_session
+from novalton_api.modules.workflows.operator_view import get_operator_view
 
 router = APIRouter(prefix="/tenants/{tenant_id}/workspaces/{workspace_id}/dispatch")
 Session = Annotated[AsyncSession, Depends(get_async_session)]
@@ -23,7 +27,10 @@ class ActivationInput(BaseModel):
     enabled: bool
 
 
-def verified_operator(authorization: Annotated[str | None, Header()] = None) -> OperatorAuthority:
+async def verified_operator(
+    tenant_id: UUID, workspace_id: UUID, session: Session,
+    authorization: Annotated[str | None, Header()] = None,
+) -> OperatorAuthority:
     if authorization is None or not authorization.startswith("Bearer "):
         raise ApplicationError(
             "dispatch_auth_required", "Operator credential required", status_code=401
@@ -32,6 +39,10 @@ def verified_operator(authorization: Annotated[str | None, Header()] = None) -> 
     if not credential or credential != credential.strip() or " " in credential:
         raise ApplicationError(
             "dispatch_auth_required", "Operator credential required", status_code=401
+        )
+    if credential.count(".") == 2:
+        return await authenticate_session(
+            session, token=credential, tenant_id=tenant_id, workspace_id=workspace_id
         )
     return authenticate_operator(credential)
 
@@ -43,6 +54,10 @@ def _record(row) -> dict[str, object]:
     return {
         "id": row.id,
         "workflow_run_id": row.workflow_run_id,
+        "task_id": row.task_id,
+        "priority": row.priority,
+        "deadline": row.deadline,
+        "lease_expires_at": row.lease_expires_at,
         "status": row.status,
         "generation": row.generation,
         "attempt_count": row.attempt_count,
@@ -116,6 +131,28 @@ async def attempts(
             limit=limit,
         )
     ]
+
+
+@router.get("/requests/{dispatch_id}/workflow")
+async def workflow_evidence(
+    tenant_id: UUID, workspace_id: UUID, dispatch_id: UUID,
+    session: Session, operator: Operator,
+):
+    await operator.require_human(
+        session, "dispatch.read", tenant_id=tenant_id, workspace_id=workspace_id
+    )
+    workflow_id = await session.scalar(
+        select(TaskDispatch.workflow_run_id).where(
+            TaskDispatch.id == dispatch_id, TaskDispatch.tenant_id == tenant_id,
+            TaskDispatch.workspace_id == workspace_id,
+        )
+    )
+    if workflow_id is None:
+        raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
+    return await get_operator_view(
+        session, tenant_id=tenant_id, workspace_id=workspace_id,
+        workflow_run_id=workflow_id,
+    )
 
 
 @router.get("/requests/{dispatch_id}/cost-evidence")
