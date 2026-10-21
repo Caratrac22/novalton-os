@@ -32,10 +32,12 @@ restoring this branch in the next session.
   reported USD `total_cost` per run under a row lock. A unique provider and
   generation key prevents attachment to another run. Identical concurrent
   observations are idempotent; a different amount raises a conflict and
-  preserves the first observation. Failures leave cost unknown. The operator
+  preserves the first observation. Exceeding the saved reservation is flagged.
+  Failures leave cost unknown. The operator
   view distinguishes catalog-priced usage, reserved estimate and provider
   reported cost. `provider_billing_verified` remains false: this is a provider
   usage endpoint, not an independently verified invoice.
+  Provider contract: [OpenRouter generation metadata](https://openrouter.ai/docs/api/api-reference/generations/get-request-%26-usage-metadata-for-a-generation).
 - Migration `20261021_0039` adds the generation identity and observation table,
   and guards downgrades containing evidence. The audit updated `certifi` and
   `urllib3` in the API lockfile to patched versions.
@@ -87,9 +89,11 @@ signature, origin checks and the existing console controls. Build, lint,
 typecheck and npm audit passed locally. Three isolated Python JWKS/metadata
 tests passed; local PostgreSQL is unavailable, so CI must prove the new
 migration, row-lock concurrency, full API suite and I-044A/B. `next start`
-could not be reached across the container network namespace, even after a
-test-only shim for the `uv_interface_addresses` error; no live browser session
-was observed. Record final CI run IDs and
+was started with a test-only shim for the container's `uv_interface_addresses`
+error. HTTP smoke checks returned 200 for `/operator`, 503 for unconfigured
+login, 403 for cross-origin workspace mutation and 403 for an in-origin request
+without a human session; the console rendered its unavailable state. This is
+not a completed authenticated browser/API journey. Record final CI run IDs and
 artifact ID in the release report after publication.
 
 Next: configure and validate an actual IdP over HTTPS, complete a browser/API

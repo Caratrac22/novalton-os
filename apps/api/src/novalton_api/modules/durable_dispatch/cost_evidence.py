@@ -31,6 +31,7 @@ class CostExposure:
     provider_generation_id: str | None
     provider_reported_cost: Decimal | None
     provider_reported_at: datetime | None
+    provider_report_exceeds_reservation: bool
 
 
 def _classification(run: ModelRun) -> str:
@@ -124,6 +125,11 @@ async def list_cost_exposure(
             provider_reported_at=observations[run.id].observed_at
             if run.id in observations
             else None,
+            provider_report_exceeds_reservation=(
+                run.id in observations
+                and run.reserved_estimated_exposure is not None
+                and observations[run.id].reported_cost > run.reserved_estimated_exposure
+            ),
         )
         for run in runs
     ]

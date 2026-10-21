@@ -53,6 +53,16 @@ def test_authenticated_generation_metadata_is_bounded_and_strict():
             fetch_openrouter_cost("../other", api_key="test-secret", transport=_transport())
         )
 
+    def timeout(request: httpx.Request):
+        raise httpx.ReadTimeout("simulated", request=request)
+
+    with pytest.raises(ApplicationError):
+        asyncio.run(
+            fetch_openrouter_cost(
+                "gen-123", api_key="test-secret", transport=httpx.MockTransport(timeout)
+            )
+        )
+
 
 async def _seed():
     database = Database.from_settings(Settings())
@@ -142,6 +152,29 @@ def test_provider_reconciliation_serializes_competitors_and_preserves_evidence(r
             await database.dispose()
 
     async def compete():
+        database = Database.from_settings(Settings())
+        try:
+            async with database.session_factory.begin() as session:
+                with pytest.raises(ApplicationError):
+                    await reconcile_openrouter_cost(
+                        session,
+                        tenant_id=tenant_id,
+                        workspace_id=uuid4(),
+                        model_run_id=run_id,
+                        api_key="test-secret",
+                        transport=_transport(),
+                    )
+                with pytest.raises(ApplicationError):
+                    await reconcile_openrouter_cost(
+                        session,
+                        tenant_id=tenant_id,
+                        workspace_id=workspace_id,
+                        model_run_id=run_id,
+                        api_key="test-secret",
+                        transport=_transport(status=503),
+                    )
+        finally:
+            await database.dispose()
         assert await asyncio.gather(reconcile(0.0015), reconcile(0.0015)) == [
             Decimal("0.0015000000"),
             Decimal("0.0015000000"),

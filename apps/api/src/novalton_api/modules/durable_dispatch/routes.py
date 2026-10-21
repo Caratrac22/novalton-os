@@ -186,6 +186,7 @@ async def costs(
             "provider_generation_id": item.provider_generation_id,
             "provider_reported_cost": item.provider_reported_cost,
             "provider_reported_at": item.provider_reported_at,
+            "provider_report_exceeds_reservation": item.provider_report_exceeds_reservation,
             "currency": item.currency,
         }
         for item in await list_cost_exposure(

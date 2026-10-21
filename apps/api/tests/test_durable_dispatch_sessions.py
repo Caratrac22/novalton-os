@@ -18,12 +18,47 @@ from novalton_api.core.config import Settings, get_settings
 from novalton_api.core.database import Database
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.main import create_app
-from novalton_api.modules.durable_dispatch import provisioning, service
+from novalton_api.modules.durable_dispatch import oidc_keys, provisioning, service
 from novalton_api.modules.durable_dispatch.identity import FederatedOperatorIdentity
 from novalton_api.modules.durable_dispatch.models import DispatchActivation
 from novalton_api.modules.durable_dispatch.sessions import authenticate_session
 
 pytest_plugins = ["test_durable_dispatch"]
+
+
+def test_rotating_jwks_still_requires_bound_human_and_workspace(scope, federated, monkeypatch):
+    monkeypatch.delenv("NOVALTON_OPERATOR_OIDC_PUBLIC_KEY_PEM")
+    monkeypatch.setenv("NOVALTON_OPERATOR_OIDC_JWKS_URI", "https://identity.example.test/jwks")
+    get_settings.cache_clear()
+
+    async def keys(_uri):
+        return {"current": federated.public_key}
+
+    monkeypatch.setattr(oidc_keys, "_fetch", keys)
+    monkeypatch.setattr(oidc_keys, "_cached_uri", None)
+    token = federated(kid="current")
+    base = f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}/dispatch"
+    with TestClient(create_app()) as client:
+        assert (
+            client.get(f"{base}/requests", headers={"Authorization": f"Bearer {token}"}).status_code
+            == 200
+        )
+        assert (
+            client.get(
+                f"{base}/requests", headers={"Authorization": f"Bearer {federated(kid='other')}"}
+            ).status_code
+            == 401
+        )
+        monkeypatch.setattr(oidc_keys, "_cached_until", 0)
+
+        async def revoked(_uri):
+            return {}
+
+        monkeypatch.setattr(oidc_keys, "_fetch", revoked)
+        assert (
+            client.get(f"{base}/requests", headers={"Authorization": f"Bearer {token}"}).status_code
+            == 401
+        )
 
 
 @pytest.fixture
@@ -54,7 +89,7 @@ def federated(scope, monkeypatch):
         )
     )
 
-    def token(*, offset=0, audience="novalton-operator", subject="human-123", human=True):
+    def token(*, offset=0, audience="novalton-operator", subject="human-123", human=True, kid=None):
         now = int(datetime.now(UTC).timestamp())
         claims = {
             "iss": issuer,
@@ -65,7 +100,9 @@ def federated(scope, monkeypatch):
         }
         if human:
             claims["auth_time"] = now + offset - 130
-        return jwt.encode(claims, private, algorithm="RS256")
+        return jwt.encode(claims, private, algorithm="RS256", headers={"kid": kid} if kid else None)
+
+    token.public_key = private.public_key()
 
     yield token
     db_call(lambda session: _remove_binding(session, subject_id))
