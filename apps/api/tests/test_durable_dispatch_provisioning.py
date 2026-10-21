@@ -1,6 +1,8 @@
 """Trusted operator handoff and revocation against disposable PostgreSQL."""
 
+import asyncio
 import hashlib
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
@@ -12,6 +14,7 @@ from test_durable_dispatch import (
     db_call,
     enqueue,
     operator_for,
+    snapshot,
     tick,
 )
 
@@ -164,3 +167,48 @@ def test_concurrent_rotation_has_one_successor_and_scope_is_not_forgeable(scope)
         assert "dispatch_operator_forbidden" in outcomes
     finally:
         remove_successors(*candidates)
+
+
+def test_provisioning_revocation_fences_late_generation(scope):
+    provider = QueueProvider([_manager()])
+    row, _, _ = enqueue(scope, provider)
+    entered, released = threading.Event(), threading.Event()
+    complete = provider.complete
+
+    async def delayed(request):
+        entered.set()
+        assert await asyncio.to_thread(released.wait, 15)
+        return await complete(request)
+
+    provider.complete = delayed
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        active = executor.submit(tick, scope, provider)
+        assert entered.wait(15)
+        try:
+            assert db_call(
+                lambda session: provisioning.revoke_permission(
+                    session,
+                    operator=operator_for(scope),
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    subject_id=operator_for(scope).user_id,
+                    permission="activation.configure",
+                )
+            )
+        finally:
+            released.set()
+        with pytest.raises(ApplicationError) as interrupted:
+            active.result(timeout=20)
+        assert interrupted.value.status_code == 403
+
+    dispatch, attempts, models = snapshot(scope, row.id)
+    assert (dispatch.status, len(attempts), len(models), len(provider.calls)) == (
+        "BLOCKED",
+        1,
+        1,
+        1,
+    )
+    assert models[0].status == "SUCCEEDED"
+    with pytest.raises(ApplicationError):
+        tick(scope, provider)
+    assert snapshot(scope, row.id)[0].attempt_count == 1

@@ -39,7 +39,9 @@ async def rotate_operator(
     if (
         not isinstance(successor_id, UUID)
         or successor_id == operator.user_id
+        or not isinstance(successor_label, str)
         or _LABEL.fullmatch(successor_label) is None
+        or not isinstance(permissions, frozenset)
         or not permissions
         or not permissions <= PERMISSIONS
         or "activation.configure" not in permissions
