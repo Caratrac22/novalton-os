@@ -569,7 +569,10 @@ def test_revoked_activation_grant_stops_worker_claims_after_engaged_provider(sco
 
     persisted, attempts, models = snapshot(scope, row.id)
     assert (persisted.status, len(attempts), len(models), len(provider.calls)) == (
-        "BLOCKED", 1, 1, 1
+        "BLOCKED",
+        1,
+        1,
+        1,
     )
     assert attempts[0].outcome == "BLOCKED"
     assert models[0].status == "SUCCEEDED"
