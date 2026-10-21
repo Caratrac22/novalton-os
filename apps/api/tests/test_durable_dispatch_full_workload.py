@@ -15,6 +15,7 @@ from test_durable_dispatch import db_call, enqueue, other_task
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
+from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.contracts import GenerationRequest, GenerationResult
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.modules.durable_dispatch import service
@@ -74,6 +75,7 @@ def test_complete_workflows_with_six_workers(scope, capsys, count):
     completed: set = set()
     errors: list[str] = []
     lock = threading.Lock()
+    abort = threading.Event()
 
     def worker():
         async def execute():
@@ -81,6 +83,8 @@ def test_complete_workflows_with_six_workers(scope, capsys, count):
             try:
                 deadline = time.monotonic() + 240
                 while time.monotonic() < deadline:
+                    if abort.is_set():
+                        return
                     with lock:
                         if len(completed) == count:
                             return
@@ -105,7 +109,8 @@ def test_complete_workflows_with_six_workers(scope, capsys, count):
             asyncio.run(execute())
         except Exception as exc:
             with lock:
-                errors.append(type(exc).__name__)
+                errors.append(exc.code if isinstance(exc, ApplicationError) else type(exc).__name__)
+            abort.set()
 
     started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=6) as executor:
