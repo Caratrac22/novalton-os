@@ -118,6 +118,7 @@ class ModelRunResponse(BaseModel):
     status: ModelRunStatus
     correlation_id: str | None
     provider_request_id: str | None
+    provider_generation_id: str | None
     input_tokens: int | None
     output_tokens: int | None
     total_tokens: int | None

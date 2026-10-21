@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.modules.durable_dispatch.models import TaskDispatch
 from novalton_api.modules.durable_dispatch.operator import OperatorAuthority
-from novalton_api.modules.model_usage.models import ModelRun
+from novalton_api.modules.model_usage.models import ModelRun, ProviderCostObservation
 from novalton_api.modules.workflows.models import WorkflowStepRun
 
 
@@ -28,6 +28,10 @@ class CostExposure:
     input_price_per_million_snapshot: Decimal | None
     output_price_per_million_snapshot: Decimal | None
     currency: str | None
+    provider_generation_id: str | None
+    provider_reported_cost: Decimal | None
+    provider_reported_at: datetime | None
+    provider_report_exceeds_reservation: bool
 
 
 def _classification(run: ModelRun) -> str:
@@ -93,6 +97,14 @@ async def list_cost_exposure(
             .limit(128)
         )
     )
+    observations = {
+        item.model_run_id: item
+        for item in await session.scalars(
+            select(ProviderCostObservation).where(
+                ProviderCostObservation.model_run_id.in_([run.id for run in runs])
+            )
+        )
+    }
     return [
         CostExposure(
             model_run_id=run.id,
@@ -106,6 +118,18 @@ async def list_cost_exposure(
             input_price_per_million_snapshot=run.input_price_per_million_snapshot,
             output_price_per_million_snapshot=run.output_price_per_million_snapshot,
             currency=run.currency,
+            provider_generation_id=run.provider_generation_id,
+            provider_reported_cost=observations[run.id].reported_cost
+            if run.id in observations
+            else None,
+            provider_reported_at=observations[run.id].observed_at
+            if run.id in observations
+            else None,
+            provider_report_exceeds_reservation=(
+                run.id in observations
+                and run.reserved_estimated_exposure is not None
+                and observations[run.id].reported_cost > run.reserved_estimated_exposure
+            ),
         )
         for run in runs
     ]

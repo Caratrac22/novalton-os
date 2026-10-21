@@ -13,6 +13,7 @@ from sqlalchemy import (
     Index,
     Numeric,
     String,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
@@ -120,6 +121,11 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(
             "provider_request_id IS NULL OR char_length(provider_request_id) BETWEEN 1 AND 128",
             name="ck_model_runs_provider_request_id_length",
+        ),
+        CheckConstraint(
+            "provider_generation_id IS NULL OR "
+            "char_length(provider_generation_id) BETWEEN 1 AND 128",
+            name="ck_model_runs_provider_generation_id_length",
         ),
         CheckConstraint(
             "input_tokens IS NULL OR input_tokens >= 0",
@@ -270,6 +276,7 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     provider_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    provider_generation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -288,3 +295,24 @@ class ModelRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProviderCostObservation(Base):
+    """Authenticated provider usage lookup; explicitly distinct from an invoice."""
+
+    __tablename__ = "provider_cost_observations"
+    __table_args__ = (
+        UniqueConstraint("provider_id", "generation_id", name="uq_provider_cost_generation"),
+        CheckConstraint("reported_cost >= 0", name="ck_provider_cost_non_negative"),
+    )
+
+    model_run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("model_runs.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    provider_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    generation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    reported_cost: Mapped[Decimal] = mapped_column(Numeric(20, 10), nullable=False)
+    response_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

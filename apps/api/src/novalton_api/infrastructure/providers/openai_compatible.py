@@ -261,6 +261,11 @@ class OpenAICompatibleProvider:
         output_tokens = self._optional_token(usage.get("completion_tokens"))
         total_tokens = self._optional_token(usage.get("total_tokens"))
         request_id = self._safe_request_id(response)
+        generation_id = payload.get("id") if self.provider_id == "openrouter" else None
+        if generation_id is not None and (
+            not isinstance(generation_id, str) or _SAFE_REQUEST_ID.fullmatch(generation_id) is None
+        ):
+            raise ProviderError(ProviderFailure.MALFORMED_RESPONSE, provider_id=self.provider_id)
         try:
             return GenerationResult(
                 provider_id=self.provider_id,
@@ -273,6 +278,7 @@ class OpenAICompatibleProvider:
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
                 provider_request_id=request_id,
+                provider_generation_id=generation_id,
                 duration_ms=duration_ms,
             )
         except ValueError:

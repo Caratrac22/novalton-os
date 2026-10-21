@@ -10,17 +10,19 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from test_development_workflow import _manager, _qa, _worker
-from test_durable_dispatch import db_call, enqueue, operator_for, other_task, snapshot, tick
+from test_durable_dispatch import db_call, enqueue, expire, operator_for, other_task, snapshot, tick
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.contracts import GenerationRequest, GenerationResult
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
-from novalton_api.modules.durable_dispatch import provisioning, service
+from novalton_api.modules.durable_dispatch import provisioning, repository, service
 from novalton_api.modules.durable_dispatch.models import DispatchAttempt, TaskDispatch
 from novalton_api.modules.model_usage.models import ModelRun
+from novalton_api.modules.workflows.models import WorkflowStepRun
 
 pytest_plugins = ["test_durable_dispatch"]
 
@@ -361,6 +363,7 @@ def test_completed_workflows_after_bounded_worker_restart(scope, capsys):
             max_attempts=3,
             max_model_calls=3,
         )
+
         rows.append(row)
 
     def worker(max_ticks):
@@ -471,6 +474,105 @@ def test_completed_workflows_after_bounded_worker_restart(scope, capsys):
                     "end_to_end_p99_seconds": round(latencies[int((count - 1) * 0.99)], 3),
                     "model_runs": len(provider.calls),
                     "first_phase_model_runs": first_phase,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
+
+def test_lost_heartbeat_preserves_one_result_while_an_independent_workflow_finishes(
+    scope, monkeypatch, capsys
+):
+    """Two workers: a lost in-flight claim must not replay or starve another run."""
+    slow, independent = RoleProvider(), RoleProvider()
+    blocked, _, _ = enqueue(scope, slow, priority=10, max_attempts=3, max_model_calls=3)
+    task_scope = other_task(scope)
+    finished, _, _ = enqueue(task_scope, independent, priority=0, max_attempts=3, max_model_calls=3)
+    entered, failed_heartbeat, released = threading.Event(), threading.Event(), threading.Event()
+    original = slow.complete
+
+    async def delayed(request):
+        entered.set()
+        assert await asyncio.to_thread(released.wait, 15)
+        return await original(request)
+
+    async def heartbeat_failed(session, claimed, *, lease_seconds=3600):
+        assert await asyncio.to_thread(entered.wait, 10)
+        failed_heartbeat.set()
+        return False
+
+    slow.complete = delayed
+    monkeypatch.setattr(repository, "heartbeat", heartbeat_failed)
+
+    async def controlled(session):
+        return await service.run_once(
+            session,
+            registry=ProviderRegistry((slow,)),
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            owner=uuid4(),
+            lease_seconds=60,
+            heartbeat_session_factory=async_sessionmaker(session.bind, expire_on_commit=False),
+            heartbeat_interval_seconds=0.05,
+        )
+
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        late = executor.submit(db_call, controlled)
+        assert entered.wait(15)
+        assert failed_heartbeat.wait(10)
+        try:
+            outcomes = [tick(scope, independent).outcome.value for _ in range(3)]
+            assert outcomes[-1] == "WORKFLOW_COMPLETED"
+        finally:
+            released.set()
+        with pytest.raises(ApplicationError) as lost:
+            late.result(timeout=20)
+    assert lost.value.code == "dispatch_claim_lost"
+    expire(blocked.id)
+    assert tick(scope, independent) is None
+    first, attempts, _ = snapshot(scope, blocked.id)
+    second, completed_attempts, _ = snapshot(scope, finished.id)
+
+    async def evidence(session):
+        return list(
+            await session.execute(
+                select(WorkflowStepRun.workflow_run_id, ModelRun.status)
+                .join(ModelRun, ModelRun.agent_run_id == WorkflowStepRun.agent_run_id)
+                .where(
+                    WorkflowStepRun.workflow_run_id.in_(
+                        [blocked.workflow_run_id, finished.workflow_run_id]
+                    )
+                )
+            )
+        )
+
+    model_evidence = db_call(evidence)
+    blocked_models = [
+        status for workflow_id, status in model_evidence if workflow_id == blocked.workflow_run_id
+    ]
+    finished_models = [
+        status for workflow_id, status in model_evidence if workflow_id == finished.workflow_run_id
+    ]
+    assert first.status == "BLOCKED"
+    assert len(attempts) == len(blocked_models) == len(slow.calls) == 1
+    assert blocked_models == ["SUCCEEDED"]
+    assert second.status == "DONE"
+    assert len(completed_attempts) == len(finished_models) == len(independent.calls) == 3
+    assert finished_models == ["SUCCEEDED"] * 3
+    assert independent.calls.count("qa") == 1
+    with capsys.disabled():
+        print(
+            "dispatch_heartbeat_turnover "
+            + json.dumps(
+                {
+                    "completed_workflows": 1,
+                    "blocked_workflows": 1,
+                    "workers": 2,
+                    "model_runs": 4,
+                    "elapsed_seconds": round(time.perf_counter() - started, 3),
+                    "unexpected_errors": 0,
                 },
                 sort_keys=True,
             ),

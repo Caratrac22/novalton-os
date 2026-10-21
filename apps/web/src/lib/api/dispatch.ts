@@ -1,6 +1,6 @@
 import "server-only";
 import { cookies } from "next/headers";
-import { getApiBaseUrl, scopedApiPath } from "@/lib/api/config";
+import { getApiBaseUrl, scopedApiPath, selectedOperatorScope, type WorkspaceScope } from "@/lib/api/config";
 import { isUuid } from "@/lib/api/scoped";
 
 export type DispatchSummary = {
@@ -11,11 +11,13 @@ export type DispatchSummary = {
   reserved_estimated_exposure: string; stop_reason: string | null;
 };
 
-export async function dispatchUpstream(path: string, init?: RequestInit): Promise<Response | null> {
-  const token = (await cookies()).get("__Host-novalton-operator-session")?.value;
+export async function dispatchUpstream(path: string, init?: RequestInit, scope?: WorkspaceScope): Promise<Response | null> {
+  const cookieJar = await cookies();
+  const token = cookieJar.get("__Host-novalton-operator-session")?.value;
   if (!token || token.length > 8192 || !/^[\w-]+\.[\w-]+\.[\w-]+$/.test(token)) return null;
   try {
-    return await fetch(`${getApiBaseUrl()}${scopedApiPath(`dispatch/${path}`)}`, {
+    const chosen = scope ?? selectedOperatorScope(cookieJar.get("__Host-novalton-operator-workspace")?.value);
+    return await fetch(`${getApiBaseUrl()}${scopedApiPath(`dispatch/${path}`, chosen)}`, {
       ...init, cache: "no-store", headers: {
         Accept: "application/json", ...(init?.headers ?? {}), Authorization: `Bearer ${token}`,
       }, signal: AbortSignal.timeout(7000),

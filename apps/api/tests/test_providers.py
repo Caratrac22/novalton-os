@@ -574,6 +574,7 @@ async def test_successful_normalization_serialization_and_nullable_usage() -> No
         "output_tokens": None,
         "total_tokens": None,
         "provider_request_id": "safe-request_123",
+        "provider_generation_id": "completion-id",
     }
     assert result.duration_ms is not None
     assert len(captured) == 1
@@ -814,6 +815,21 @@ async def test_usage_and_unsafe_request_id_normalization() -> None:
         result = await provider.complete(request())
     assert (result.input_tokens, result.output_tokens, result.total_tokens) == (12, 4, 16)
     assert result.provider_request_id is None
+
+
+@pytest.mark.asyncio
+async def test_openrouter_generation_identity_is_separate_from_request_header() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=response_payload(id="gen-abc_123"), headers={"X-Request-ID": "req-456"}
+        )
+
+    async with OpenAICompatibleProvider(
+        config(), transport=httpx.MockTransport(handler)
+    ) as provider:
+        result = await provider.complete(request())
+    assert result.provider_generation_id == "gen-abc_123"
+    assert result.provider_request_id == "req-456"
 
 
 @pytest.mark.asyncio

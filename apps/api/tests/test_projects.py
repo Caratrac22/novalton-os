@@ -117,6 +117,7 @@ def test_project_metadata_has_workspace_scope_and_constraints() -> None:
         "policy_rules",
         "model_definitions",
         "model_runs",
+        "provider_cost_observations",
         "agent_definitions",
         "agent_runs",
         "workflow_plans",

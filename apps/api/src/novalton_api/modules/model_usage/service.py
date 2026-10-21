@@ -240,6 +240,13 @@ async def mark_succeeded(
         raise ApplicationError(
             "model_run_invalid_request_id", "Provider request identifier is invalid"
         )
+    if (
+        result.provider_generation_id is not None
+        and _SAFE_REQUEST_ID.fullmatch(result.provider_generation_id) is None
+    ):
+        raise ApplicationError(
+            "model_run_invalid_generation_id", "Provider generation identifier is invalid"
+        )
     if result.duration_ms is not None and result.duration_ms > 86_400_000:
         raise ApplicationError("model_run_invalid_duration", "Provider duration is invalid")
     if any(
@@ -266,6 +273,7 @@ async def mark_succeeded(
         values={
             "status": ModelRunStatus.SUCCEEDED.value,
             "provider_request_id": result.provider_request_id,
+            "provider_generation_id": result.provider_generation_id,
             "finish_reason": result.finish_reason,
             "truncation_classification": truncation_classification,
             "provider_resolved_model_id": result.provider_resolved_model_id,
