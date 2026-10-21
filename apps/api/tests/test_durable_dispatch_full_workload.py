@@ -11,14 +11,14 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select
 from test_development_workflow import _manager, _qa, _worker
-from test_durable_dispatch import db_call, enqueue, other_task
+from test_durable_dispatch import db_call, enqueue, operator_for, other_task, snapshot, tick
 
 from novalton_api.core.config import Settings
 from novalton_api.core.database import Database
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.contracts import GenerationRequest, GenerationResult
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
-from novalton_api.modules.durable_dispatch import service
+from novalton_api.modules.durable_dispatch import provisioning, service
 from novalton_api.modules.durable_dispatch.models import DispatchAttempt, TaskDispatch
 from novalton_api.modules.model_usage.models import ModelRun
 
@@ -55,6 +55,55 @@ class RoleProvider:
             total_tokens=15,
             duration_ms=1,
         )
+
+
+@pytest.mark.parametrize("step_index", [0, 1, 2])
+def test_membership_revocation_during_each_role_preserves_late_model_evidence(scope, step_index):
+    provider = RoleProvider()
+    row, _, _ = enqueue(scope, provider, max_attempts=3, max_model_calls=3)
+    for _ in range(step_index):
+        assert tick(scope, provider).outcome.value == "STEP_COMPLETED"
+    entered, released = threading.Event(), threading.Event()
+    complete = provider.complete
+
+    async def delayed(request):
+        entered.set()
+        assert await asyncio.to_thread(released.wait, 15)
+        return await complete(request)
+
+    provider.complete = delayed
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        active = executor.submit(tick, scope, provider)
+        assert entered.wait(15)
+        try:
+            actor = operator_for(scope)
+            assert db_call(
+                lambda session: provisioning.revoke_tenant_membership(
+                    session,
+                    operator=actor,
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    subject_id=actor.user_id,
+                )
+            )
+        finally:
+            released.set()
+        with pytest.raises(ApplicationError) as interrupted:
+            active.result(timeout=20)
+        assert interrupted.value.status_code == 403
+    dispatch, attempts, models = snapshot(scope, row.id)
+    assert dispatch.status == "BLOCKED"
+    assert (
+        dispatch.attempt_count
+        == len(attempts)
+        == len(models)
+        == len(provider.calls)
+        == step_index + 1
+    )
+    assert all(model.status == "SUCCEEDED" for model in models)
+    assert provider.calls == ["manager", "developer", "qa"][: step_index + 1]
+    with pytest.raises(ApplicationError):
+        tick(scope, provider)
 
 
 @pytest.mark.parametrize("count", [10, 25, 50])

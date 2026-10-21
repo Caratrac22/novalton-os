@@ -35,8 +35,18 @@ def _classification(run: ModelRun) -> str:
         return "EXTERNAL_OUTCOME_UNKNOWN"
     if run.status != "SUCCEEDED":
         return "EXTERNAL_COST_UNCERTAIN"
+    if (
+        run.provider_resolved_model_id is not None
+        and run.provider_resolved_model_id != run.provider_model_id
+    ):
+        return "CATALOG_MODEL_MISMATCH_COST_UNCERTAIN"
     if run.actual_cost is None:
         return "CATALOG_PRICED_USAGE_UNKNOWN"
+    if (
+        run.reserved_estimated_exposure is not None
+        and run.actual_cost > run.reserved_estimated_exposure
+    ):
+        return "RESERVED_ESTIMATE_EXCEEDED"
     if run.estimated_cost is None:
         return "CATALOG_PRICED_UNESTIMATED"
     if run.actual_cost > run.estimated_cost:

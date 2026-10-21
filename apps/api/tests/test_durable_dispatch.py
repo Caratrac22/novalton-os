@@ -1554,6 +1554,40 @@ def test_estimated_exposure_limit_rejects_next_step_without_refunding_first(scop
     assert tick(scope, provider) is None
 
 
+def test_concurrent_workers_reserve_estimated_exposure_once(scope):
+    async def price(session):
+        await session.execute(
+            update(ModelDefinition)
+            .where(ModelDefinition.id == scope.model_id)
+            .values(last_verified_at=datetime.now(UTC))
+        )
+        await session.commit()
+
+    db_call(price)
+    provider = QueueProvider([_manager()])
+    row, _, _ = enqueue(scope, provider, max_estimated_exposure=Decimal("0.20"))
+    entered, released = threading.Event(), threading.Event()
+    original = provider.complete
+
+    async def delayed(request):
+        entered.set()
+        assert await asyncio.to_thread(released.wait, 15)
+        return await original(request)
+
+    provider.complete = delayed
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(tick, scope, provider)
+        assert entered.wait(15)
+        try:
+            assert executor.submit(tick, scope, provider).result(timeout=15) is None
+        finally:
+            released.set()
+        assert first.result(timeout=20).outcome.value == "STEP_COMPLETED"
+    persisted, attempts, models = snapshot(scope, row.id)
+    assert persisted.reserved_estimated_exposure == Decimal("0.1935360000")
+    assert persisted.model_call_count == len(attempts) == len(models) == len(provider.calls) == 1
+
+
 def test_global_switch_and_workspace_activation_are_both_required(scope, monkeypatch):
     provider = QueueProvider([])
     row, _, _ = enqueue(scope, provider)

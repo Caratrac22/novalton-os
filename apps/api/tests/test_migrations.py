@@ -331,7 +331,7 @@ def test_durable_dispatch_downgrade_preserves_enqueued_history(monkeypatch):
 
     identifier = asyncio.run(enqueue())
     try:
-        with pytest.raises(RuntimeError, match="operator_identity_downgrade_has_history"):
+        with pytest.raises(RuntimeError, match="operator_membership_downgrade_has_history"):
             command.downgrade(config, "20261011_0032")
 
         async def preserved():
@@ -340,7 +340,7 @@ def test_durable_dispatch_downgrade_preserves_enqueued_history(monkeypatch):
                 async with database.session_factory() as session:
                     assert await session.get(TaskDispatch, identifier) is not None
                     revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-                    assert revision == "20261021_0035"
+                    assert revision == "20261021_0036"
             finally:
                 await database.dispose()
 

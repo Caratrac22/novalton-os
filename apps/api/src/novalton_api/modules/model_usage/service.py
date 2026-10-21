@@ -191,6 +191,13 @@ async def set_execution_diagnostics(
 
 
 def _actual_cost(run: ModelRun, result: GenerationResult) -> Decimal | None:
+    if (
+        result.provider_resolved_model_id is not None
+        and result.provider_resolved_model_id != run.provider_model_id
+    ):
+        # A different resolved model may have a different tariff. Preserve
+        # the usage tokens but leave the catalog-derived amount unknown.
+        return None
     if result.input_tokens is None or result.output_tokens is None:
         return None
     if (
