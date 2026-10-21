@@ -14,7 +14,7 @@ from novalton_api.modules.durable_dispatch.identity import (
     HumanOperator,
     WorkspaceOperatorPermission,
 )
-from novalton_api.modules.durable_dispatch.operator import OperatorAuthority, PERMISSIONS
+from novalton_api.modules.durable_dispatch.operator import PERMISSIONS, OperatorAuthority
 
 _LABEL = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
