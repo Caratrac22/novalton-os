@@ -27,6 +27,12 @@ Branch `feature/mission8-session-operator` is stacked on Mission 7 PR #96 at
 - Migration `20261021_0038` stores the federated subject binding; it guards
   downgrades containing history. Existing dispatch and QA reconciliation
   fences are unchanged.
+- A bounded deterministic workload stops two workers after six committed
+  provider steps, then completes ten Manager → Developer → QA workflows with
+  four fresh workers. It verifies exactly three attempts and ModelRuns per
+  workflow and measures completed-workflow latency across the turnover. This
+  tests restart at committed boundaries, not process death during a network
+  invocation or long-duration production endurance.
 
 ## Configuration and limits
 

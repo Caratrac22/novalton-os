@@ -228,9 +228,9 @@ def federated_operator_authority(
 def require_configured_activator(operator: OperatorAuthority) -> None:
     """The bounded worker can be activated only for its configured human principal."""
     _, _, user_id, tenant_id, workspace_id, _ = _configured()
-    if (
-        operator.user_id != user_id
-        or (operator.tenant_id, operator.workspace_id) != (tenant_id, workspace_id)
+    if operator.user_id != user_id or (operator.tenant_id, operator.workspace_id) != (
+        tenant_id,
+        workspace_id,
     ):
         raise _forbidden()
 

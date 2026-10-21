@@ -337,3 +337,142 @@ def test_progressive_complete_workflows_with_mixed_generation_latency(scope, cap
             ),
             flush=True,
         )
+
+
+def test_completed_workflows_after_bounded_worker_restart(scope, capsys):
+    """Worker turnover at committed step boundaries cannot replay Manager or QA."""
+    provider = RoleProvider()
+    complete = provider.complete
+
+    async def delayed(request):
+        await asyncio.sleep(0.005 if len(provider.calls) % 2 else 0.02)
+        return await complete(request)
+
+    provider.complete = delayed
+    registry = ProviderRegistry((provider,))
+    count = 10
+    rows = []
+    for index in range(count):
+        task_scope = scope if index == 0 else other_task(scope)
+        row, _, _ = enqueue(
+            task_scope,
+            provider,
+            priority=index % 3 - 1,
+            max_attempts=3,
+            max_model_calls=3,
+        )
+        rows.append(row)
+
+    def worker(max_ticks):
+        async def execute():
+            database = Database.from_settings(Settings.from_environment())
+            try:
+                deadline = time.monotonic() + 120
+                ticks = 0
+                while time.monotonic() < deadline and ticks < max_ticks:
+                    async with database.session_factory() as session:
+                        result = await service.run_once(
+                            session,
+                            registry=registry,
+                            tenant_id=scope.tenant_id,
+                            workspace_id=scope.workspace_id,
+                            owner=uuid4(),
+                        )
+                    if result is None:
+                        await asyncio.sleep(0.01)
+                    else:
+                        ticks += 1
+                if ticks < max_ticks:
+                    raise TimeoutError("bounded restart workload did not finish")
+            finally:
+                await database.dispose()
+
+        asyncio.run(execute())
+
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        for future in [executor.submit(worker, 3) for _ in range(2)]:
+            future.result(timeout=130)
+    first_phase = len(provider.calls)
+    assert first_phase == 6
+
+    def finish_worker():
+        async def execute():
+            database = Database.from_settings(Settings.from_environment())
+            try:
+                deadline = time.monotonic() + 120
+                while time.monotonic() < deadline:
+                    async with database.session_factory() as session:
+                        done = await session.scalar(
+                            select(func.count())
+                            .select_from(TaskDispatch)
+                            .where(
+                                TaskDispatch.id.in_([row.id for row in rows]),
+                                TaskDispatch.status == "DONE",
+                            )
+                        )
+                        if done == count:
+                            return
+                        result = await service.run_once(
+                            session,
+                            registry=registry,
+                            tenant_id=scope.tenant_id,
+                            workspace_id=scope.workspace_id,
+                            owner=uuid4(),
+                        )
+                    if result is None:
+                        await asyncio.sleep(0.01)
+                raise TimeoutError("restart completion did not finish")
+            finally:
+                await database.dispose()
+
+        asyncio.run(execute())
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for future in [executor.submit(finish_worker) for _ in range(4)]:
+            future.result(timeout=130)
+    elapsed = time.perf_counter() - started
+
+    async def evidence(session):
+        return list(
+            await session.execute(
+                select(
+                    TaskDispatch.status,
+                    TaskDispatch.created_at,
+                    func.max(DispatchAttempt.completed_at),
+                    func.count(DispatchAttempt.id),
+                )
+                .join(DispatchAttempt, DispatchAttempt.dispatch_id == TaskDispatch.id)
+                .where(TaskDispatch.id.in_([row.id for row in rows]))
+                .group_by(TaskDispatch.id)
+            )
+        )
+
+    records = db_call(evidence)
+    assert len(records) == count
+    assert all(status == "DONE" and attempts == 3 for status, _, _, attempts in records)
+    assert len(provider.calls) == count * 3
+    assert provider.calls.count("manager") == count
+    assert provider.calls.count("developer") == count
+    assert provider.calls.count("qa") == count
+    latencies = sorted((finished - created).total_seconds() for _, created, finished, _ in records)
+    with capsys.disabled():
+        print(
+            "dispatch_restart "
+            + json.dumps(
+                {
+                    "complete_workflows": count,
+                    "workers_before": 2,
+                    "workers_after": 4,
+                    "elapsed_seconds": round(elapsed, 3),
+                    "completed_per_second": round(count / elapsed, 2),
+                    "end_to_end_p50_seconds": round(median(latencies), 3),
+                    "end_to_end_p95_seconds": round(latencies[int((count - 1) * 0.95)], 3),
+                    "end_to_end_p99_seconds": round(latencies[int((count - 1) * 0.99)], 3),
+                    "model_runs": len(provider.calls),
+                    "first_phase_model_runs": first_phase,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
