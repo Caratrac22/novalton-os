@@ -30,9 +30,10 @@ def test_alembic_configuration_loads_durable_dispatch_after_i044() -> None:
     revision = scripts.get_revision(head)
     predecessor = scripts.get_revision("20260902_0031")
 
-    assert head == "20261021_0039"
+    assert head == "20261022_0040"
     assert revision is not None
-    assert revision.down_revision == "20261021_0038"
+    assert revision.down_revision == "20261021_0039"
+    assert scripts.get_revision("20261021_0039").down_revision == "20261021_0038"
     assert scripts.get_revision("20261021_0038").down_revision == "20261021_0037"
     assert scripts.get_revision("20261021_0037").down_revision == "20261021_0036"
     assert scripts.get_revision("20261021_0036").down_revision == "20261021_0035"
@@ -344,7 +345,7 @@ def test_durable_dispatch_downgrade_preserves_enqueued_history(monkeypatch):
                     revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
                     # Alembic rolls the whole downgrade command back when the
                     # membership history guard rejects it.
-                    assert revision == "20261021_0039"
+                    assert revision == ScriptDirectory.from_config(config).get_current_head()
             finally:
                 await database.dispose()
 

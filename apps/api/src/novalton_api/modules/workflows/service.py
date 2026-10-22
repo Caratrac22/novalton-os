@@ -533,6 +533,7 @@ async def list_runs(
     limit: int,
     offset: int,
     status: WorkflowRunStatus | None,
+    task_id: UUID | None = None,
 ) -> list[WorkflowRun]:
     if (
         await get_workspace_by_tenant_and_id(
@@ -548,6 +549,7 @@ async def list_runs(
         limit=limit,
         offset=offset,
         status=status.value if status else None,
+        task_id=task_id,
     )
 
 

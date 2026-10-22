@@ -94,7 +94,7 @@ class WorkspaceOperatorPermission(Base):
         ),
         CheckConstraint(
             "permission IN ('activation.configure','dispatch.enqueue','dispatch.read',"
-            "'dispatch.cancel','dispatch.resolve')",
+            "'dispatch.cancel','dispatch.resolve','workspace.read','workspace.write')",
             name="ck_operator_permission_name",
         ),
         CheckConstraint(

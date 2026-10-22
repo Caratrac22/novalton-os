@@ -113,6 +113,8 @@ class Settings(BaseModel):
     operator_oidc_audience: str | None = None
     operator_oidc_public_key_pem: str | None = None
     operator_oidc_jwks_uri: str | None = None
+    # Only the isolated PostgreSQL test harness may use legacy unauthenticated fixtures.
+    test_legacy_api_auth_bypass: bool = False
     workspace_root: str | None = None
     github_owner: str | None = Field(default=None, min_length=1, max_length=39)
     github_repository: str | None = Field(default=None, min_length=1, max_length=100)
@@ -162,6 +164,7 @@ class Settings(BaseModel):
         "operator_oidc_audience": "NOVALTON_OPERATOR_OIDC_AUDIENCE",
         "operator_oidc_public_key_pem": "NOVALTON_OPERATOR_OIDC_PUBLIC_KEY_PEM",
         "operator_oidc_jwks_uri": "NOVALTON_OPERATOR_OIDC_JWKS_URI",
+        "test_legacy_api_auth_bypass": "NOVALTON_TEST_LEGACY_API_AUTH_BYPASS",
         "workspace_root": "NOVALTON_WORKSPACE_ROOT",
         "github_owner": "NOVALTON_GITHUB_OWNER",
         "github_repository": "NOVALTON_GITHUB_REPOSITORY",

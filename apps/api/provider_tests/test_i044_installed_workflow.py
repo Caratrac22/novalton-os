@@ -23,7 +23,7 @@ def test_installed_governed_verify_correct_verify(monkeypatch):
             "HTTPS_PROXY",
         )
     )
-    from novalton_api.core.config import Settings
+    from novalton_api.core.config import Settings, get_settings
     from novalton_api.core.database import verify_database_identity
     from novalton_api.infrastructure.verification_sandbox import (
         VerificationSandboxAdapter,
@@ -31,6 +31,10 @@ def test_installed_governed_verify_correct_verify(monkeypatch):
     )
 
     asyncio.run(verify_database_identity(Settings.from_environment()))
+    # This legacy I-044 acceptance exercises governed execution, not SaaS login.
+    # Its identity check above confines the fixture exemption to disposable PostgreSQL.
+    monkeypatch.setenv("NOVALTON_TEST_LEGACY_API_AUTH_BYPASS", "true")
+    get_settings.cache_clear()
     root = Path("/srv/novalton/workspace")
     assert root.is_dir() and not root.is_symlink()
     assert root.stat().st_uid == os.geteuid()
@@ -54,3 +58,4 @@ def test_installed_governed_verify_correct_verify(monkeypatch):
         run_i044_verification_cycle(scope, root, monkeypatch, installed=True)
     finally:
         asyncio.run(_cleanup(scope))
+        get_settings.cache_clear()

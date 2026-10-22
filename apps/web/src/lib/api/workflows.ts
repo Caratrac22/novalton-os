@@ -1,12 +1,12 @@
 import "server-only";
-import { fetchScopedJson, isRecord, isTimestamp, isUuid } from "@/lib/api/scoped";
-import { getApiBaseUrl, scopedApiPath } from "@/lib/api/config";
-import type { OperatorWorkflow, WorkflowPlan, WorkflowRun, WorkflowStep } from "@/lib/api/workflow-types";
+import { fetchScopedJson, scopedSessionFetch, isRecord, isTimestamp, isUuid } from "@/lib/api/scoped";
+import { WORKFLOW_RUN_STATUSES, WORKFLOW_STEP_STATUSES, type OperatorWorkflow, type WorkflowPlan, type WorkflowRun, type WorkflowStep } from "@/lib/api/workflow-types";
 
-export async function getWorkflowRuns(): Promise<WorkflowRun[]> {
-  const value = await fetchScopedJson("workflow-runs?limit=100&offset=0");
-  if (!isRecord(value) || !Array.isArray(value.items)) throw new Error("Invalid workflow response");
-  return value.items.filter(isWorkflowRun) as WorkflowRun[];
+export async function getWorkflowRuns(offset = 0, limit = 100, taskId?: string): Promise<WorkflowRun[]> {
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100 || (taskId !== undefined && !isUuid(taskId))) throw new Error("Invalid page");
+  const value = await fetchScopedJson(`workflow-runs?limit=${limit}&offset=${offset}${taskId ? `&task_id=${taskId}` : ""}`);
+  if (!isRecord(value) || !Array.isArray(value.items) || value.limit !== limit || value.offset !== offset || value.items.length > limit || !value.items.every(isWorkflowRun)) throw new Error("Invalid workflow response");
+  return value.items as WorkflowRun[];
 }
 
 export async function getWorkflowPlan(planId: string): Promise<WorkflowPlan> {
@@ -21,10 +21,10 @@ export async function getOperatorWorkflow(runId: string): Promise<OperatorWorkfl
 }
 
 function isWorkflowRun(value: unknown): value is WorkflowRun {
-  return isRecord(value) && isUuid(value.id) && isUuid(value.task_id) && isUuid(value.workflow_plan_id) && typeof value.plan_version === "number" && typeof value.status === "string" && Array.isArray(value.step_runs) && value.step_runs.every(isStepRun);
+  return isRecord(value) && isUuid(value.id) && isUuid(value.task_id) && isUuid(value.workflow_plan_id) && typeof value.plan_version === "number" && WORKFLOW_RUN_STATUSES.includes(value.status as WorkflowRun["status"]) && Array.isArray(value.step_runs) && value.step_runs.every(isStepRun);
 }
 function isStepRun(value: unknown): boolean {
-  return isRecord(value) && isUuid(value.id) && isUuid(value.workflow_step_id) && typeof value.status === "string" && (value.agent_run_id === null || isUuid(value.agent_run_id)) && (value.failure_code === null || typeof value.failure_code === "string") && (value.started_at === null || isTimestamp(value.started_at)) && (value.completed_at === null || isTimestamp(value.completed_at));
+  return isRecord(value) && isUuid(value.id) && isUuid(value.workflow_step_id) && WORKFLOW_STEP_STATUSES.includes(value.status as WorkflowRun["step_runs"][number]["status"]) && (value.agent_run_id === null || isUuid(value.agent_run_id)) && (value.failure_code === null || typeof value.failure_code === "string") && (value.started_at === null || isTimestamp(value.started_at)) && (value.completed_at === null || isTimestamp(value.completed_at));
 }
 
 function nullableString(value: unknown): value is string | null { return value === null || typeof value === "string"; }
@@ -75,5 +75,5 @@ function isToolCall(value: unknown): boolean {
 }
 
 export async function postWorkflow(path: string, body?: unknown): Promise<Response> {
-  return fetch(`${getApiBaseUrl()}${scopedApiPath(path)}`, { method: "POST", cache: "no-store", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15000) });
+  return scopedSessionFetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15000) });
 }

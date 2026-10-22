@@ -1,5 +1,6 @@
 """Test-suite guards for an explicitly isolated PostgreSQL database."""
 
+import os
 from collections.abc import Iterator
 
 import pytest
@@ -31,11 +32,13 @@ def isolated_database_settings() -> Iterator[None]:
     database_field = Settings.model_fields["database_url"]
     original_default = database_field.default
     database_field.default = test_database_url
+    os.environ["NOVALTON_TEST_LEGACY_API_AUTH_BYPASS"] = "true"
     Settings.model_rebuild(force=True)
     get_settings.cache_clear()
     try:
         yield
     finally:
         database_field.default = original_default
+        os.environ.pop("NOVALTON_TEST_LEGACY_API_AUTH_BYPASS", None)
         Settings.model_rebuild(force=True)
         get_settings.cache_clear()
