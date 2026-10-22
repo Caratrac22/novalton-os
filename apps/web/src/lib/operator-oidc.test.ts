@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { test } from "node:test";
-import { clearOperatorSessionCookies, configuration, discover, exchangeCode, newTransaction, openTransaction, sealTransaction, sessionCookie, transactionCookie, workspaceCookie } from "./operator-oidc.ts";
+import { clearOperatorSessionCookies, configuration, discover, exchangeCode, matchesOidcCallback, newTransaction, openTransaction, sealTransaction, sessionCookie, transactionCookie, workspaceCookie } from "./operator-oidc.ts";
 
 test("login requires an exact HTTPS issuer, web origin, and server transaction secret", () => {
   const before = { ...process.env };
@@ -32,6 +32,18 @@ test("login transaction rejects tampering, expiration, future timestamps and sub
   assert.equal(openTransaction(`${sealed}x`, secret), null);
   assert.equal(openTransaction(sealTransaction({ ...tx, created: Date.now() - 301_000 }, secret), secret), null);
   assert.equal(openTransaction(sealTransaction({ ...tx, created: Date.now() + 1_000 }, secret), secret), null);
+});
+
+test("an unsolicited or forged callback cannot replace an existing operator session", () => {
+  const tx = newTransaction();
+  const origin = "https://web.example.test";
+  const callback = new URL(`${origin}/api/operator/auth/callback?code=test&state=${tx.state}`);
+  assert.equal(matchesOidcCallback(tx, callback, origin), true);
+  assert.equal(matchesOidcCallback(null, callback, origin), false);
+  assert.equal(matchesOidcCallback(tx, new URL(`${origin}/api/operator/auth/callback?code=test`), origin), false);
+  assert.equal(matchesOidcCallback(tx, new URL(`${origin}/api/operator/auth/callback?state=forged`), origin), false);
+  assert.equal(matchesOidcCallback(tx, new URL(`${origin}/api/operator/auth/callback?state=${tx.state}&state=forged`), origin), false);
+  assert.equal(matchesOidcCallback(tx, new URL(`https://other.example.test/callback?state=${tx.state}`), origin), false);
 });
 
 test("failed sign-in and sign-out expire the transaction, old identity and selected workspace", () => {
