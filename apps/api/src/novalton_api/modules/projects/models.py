@@ -31,6 +31,7 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_projects_status_value",
         ),
         UniqueConstraint("workspace_id", "slug", name="uq_projects_workspace_id_slug"),
+        UniqueConstraint("id", "workspace_id", name="uq_projects_id_workspace"),
     )
 
     workspace_id: Mapped[UUID] = mapped_column(

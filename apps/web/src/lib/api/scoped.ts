@@ -22,7 +22,7 @@ export function scopedErrorMessage(error: unknown): string {
 export async function scopedSessionFetch(path: string, init: RequestInit = {}, requestedScope?: WorkspaceScope): Promise<Response> {
   const jar = await cookies();
   const token = jar.get("__Host-novalton-operator-session")?.value;
-  if (!token || token.length > 8192 || !/^[\w-]+\.[\w-]+\.[\w-]+$/.test(token))
+  if (!token || token.length > 8192 || !(/^[\w-]+\.[\w-]+\.[\w-]+$/.test(token) || /^nvl_[\w-]{43}$/.test(token)))
     return Response.json({ message: "Connexion requise." }, { status: 401 });
   const selected = jar.get("__Host-novalton-operator-workspace")?.value;
   const scopes = operatorWorkspaceScopes();

@@ -23,12 +23,15 @@ from novalton_api.infrastructure.providers.openrouter_routes import registered_o
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.modules.agents.routes import definitions_router, runs_router
 from novalton_api.modules.approvals.routes import router as approvals_router
+from novalton_api.modules.cadrage.routes import router as cadrage_router
 from novalton_api.modules.developer_manager.routes import router as developer_manager_router
 from novalton_api.modules.developer_worker.routes import router as developer_worker_router
 from novalton_api.modules.durable_dispatch.routes import router as durable_dispatch_router
 from novalton_api.modules.durable_dispatch.saas_access import require_saas_access
 from novalton_api.modules.git_changesets.routes import router as git_changesets_router
 from novalton_api.modules.github_publications.routes import router as github_publications_router
+from novalton_api.modules.local_auth.routes import router as local_auth_router
+from novalton_api.modules.local_auth.routes import scoped_router as local_account_router
 from novalton_api.modules.memories.routes import router as memories_router
 from novalton_api.modules.model_catalog.routes import router as model_catalog_router
 from novalton_api.modules.model_router.routes import router as model_router_router
@@ -71,6 +74,20 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                         provider_managed_routes=registered_openrouter_routes(
                             settings.openai_compatible_provider_id
                         ),
+                    )
+                ),
+            )
+        if settings.local_model_base_url is not None and settings.local_model_id is not None:
+            providers += (
+                OpenAICompatibleProvider(
+                    OpenAICompatibleConfig(
+                        provider_id="local_cadrage",
+                        base_url=settings.local_model_base_url,
+                        connect_timeout_seconds=settings.provider_connect_timeout_seconds,
+                        read_timeout_seconds=min(settings.provider_read_timeout_seconds, 45),
+                        write_timeout_seconds=settings.provider_write_timeout_seconds,
+                        pool_timeout_seconds=settings.provider_pool_timeout_seconds,
+                        max_response_bytes=min(settings.provider_max_response_bytes, 65536),
                     )
                 ),
             )
@@ -120,9 +137,12 @@ def create_app(
     register_exception_handlers(application)
     application.add_middleware(CorrelationIdMiddleware)
     application.include_router(health_router, prefix="/api/v1")
+    application.include_router(local_auth_router, prefix="/api/v1")
     # Every non-dispatch workspace route shares this server-side identity boundary.
     scoped = {"prefix": "/api/v1", "dependencies": [Depends(require_saas_access)]}
     application.include_router(projects_router, **scoped)
+    application.include_router(cadrage_router, **scoped)
+    application.include_router(local_account_router, **scoped)
     application.include_router(tasks_router, **scoped)
     application.include_router(runtime_events_router, **scoped)
     application.include_router(approvals_router, **scoped)

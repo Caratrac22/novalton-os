@@ -56,7 +56,7 @@ test("the Next plugin resolves the real replacement and the vulnerable chain is 
     globRequire("micromatch/package.json").name,
     "@novalton/fast-glob-matcher",
   );
-  assert.equal(pluginRequire("../package.json").version, "16.3.8");
+  assert.equal(pluginRequire("../package.json").version, "16.4.2");
   assert.equal(
     createHash("sha256")
       .update(readFileSync(pluginRequire.resolve("./utils/get-root-dirs.js")))

@@ -42,7 +42,7 @@ async def verified_operator(
         raise ApplicationError(
             "dispatch_auth_required", "Operator credential required", status_code=401
         )
-    if credential.count(".") == 2:
+    if credential.count(".") == 2 or credential.startswith("nvl_"):
         return await authenticate_session(
             session, token=credential, tenant_id=tenant_id, workspace_id=workspace_id
         )

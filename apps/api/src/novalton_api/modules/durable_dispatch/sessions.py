@@ -17,6 +17,7 @@ from novalton_api.modules.durable_dispatch.oidc_keys import signing_key
 from novalton_api.modules.durable_dispatch.operator import (
     OperatorAuthority,
     federated_operator_authority,
+    local_operator_authority,
 )
 
 
@@ -34,6 +35,20 @@ async def authenticate_session(
     workspace_id: UUID,
 ) -> OperatorAuthority:
     """Use only configured RS256 verification; a browser assertion is never an identity."""
+    if token.startswith("nvl_"):
+        from novalton_api.modules.local_auth.service import get_session
+
+        local = await get_session(session, token, lock=True)
+        human = await session.get(HumanOperator, local.user_id)
+        if human is None or not human.active:
+            raise _unauthorized()
+        return local_operator_authority(
+            user=human,
+            local_session_id=local.id,
+            expires_at=local.expires_at,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
     settings = get_settings()
     issuer, audience, public_key, jwks_uri = (
         settings.operator_oidc_issuer,

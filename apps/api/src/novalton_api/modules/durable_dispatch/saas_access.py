@@ -11,6 +11,7 @@ from novalton_api.core.config import get_settings
 from novalton_api.core.database import get_async_session
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.modules.durable_dispatch.identity import TenantOperatorMembership
+from novalton_api.modules.durable_dispatch.operator import OperatorAuthority
 from novalton_api.modules.durable_dispatch.sessions import authenticate_session
 
 
@@ -20,7 +21,7 @@ async def require_saas_access(
     workspace_id: UUID,
     session: Annotated[AsyncSession, Depends(get_async_session)],
     authorization: Annotated[str | None, Header()] = None,
-) -> None:
+) -> OperatorAuthority | None:
     settings = get_settings()
     if settings.test_legacy_api_auth_bypass:
         if settings.environment != "test":
@@ -31,7 +32,7 @@ async def require_saas_access(
     if authorization is None or not authorization.startswith("Bearer "):
         raise ApplicationError("saas_auth_required", "Session required", status_code=401)
     token = authorization.removeprefix("Bearer ")
-    if token != token.strip() or token.count(".") != 2:
+    if token != token.strip() or (token.count(".") != 2 and not token.startswith("nvl_")):
         raise ApplicationError("saas_auth_required", "Session required", status_code=401)
     operator = await authenticate_session(
         session, token=token, tenant_id=tenant_id, workspace_id=workspace_id
@@ -53,3 +54,4 @@ async def require_saas_access(
         )
         if role == "VIEWER":
             raise ApplicationError("saas_forbidden", "Workspace access denied", status_code=403)
+    return operator
