@@ -1,12 +1,26 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ActivityFeed } from "@/components/activity-feed";
+import { getWorkflowRuns } from "@/lib/api/workflows";
+import { summarizeWorkflows } from "@/lib/workflow-summary";
 
 export const metadata: Metadata = { title: "Centre de contrôle" };
+export const dynamic = "force-dynamic";
 
-export default function ControlPage() {
+export default async function ControlPage() {
+  const runs = await getWorkflowRuns().catch(() => null);
+  const summary = runs === null ? null : summarizeWorkflows(runs);
   return <div className="page-stack">
-    <section className="page-heading" aria-labelledby="control-title"><p className="eyebrow">Supervision</p><div><h1 id="control-title">Centre de contrôle</h1><p>Consultez les événements d’exécution et accédez aux décisions de vos workflows sans contourner les approbations requises.</p></div></section>
+    <section className="page-heading" aria-labelledby="control-title"><p className="eyebrow">Supervision</p><div><h1 id="control-title">Centre de contrôle</h1><p>Consultez les workflows accessibles, les événements d’exécution et les décisions opérateur, sans contourner les approbations requises.</p></div></section>
+    <section aria-labelledby="control-state-title"><div className="section-heading"><div><p className="eyebrow">Suivi du travail</p><h2 id="control-state-title">État des workflows</h2></div><span className="section-note">Jusqu’à 100 exécutions chargées</span></div>
+      {summary === null ? <div className="state-panel" role="status"><h2>État indisponible</h2><p>Impossible de consulter les workflows. Cette erreur n’est pas assimilée à zéro exécution.</p></div> :
+      <div className="metric-grid" aria-label="Nombre de workflows par statut">
+        <div className="metric-card"><strong>{summary.RUNNING}</strong><span>En cours</span></div>
+        <div className="metric-card"><strong>{summary.CREATED}</strong><span>Créés</span></div>
+        <div className="metric-card"><strong>{summary.COMPLETED}</strong><span>Terminés</span></div>
+        <div className="metric-card"><strong>{summary.FAILED + summary.CANCELLED}</strong><span>Échecs et annulations</span></div>
+      </div>}
+    </section>
     <section className="module-grid" aria-label="Actions de supervision">
       <Link className="module-card" href="/operator"><div><h3>Console opérateur</h3><p>Afficher les demandes durables, leur état et les actions autorisées pour la session authentifiée.</p></div><span className="module-link">Ouvrir la console <span aria-hidden="true">→</span></span></Link>
       <Link className="module-card" href="/tasks"><div><h3>Missions et workflows</h3><p>Sélectionner une tâche, consulter les étapes Manager, Developer et QA ainsi que leurs résultats.</p></div><span className="module-link">Voir les missions <span aria-hidden="true">→</span></span></Link>
