@@ -4,6 +4,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 export const transactionCookie = "__Host-novalton-oidc-transaction";
 export const sessionCookie = "__Host-novalton-operator-session";
+export const workspaceCookie = "__Host-novalton-operator-workspace";
 
 type Transaction = { state: string; nonce: string; verifier: string; created: number };
 
@@ -63,6 +64,17 @@ export function openTransaction(value: string | undefined, secret: string): Tran
 
 export const cookieOptions = { secure: true, httpOnly: true, sameSite: "lax" as const,
   path: "/" };
+
+type ExpirableCookieSink = {
+  set(name: string, value: string, options: typeof cookieOptions & { maxAge: number }): unknown;
+};
+
+/** Remove credentials left by a prior operator when sign-in fails or the user signs out. */
+export function clearOperatorSessionCookies(cookies: ExpirableCookieSink): void {
+  for (const name of [transactionCookie, sessionCookie, workspaceCookie]) {
+    cookies.set(name, "", { ...cookieOptions, maxAge: 0 });
+  }
+}
 
 export async function exchangeCode(as: oauth.AuthorizationServer, client: oauth.Client,
   redirectUri: string, tx: Transaction, callback: URL,
