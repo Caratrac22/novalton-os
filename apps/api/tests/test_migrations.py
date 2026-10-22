@@ -30,9 +30,11 @@ def test_alembic_configuration_loads_durable_dispatch_after_i044() -> None:
     revision = scripts.get_revision(head)
     predecessor = scripts.get_revision("20260902_0031")
 
-    assert head == "20261022_0040"
+    assert head == "20261022_0042"
     assert revision is not None
-    assert revision.down_revision == "20261021_0039"
+    assert revision.down_revision == "20261022_0041"
+    assert scripts.get_revision("20261022_0041").down_revision == "20261022_0040"
+    assert scripts.get_revision("20261022_0040").down_revision == "20261021_0039"
     assert scripts.get_revision("20261021_0039").down_revision == "20261021_0038"
     assert scripts.get_revision("20261021_0038").down_revision == "20261021_0037"
     assert scripts.get_revision("20261021_0037").down_revision == "20261021_0036"

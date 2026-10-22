@@ -82,6 +82,7 @@ class OperatorAuthority:
         "_issuer",
         "_subject",
         "_expires_at",
+        "_local_session_id",
     )
 
     def __init__(
@@ -96,6 +97,7 @@ class OperatorAuthority:
         issuer: str | None = None,
         subject: str | None = None,
         expires_at: datetime | None = None,
+        local_session_id: UUID | None = None,
     ) -> None:
         if seal is not _SEAL:
             raise _forbidden()
@@ -110,9 +112,10 @@ class OperatorAuthority:
         self._issuer = issuer
         self._subject = subject
         self._expires_at = expires_at
+        self._local_session_id = local_session_id
 
     def require(self, permission: str, *, tenant_id: UUID, workspace_id: UUID) -> None:
-        if self._issuer is not None:
+        if self._issuer is not None or self._local_session_id is not None:
             if (
                 self._seal is not _SEAL
                 or self._expires_at is None
@@ -190,6 +193,14 @@ class OperatorAuthority:
                 .with_for_update(read=not exclusive)
                 .execution_options(populate_existing=True)
             )
+        local_session = None
+        if self._local_session_id is not None:
+            from novalton_api.modules.local_auth.models import LocalSession
+
+            local_session = await session.scalar(
+                select(LocalSession).where(LocalSession.id == self._local_session_id)
+                .with_for_update(read=not exclusive).execution_options(populate_existing=True)
+            )
         if (
             user is None
             or not user.active
@@ -199,6 +210,11 @@ class OperatorAuthority:
             or grant is None
             or not grant.active
             or (self._issuer is not None and (identity is None or not identity.active))
+            or (self._local_session_id is not None and (
+                local_session is None or local_session.user_id != self.user_id
+                or local_session.revoked_at is not None
+                or local_session.expires_at <= datetime.now(UTC)
+            ))
         ):
             raise _forbidden()
 
@@ -224,6 +240,16 @@ def federated_operator_authority(
         issuer=issuer,
         subject=subject,
         expires_at=expires_at,
+    )
+
+
+def local_operator_authority(*, user: HumanOperator, local_session_id: UUID,
+                             expires_at: datetime, tenant_id: UUID,
+                             workspace_id: UUID) -> OperatorAuthority:
+    """Same SQL grants as federated operators, with an opaque session revocation fence."""
+    return OperatorAuthority(
+        _SEAL, "", user.label, user.id, tenant_id, workspace_id, PERMISSIONS,
+        expires_at=expires_at, local_session_id=local_session_id,
     )
 
 

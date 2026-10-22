@@ -34,6 +34,10 @@ class Base(DeclarativeBase):
 from novalton_api.modules.agents.models import AgentDefinition, AgentRun  # noqa: E402, F401
 from novalton_api.modules.approvals.models import ApprovalRequest  # noqa: E402, F401
 from novalton_api.modules.audit.models import AuditRecord  # noqa: E402, F401
+from novalton_api.modules.cadrage.models import (  # noqa: E402, F401
+    CadrageConversation,
+    CadrageMessage,
+)
 from novalton_api.modules.durable_dispatch.identity import (  # noqa: E402, F401, I001
     FederatedOperatorIdentity,
     HumanOperator,
@@ -49,6 +53,11 @@ from novalton_api.modules.durable_dispatch.models import (  # noqa: E402, F401
 from novalton_api.modules.git_changesets.models import GitCommitAction  # noqa: E402, F401
 from novalton_api.modules.github_publications.models import (  # noqa: E402, I001
     GitHubPublicationAction,  # noqa: E402, F401
+)
+from novalton_api.modules.local_auth.models import (  # noqa: E402, F401
+    LocalCredential,
+    LocalLoginThrottle,
+    LocalSession,
 )
 from novalton_api.modules.memories.models import MemoryProvenance, MemoryRecord  # noqa: E402, F401
 from novalton_api.modules.model_catalog.models import ModelDefinition  # noqa: E402, F401

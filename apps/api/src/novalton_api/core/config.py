@@ -79,6 +79,13 @@ class Settings(BaseModel):
     redis_url: str = "redis://localhost:6379/0"
     qdrant_url: str = "http://localhost:6333"
     openai_compatible_base_url: str | None = None
+    local_model_base_url: str | None = None
+    local_model_id: str | None = Field(
+        default=None, min_length=1, max_length=256, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$"
+    )
+    cadrage_model_policy: Literal["economique", "equilibre", "performance", "personnalise"] = (
+        "equilibre"
+    )
     openai_compatible_api_key: SecretStr | None = None
     openai_compatible_provider_id: str = Field(
         default="openrouter", min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
@@ -139,6 +146,9 @@ class Settings(BaseModel):
         "redis_url": "REDIS_URL",
         "qdrant_url": "QDRANT_URL",
         "openai_compatible_base_url": "NOVALTON_OPENAI_COMPATIBLE_BASE_URL",
+        "local_model_base_url": "NOVALTON_LOCAL_MODEL_BASE_URL",
+        "local_model_id": "NOVALTON_LOCAL_MODEL_ID",
+        "cadrage_model_policy": "NOVALTON_CADRAGE_MODEL_POLICY",
         "openai_compatible_api_key": "NOVALTON_OPENAI_COMPATIBLE_API_KEY",
         "openai_compatible_provider_id": "NOVALTON_OPENAI_COMPATIBLE_PROVIDER_ID",
         "openai_compatible_require_parameters": "NOVALTON_OPENAI_COMPATIBLE_REQUIRE_PARAMETERS",
@@ -211,6 +221,23 @@ class Settings(BaseModel):
         if value is None:
             return None
         return validate_provider_base_url(value)
+
+    @field_validator("local_model_base_url")
+    @classmethod
+    def validate_local_model_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(validate_provider_base_url(value))
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname not in {"127.0.0.1", "::1"}
+            or parsed.path != "/v1"
+            or parsed.port not in {1234, 11434}
+        ):
+            raise ValueError("local model endpoint must be loopback LM Studio/Ollama /v1")
+        return value
 
     @field_validator("model_catalog_free_allowlist", mode="before")
     @classmethod
@@ -313,6 +340,8 @@ class Settings(BaseModel):
     def validate_catalog_source_configuration(self) -> Self:
         if self.openrouter_catalog_enabled and self.openai_compatible_base_url is None:
             raise ValueError("OpenRouter catalog requires a configured provider base URL")
+        if (self.local_model_base_url is None) != (self.local_model_id is None):
+            raise ValueError("local model endpoint and model ID must be configured together")
         return self
 
     @staticmethod
