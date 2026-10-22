@@ -62,6 +62,12 @@ export function openTransaction(value: string | undefined, secret: string): Tran
   } catch { return null; }
 }
 
+/** Only a callback for our live login transaction may replace an existing human session. */
+export function matchesOidcCallback(tx: Transaction | null, callback: URL, origin: string): boolean {
+  const states = callback.searchParams.getAll("state");
+  return tx !== null && callback.origin === origin && states.length === 1 && states[0] === tx.state;
+}
+
 export const cookieOptions = { secure: true, httpOnly: true, sameSite: "lax" as const,
   path: "/" };
 
