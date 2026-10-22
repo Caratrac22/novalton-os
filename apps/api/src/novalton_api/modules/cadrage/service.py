@@ -137,7 +137,12 @@ async def list_messages(
 
 
 async def append_user_message(
-    session: AsyncSession, *, conversation: CadrageConversation, content: str, request_id: UUID
+    session: AsyncSession,
+    *,
+    conversation: CadrageConversation,
+    content: str,
+    request_id: UUID,
+    reserve_for_model: bool = False,
 ) -> tuple[CadrageMessage, bool]:
     # Caller locked the conversation row: sequence and dedupe are serialized.
     existing = await session.scalar(
@@ -163,6 +168,11 @@ async def append_user_message(
     )
     conversation.next_sequence += 1
     conversation.status = "NEEDS_MODEL"
+    if reserve_for_model:
+        # Reserve under the same row lock as insertion. Another send cannot
+        # overtake an in-flight answer between these two decisions.
+        conversation.pending_request_id = request_id
+        conversation.pending_since = datetime.now(UTC)
     session.add(row)
     await session.commit()
     return row, True

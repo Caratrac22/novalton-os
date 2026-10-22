@@ -198,8 +198,10 @@ class OperatorAuthority:
             from novalton_api.modules.local_auth.models import LocalSession
 
             local_session = await session.scalar(
-                select(LocalSession).where(LocalSession.id == self._local_session_id)
-                .with_for_update(read=not exclusive).execution_options(populate_existing=True)
+                select(LocalSession)
+                .where(LocalSession.id == self._local_session_id)
+                .with_for_update(read=not exclusive)
+                .execution_options(populate_existing=True)
             )
         if (
             user is None
@@ -210,11 +212,15 @@ class OperatorAuthority:
             or grant is None
             or not grant.active
             or (self._issuer is not None and (identity is None or not identity.active))
-            or (self._local_session_id is not None and (
-                local_session is None or local_session.user_id != self.user_id
-                or local_session.revoked_at is not None
-                or local_session.expires_at <= datetime.now(UTC)
-            ))
+            or (
+                self._local_session_id is not None
+                and (
+                    local_session is None
+                    or local_session.user_id != self.user_id
+                    or local_session.revoked_at is not None
+                    or local_session.expires_at <= datetime.now(UTC)
+                )
+            )
         ):
             raise _forbidden()
 
@@ -243,13 +249,25 @@ def federated_operator_authority(
     )
 
 
-def local_operator_authority(*, user: HumanOperator, local_session_id: UUID,
-                             expires_at: datetime, tenant_id: UUID,
-                             workspace_id: UUID) -> OperatorAuthority:
+def local_operator_authority(
+    *,
+    user: HumanOperator,
+    local_session_id: UUID,
+    expires_at: datetime,
+    tenant_id: UUID,
+    workspace_id: UUID,
+) -> OperatorAuthority:
     """Same SQL grants as federated operators, with an opaque session revocation fence."""
     return OperatorAuthority(
-        _SEAL, "", user.label, user.id, tenant_id, workspace_id, PERMISSIONS,
-        expires_at=expires_at, local_session_id=local_session_id,
+        _SEAL,
+        "",
+        user.label,
+        user.id,
+        tenant_id,
+        workspace_id,
+        PERMISSIONS,
+        expires_at=expires_at,
+        local_session_id=local_session_id,
     )
 
 

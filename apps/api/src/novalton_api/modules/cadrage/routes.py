@@ -202,8 +202,13 @@ async def send(
         owner_id=_human(operator).user_id,
         lock=True,
     )
+    settings = get_settings()
     message, created = await service.append_user_message(
-        session, conversation=row, content=data.content.strip(), request_id=data.client_request_id
+        session,
+        conversation=row,
+        content=data.content.strip(),
+        request_id=data.client_request_id,
+        reserve_for_model=settings.local_model_id is not None,
     )
     existing_reply = await service.assistant_reply(session, conversation=row, user_message=message)
     if existing_reply is not None:
@@ -213,7 +218,6 @@ async def send(
             "assistant": _message(existing_reply),
             "assistant_status": "AVAILABLE",
         }
-    settings = get_settings()
     if settings.local_model_id is None:
         return {
             "message": _message(message),
@@ -230,7 +234,9 @@ async def send(
         owner_id=_human(operator).user_id,
         lock=True,
     )
-    if not await service.reserve_reply(session, conversation=row, user_message=message):
+    if not created and not await service.reserve_reply(
+        session, conversation=row, user_message=message
+    ):
         return {
             "message": _message(message),
             "created": created,

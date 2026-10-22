@@ -82,6 +82,12 @@ async def password_change(
     token = bearer(authorization)
     if not token.startswith("nvl_"):
         raise ApplicationError("local_account_required", "Compte Novalton requis", status_code=403)
+    operator = await authenticate_session(
+        session, token=token, tenant_id=tenant_id, workspace_id=workspace_id
+    )
+    await operator.require_human(
+        session, "workspace.read", tenant_id=tenant_id, workspace_id=workspace_id
+    )
     await service.change_password(
         session,
         token=token,

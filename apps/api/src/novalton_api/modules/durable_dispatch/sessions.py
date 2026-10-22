@@ -43,8 +43,11 @@ async def authenticate_session(
         if human is None or not human.active:
             raise _unauthorized()
         return local_operator_authority(
-            user=human, local_session_id=local.id, expires_at=local.expires_at,
-            tenant_id=tenant_id, workspace_id=workspace_id,
+            user=human,
+            local_session_id=local.id,
+            expires_at=local.expires_at,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
         )
     settings = get_settings()
     issuer, audience, public_key, jwks_uri = (

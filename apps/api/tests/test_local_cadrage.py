@@ -301,6 +301,15 @@ def test_local_owner_auth_and_durable_scoped_chat(initialized):
 
         db_call(restore_write)
 
+        assert (
+            client.post(
+                f"/api/v1/tenants/{scope.tenant}/workspaces/{uuid4()}/account/password",
+                headers=auth,
+                json={"current": password, "replacement": "Wrong-Scope-Passphrase-47"},
+            ).status_code
+            == 403
+        )
+
         changed = client.post(
             path(scope) + "/account/password",
             headers=auth,
