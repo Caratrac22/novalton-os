@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { clearOperatorSessionCookies, configuration, cookieOptions, discover, exchangeCode, openTransaction, sessionCookie, transactionCookie, workspaceCookie } from "@/lib/operator-oidc";
+import { clearOperatorSessionCookies, configuration, cookieOptions, discover, exchangeCode, matchesOidcCallback, openTransaction, sessionCookie, transactionCookie, workspaceCookie } from "@/lib/operator-oidc";
 
 export async function GET(request: NextRequest) {
   let origin: string;
@@ -7,14 +7,17 @@ export async function GET(request: NextRequest) {
   catch { return new Response("Sign-in unavailable", { status: 503 }); }
   // Always consume the transaction, including failed callbacks.
   const failure = NextResponse.redirect(`${origin}/operator?auth=failed`);
-  clearOperatorSessionCookies(failure.cookies);
+  failure.cookies.set(transactionCookie, "", { ...cookieOptions, maxAge: 0 });
   failure.headers.set("Cache-Control", "no-store");
   try {
     const { issuer, client, redirectUri, secret } = configuration();
     const tx = openTransaction(request.cookies.get(transactionCookie)?.value, secret);
-    if (!tx || new URL(request.url).origin !== origin) return failure;
+    const callback = new URL(request.url);
+    if (!matchesOidcCallback(tx, callback, origin)) return failure;
+    // Only a genuine ongoing login may replace the previously signed-in human.
+    clearOperatorSessionCookies(failure.cookies);
     const as = await discover(issuer);
-    const { token, maxAge } = await exchangeCode(as, client, redirectUri, tx, new URL(request.url),
+    const { token, maxAge } = await exchangeCode(as, client, redirectUri, tx!, callback,
       process.env.NOVALTON_OPERATOR_OIDC_CLIENT_SECRET);
     const result = NextResponse.redirect(`${origin}/operator`);
     result.cookies.set(transactionCookie, "", { ...cookieOptions, maxAge: 0 });
