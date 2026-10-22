@@ -30,16 +30,26 @@ export artifact before continuing.
   existing deterministic local provider, persisted ModelRuns and attempts,
   workflow and cost evidence, idempotent cancellation, forbidden tenant scope,
   and subject revocation. It does not run a browser or the external OIDC
-  issuer. This bridges the previously separate API security/workflow tests but
-  does not yet prove one continuous Next-to-FastAPI-to-PostgreSQL browser run.
+  issuer.
+- A second, continuous CI acceptance starts a local HTTPS issuer, real Next
+  server and real FastAPI server against `novalton_test`. A trusted test
+  provisioner binds the issuer's public key and subject to the fixture human
+  before releasing the OIDC callback. The workflow already advanced with the
+  deterministic local provider appears in the console; a second fresh work
+  item is cancelled through Next and FastAPI. PostgreSQL verifies the decision,
+  then revocation causes the still-present browser cookie to lose backend
+  authority. The client uses HTTP requests and a cookie jar rather than a
+  graphical browser engine; all server routes and database operations are real.
 
 ## Validation boundaries
 
 Local Node smoke passed with a local HTTPS issuer and test API. The 17 existing
 web tests, ESLint, typecheck, production build and Python Ruff/compilation
-passed. No local PostgreSQL executable is available; the new database test,
-all migrations and complete API suite require the disposable `novalton_test`
-CI profile. Record final run IDs, test count and failures after publishing.
+passed. No local PostgreSQL executable is available; the two database tests,
+including the continuous HTTP journey, all migrations and complete API suite
+require the disposable `novalton_test` CI profile. Record final run IDs, test
+count and failures after publishing; the continuous test is not claimed as
+passed until its CI run succeeds.
 The smoke initially failed and drove the proxy fix; a stale generated Next
 cache had to be moved aside before a fresh build picked up the change.
 
@@ -60,9 +70,9 @@ future conflicts. Keep #99 closed and out of the ancestry.
 
 ## Next acceptance work
 
-Run one HTTPS browser session against a trusted development IdP, real Next,
-FastAPI, disposable PostgreSQL and a provisioned human binding in the same
-environment. Test token theft/logout revocation requirements separately:
+Run one graphical HTTPS browser session against a trusted external development
+IdP, real Next, FastAPI, disposable PostgreSQL and a provisioned human binding
+in the same environment. Test token theft/logout revocation requirements separately:
 clearing a browser cookie alone does not revoke a copied ID token before its
 expiry; membership and grant revocation still fence authority. Then, with
 separately approved model and spend budget, perform a new minimal OpenRouter

@@ -61,6 +61,16 @@ jobs:
       - name: Migrate disposable novalton_test database
         run: alembic -c alembic.ini upgrade head
 
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.19.0
+          cache: npm
+      - name: Build operator web for the real API integration test
+        working-directory: .
+        run: |
+          npm ci
+          npm run build --workspace @novalton/web
+
       - name: Run full API suite on novalton_test
         run: |
           set -eu

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign, verify } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer as createHttpsServer, request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
@@ -24,9 +24,15 @@ let revoked = false;
 let codes = new Map();
 const scope = { tenant: "89cfc055-366e-5bcb-b65f-4f367185bf6d",
   workspace: "b640b64f-8e55-53e8-a5b2-3beff9d5af82" };
-const dispatchId = "e850ad05-55dd-4f30-88af-ff91e9dc5263";
-const workflowId = "a65a79e8-fae9-4edd-9d05-ace6674a724d";
+scope.tenant = process.env.NOVALTON_SMOKE_TENANT_ID || scope.tenant;
+scope.workspace = process.env.NOVALTON_SMOKE_WORKSPACE_ID || scope.workspace;
+const dispatchId = process.env.NOVALTON_SMOKE_DISPATCH_ID || "e850ad05-55dd-4f30-88af-ff91e9dc5263";
+const cancelId = process.env.NOVALTON_SMOKE_CANCEL_ID || dispatchId;
+const workflowId = process.env.NOVALTON_SMOKE_WORKFLOW_ID || "a65a79e8-fae9-4edd-9d05-ace6674a724d";
 const taskId = "02bdb65f-4ac1-4d0e-bf34-614f5f7e7c77";
+const integration = process.env.NOVALTON_SMOKE_API_BASE_URL;
+const handshake = process.env.NOVALTON_SMOKE_HANDSHAKE_DIR;
+if (Boolean(integration) !== Boolean(handshake)) throw new Error("Incomplete integration configuration");
 let cancelled = false;
 
 async function port() {
@@ -40,6 +46,13 @@ async function listen(server) {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   servers.push(server);
   return server.address().port;
+}
+async function waitFor(file) {
+  for (let i = 0; i < 300; i++) {
+    if (existsSync(file)) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Integration handshake timed out: ${file.split("/").at(-1)}`);
 }
 function jwt(claims) {
   const head = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT", kid: jwk.kid })).toString("base64url");
@@ -121,7 +134,12 @@ try {
   await new Promise((resolve) => issuerServer.listen(issuerPort, "127.0.0.1", resolve));
   servers.push(issuerServer);
 
-  const apiPort = await listen(createHttpServer((req, res) => {
+  if (integration) {
+    writeFileSync(join(handshake, "issuer.json"), JSON.stringify({ issuer,
+      publicKey: publicKey.export({ format: "pem", type: "spki" }) }));
+    await waitFor(join(handshake, "ready"));
+  }
+  const apiPort = integration ? null : await listen(createHttpServer((req, res) => {
     const token = req.headers.authorization?.replace(/^Bearer /, "");
     if (revoked || !validToken(token, issuer)) return respond(res, 401);
     const base = `/api/v1/tenants/${scope.tenant}/workspaces/${scope.workspace}/dispatch/requests`;
@@ -147,9 +165,9 @@ try {
     }]);
     if (req.url === `${base}/${dispatchId}/attempts`) return json([{ generation: 3,
       outcome: "BLOCKED", reason_code: "worker_lost_heartbeat" }]);
-    if (req.url === `${base}/${dispatchId}/cancel` && req.method === "POST") {
+    if (req.url === `${base}/${cancelId}/cancel` && req.method === "POST") {
       cancelled = true;
-      return json({ id: dispatchId, status: "CANCELLED" });
+      return json({ id: cancelId, status: "CANCELLED" });
     }
     respond(res, 404);
   }));
@@ -172,7 +190,7 @@ try {
       NOVALTON_OPERATOR_OIDC_ISSUER: issuer, NOVALTON_OPERATOR_OIDC_CLIENT_ID: "operator-test",
       NOVALTON_OPERATOR_OIDC_AUDIENCE: "operator-test",
       NOVALTON_OPERATOR_OIDC_TRANSACTION_SECRET: "isolated-transaction-secret-32-bytes",
-      NOVALTON_API_BASE_URL: `http://127.0.0.1:${apiPort}`,
+      NOVALTON_API_BASE_URL: integration || `http://127.0.0.1:${apiPort}`,
       NOVALTON_TENANT_ID: scope.tenant, NOVALTON_WORKSPACE_ID: scope.workspace },
     stdio: "ignore" });
   let ready = false;
@@ -214,19 +232,24 @@ try {
     method: "POST", cookie: session, origin: webOrigin,
     body: `workspace_id=${scope.workspace}`,
   })).status, 303);
-  const wrongOrigin = await httpsCall(`${webOrigin}/api/operator/${dispatchId}/cancel`, {
+  const wrongOrigin = await httpsCall(`${webOrigin}/api/operator/${cancelId}/cancel`, {
     method: "POST", cookie: session, origin: "https://forged.example.test",
     body: "{}",
   });
   assert.equal(wrongOrigin.status, 403);
-  assert.equal(cancelled, false);
-  const decision = await httpsCall(`${webOrigin}/api/operator/${dispatchId}/cancel`, {
+  if (!integration) assert.equal(cancelled, false);
+  const decision = await httpsCall(`${webOrigin}/api/operator/${cancelId}/cancel`, {
     method: "POST", cookie: session, origin: webOrigin,
     body: "{}",
   });
   assert.equal(decision.status, 200);
-  assert.equal(cancelled, true);
-  revoked = true;
+  if (integration) {
+    writeFileSync(join(handshake, "waiting-for-revocation"), "");
+    await waitFor(join(handshake, "revoked"));
+  } else {
+    assert.equal(cancelled, true);
+    revoked = true;
+  }
   const revokedResponse = await httpsCall(`${webOrigin}/operator`, { cookie: session });
   assert.match(revokedResponse.body, /permission revoked/);
   assert.equal((await httpsCall(`${webOrigin}/api/operator/auth/logout`, {
@@ -238,7 +261,7 @@ try {
   assert.equal(logout.status, 303);
   assert.match(logout.headers["set-cookie"].find((item) => item.startsWith("__Host-novalton-operator-session=")), /Max-Age=0/i);
   console.log(JSON.stringify({ oidc: "local HTTPS issuer", next: "real server routes",
-    backend: "signed-token validating test stub", revoked: true }));
+    backend: integration ? "FastAPI/PostgreSQL" : "signed-token validating test stub", revoked: true }));
 } finally {
   if (next) { next.kill("SIGTERM"); await new Promise((resolve) => {
     if (next.exitCode !== null) return resolve();
