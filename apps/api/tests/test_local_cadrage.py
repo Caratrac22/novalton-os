@@ -337,6 +337,103 @@ def test_local_owner_auth_and_durable_scoped_chat(initialized):
         assert client.get(path(scope) + "/projects", headers=fresh).status_code == 401
 
 
+def test_two_local_accounts_isolate_tenants_and_private_conversations(initialized):
+    first, password, _ = initialized
+    settings, name = settings_for_new_scope()
+
+    async def add_second(session):
+        tenant = Tenant(
+            id=settings.bootstrap_tenant_id,
+            slug=settings.bootstrap_tenant_slug,
+            name=settings.bootstrap_tenant_name,
+        )
+        session.add(tenant)
+        await session.flush()
+        session.add(
+            Workspace(
+                id=settings.bootstrap_workspace_id,
+                tenant_id=tenant.id,
+                slug=settings.bootstrap_workspace_slug,
+                name=settings.bootstrap_workspace_name,
+            )
+        )
+        user = HumanOperator(label=name, active=True)
+        session.add(user)
+        await session.flush()
+        session.add(
+            LocalCredential(
+                user_id=user.id,
+                login=name,
+                password_hash=hash_password(password),
+                changed_at=datetime.now(UTC),
+            )
+        )
+        session.add(
+            TenantOperatorMembership(
+                user_id=user.id, tenant_id=tenant.id, role="MEMBER", active=True
+            )
+        )
+        for permission in ("workspace.read", "workspace.write"):
+            session.add(
+                WorkspaceOperatorPermission(
+                    user_id=user.id,
+                    tenant_id=tenant.id,
+                    workspace_id=settings.bootstrap_workspace_id,
+                    permission=permission,
+                    active=True,
+                )
+            )
+        await session.commit()
+        return Scope(tenant.id, settings.bootstrap_workspace_id, user.id, name)
+
+    second = db_call(add_second)
+    try:
+        with TestClient(create_app()) as client:
+
+            def authenticate(scope):
+                response = client.post(
+                    "/api/v1/local-auth/login",
+                    json={"login": scope.login, "password": password},
+                )
+                assert response.status_code == 200
+                return {"Authorization": f"Bearer {response.json()['token']}"}
+
+            a, b = authenticate(first), authenticate(second)
+            project = client.post(
+                path(second) + "/projects",
+                headers=b,
+                json={"name": "Privé B", "slug": "private-b", "description": None},
+            )
+            assert project.status_code == 201
+            base = path(second) + f"/projects/{project.json()['id']}/conversations"
+            conversation = client.post(base, headers=b, json={"title": "Objectif B"})
+            assert conversation.status_code == 201
+            assert client.get(path(second) + "/projects", headers=a).status_code == 403
+            assert client.get(base, headers=a).status_code == 403
+            assert client.get(base + f"/{conversation.json()['id']}", headers=a).status_code == 403
+            assert client.post(base, headers=a, json={"title": "Intrusion"}).status_code == 403
+            assert client.get(path(first) + "/projects", headers=b).status_code == 403
+
+            async def revoke_second(session):
+                await session.execute(
+                    update(WorkspaceOperatorPermission)
+                    .where(
+                        WorkspaceOperatorPermission.user_id == second.owner,
+                        WorkspaceOperatorPermission.permission == "workspace.write",
+                    )
+                    .values(active=False, revoked_at=datetime.now(UTC))
+                )
+                await session.commit()
+
+            db_call(revoke_second)
+            assert (
+                client.post(base, headers=b, json={"title": "Après révocation"}).status_code == 403
+            )
+            assert client.get(base, headers=b).status_code == 200
+    finally:
+        db_call(lambda session: wipe(session, second))
+
+
 def test_bootstrap_one_owner_and_transaction_failure(monkeypatch):
     settings, name = settings_for_new_scope()
     password = "First-Owner-Passphrase-For-Tests"
