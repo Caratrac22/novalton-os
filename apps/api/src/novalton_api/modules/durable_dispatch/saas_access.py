@@ -40,6 +40,10 @@ async def require_saas_access(
     await operator.require_human(
         session, permission, tenant_id=tenant_id, workspace_id=workspace_id
     )
+    if request.url.path.endswith("/events/stream"):
+        # The FastAPI dependency may live as long as the response stream.
+        # Release its shared grant lock now; each polling session reauthorizes.
+        await session.rollback()
     if permission == "workspace.write":
         role = await session.scalar(
             select(TenantOperatorMembership.role).where(

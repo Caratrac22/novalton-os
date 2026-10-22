@@ -132,6 +132,7 @@ async def test_endpoint_validates_scope_and_returns_sse_headers(
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(database=database)),
         is_disconnected=lambda: None,
+        headers={},
     )
     response = await runtime_event_stream(
         first.tenant_id, first.workspace_id, request, last_event_id=None

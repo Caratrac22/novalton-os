@@ -10,6 +10,7 @@ from uuid import uuid4
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi import Request
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select, update
 from test_development_workflow import _cleanup, _seed
@@ -27,6 +28,7 @@ from novalton_api.modules.durable_dispatch.identity import (
     WorkspaceOperatorPermission,
 )
 from novalton_api.modules.durable_dispatch.models import DispatchActivation
+from novalton_api.modules.durable_dispatch.saas_access import require_saas_access
 from novalton_api.modules.durable_dispatch.sessions import authenticate_session
 from novalton_api.modules.projects.models import Project
 
@@ -418,6 +420,7 @@ def test_saas_routes_require_human_grants_and_isolate_sql_scopes(scope, federate
 
     async def provision(session):
         session.add(HumanOperator(id=other_user, label="human-b", active=True))
+        await session.flush()
         session.add(
             TenantOperatorMembership(
                 user_id=other_user, tenant_id=other.tenant_id, role="MEMBER", active=True
@@ -512,6 +515,17 @@ def test_saas_routes_require_human_grants_and_isolate_sql_scopes(scope, federate
         base_b = f"/api/v1/tenants/{other.tenant_id}/workspaces/{other.workspace_id}"
         valid_a = {"Authorization": "Bearer " + federated()}
         valid_b = {"Authorization": "Bearer " + federated(subject="human-b")}
+
+        async def stream_entry(session):
+            request = Request(
+                {"type": "http", "method": "GET", "path": f"{base_a}/events/stream", "headers": []}
+            )
+            await require_saas_access(
+                request, scope.tenant_id, scope.workspace_id, session, valid_a["Authorization"]
+            )
+            return session.in_transaction()
+
+        assert db_call(stream_entry) is False
         with TestClient(create_app()) as client:
             assert client.get(f"{base_a}/projects").status_code == 401
             assert (
@@ -639,6 +653,28 @@ def test_saas_routes_require_human_grants_and_isolate_sql_scopes(scope, federate
             )
             assert client.get(f"{base_a}/projects", headers=valid_a).status_code == 403
             assert client.get(f"{base_b}/projects", headers=valid_b).status_code == 200
+
+            async def make_viewer(session):
+                await session.execute(
+                    update(TenantOperatorMembership)
+                    .where(
+                        TenantOperatorMembership.user_id == other_user,
+                        TenantOperatorMembership.tenant_id == other.tenant_id,
+                    )
+                    .values(role="VIEWER")
+                )
+                await session.commit()
+
+            db_call(make_viewer)
+            assert client.get(f"{base_b}/projects", headers=valid_b).status_code == 200
+            assert (
+                client.patch(
+                    f"{base_b}/projects/{other.project_id}",
+                    headers=valid_b,
+                    json={"name": "denied viewer"},
+                ).status_code
+                == 403
+            )
     finally:
         monkeypatch.setenv("NOVALTON_TEST_LEGACY_API_AUTH_BYPASS", "true")
         get_settings.cache_clear()

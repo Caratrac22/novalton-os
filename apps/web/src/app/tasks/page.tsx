@@ -9,7 +9,7 @@ import { getOperatorWorkflow, getWorkflowRuns } from "@/lib/api/workflows";
 import { formatDateTime, humanize, preview } from "@/lib/format";
 import { selectVisibleRecord } from "@/lib/selection";
 import { PAGE_SIZE, pageHref, pageOffset } from "@/lib/pagination";
-import { isUuid } from "@/lib/api/scoped";
+import { isUuid, scopedErrorMessage } from "@/lib/api/scoped";
 
 export const metadata: Metadata = { title: "Tâches" };
 export const dynamic = "force-dynamic";
@@ -19,7 +19,8 @@ export default async function TasksPage({ searchParams }: Readonly<{ searchParam
   const params = await searchParams;
   const offset = pageOffset(params.page);
   let projects;
-  try { projects = await getProjects(); } catch { projects = null; }
+  let projectProblem: unknown = null;
+  try { projects = await getProjects(); } catch (error) { projects = null; projectProblem = error; }
   const requestedId = typeof params.project === "string" ? params.project : undefined;
   let selected = selectVisibleRecord(projects ?? [], requestedId);
   if (requestedId && !selected && isUuid(requestedId)) { try { selected = await getProject(requestedId); } catch { /* inaccessible */ } }
@@ -37,7 +38,7 @@ export default async function TasksPage({ searchParams }: Readonly<{ searchParam
 
   return <div className="page-stack">
     <section className="page-heading" aria-labelledby="tasks-title"><p className="eyebrow">Exécution gouvernée</p><div><h1 id="tasks-title">Tâches</h1><p>Créez un objectif, puis démarrez et suivez un workflow de développement gouverné.</p></div></section>
-    {projects === null ? <StatePanel title="Tâches indisponibles">Connexion ou autorisation requise, ou service indisponible. <Link href="/api/operator/auth/start">Se connecter</Link>.</StatePanel> : projects.length === 0 && !selected ? <StatePanel title="Aucun projet">Créez un projet depuis la rubrique Projets avant d’ajouter une tâche.</StatePanel> : requestedId && !selected ? <StatePanel title="Projet inaccessible">Ce projet est invalide, supprimé ou inaccessible. Sélectionnez un projet autorisé depuis Projets.</StatePanel> : <>
+    {projects === null ? <StatePanel title="Tâches indisponibles">{scopedErrorMessage(projectProblem)} <Link href="/api/operator/auth/start">Se connecter</Link>.</StatePanel> : projects.length === 0 && !selected ? <StatePanel title="Aucun projet">Créez un projet depuis la rubrique Projets avant d’ajouter une tâche.</StatePanel> : requestedId && !selected ? <StatePanel title="Projet inaccessible">Ce projet est invalide, supprimé ou inaccessible. Sélectionnez un projet autorisé depuis Projets.</StatePanel> : <>
       <nav className="project-selector" aria-label="Choisir un projet"><span>Projet</span><div>{projects.map((project) => <Link key={project.id} href={`/tasks?project=${project.id}`} aria-current={project.id === selected?.id ? "page" : undefined}>{project.name}</Link>)}</div></nav>
       {selected ? <><p className="section-note">{tasks ? `Page ${(offset ?? 0) / PAGE_SIZE + 1} · ${tasks.length} tâches chargées.` : "Chargement des tâches indisponible."}</p><TaskCreateForm projectId={selected.id} /></> : null}
       {offset === null ? <StatePanel title="Page invalide">Choisissez une page valide.</StatePanel> : tasks === null ? <StatePanel title="Tâches indisponibles">Les tâches de {selected?.name} n’ont pas pu être chargées.</StatePanel> : tasks.length === 0 && offset === 0 ? <StatePanel title="Aucune tâche dans ce projet">Créez une première tâche ci-dessus. Aucun identifiant technique à copier.</StatePanel> : <>

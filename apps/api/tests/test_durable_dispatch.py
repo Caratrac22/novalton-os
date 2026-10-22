@@ -1559,6 +1559,7 @@ def test_estimated_exposure_downgrade_keeps_configured_budget(scope):
 
     from alembic import command
     from alembic.config import Config
+    from alembic.script import ScriptDirectory
 
     row, _, _ = enqueue(scope, QueueProvider([]), max_estimated_exposure=Decimal("1"))
     config = Config(Path(__file__).parents[1] / "alembic.ini")
@@ -1570,7 +1571,10 @@ def test_estimated_exposure_downgrade_keeps_configured_budget(scope):
         dispatch = await session.get(TaskDispatch, row.id)
         return version, dispatch.max_estimated_exposure
 
-    assert db_call(retained) == ("20261021_0039", Decimal("1"))
+    assert db_call(retained) == (
+        ScriptDirectory.from_config(config).get_current_head(),
+        Decimal("1"),
+    )
 
 
 def test_concurrent_workers_reserve_estimated_exposure_once(scope):

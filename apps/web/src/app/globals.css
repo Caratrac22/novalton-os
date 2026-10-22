@@ -263,6 +263,13 @@ pre { max-width:100%; overflow:auto; }
 :root[data-theme="light"] .status-badge[data-tone="neutral"] { background:#e7f0eb; color:#3c5c49; }
 :root[data-theme="light"] .workflow-result { background:#e7f0eb; border-color:#a9c7b2; color:var(--text); }
 :root[data-theme="light"] .qa-verdict { background:var(--raised); }
+:root .pagination { display:flex; flex-wrap:wrap; gap:10px; margin-top:16px; }
+:root .pagination a { display:inline-flex; min-height:44px; align-items:center; border:1px solid var(--strong); border-radius:8px; padding:0 16px; color:var(--accent); background:var(--surface); font-size:13px; font-weight:650; }
+:root .pagination a:hover { background:var(--raised); }
+.workspace-form { display:grid; gap:9px; margin:8px 0 12px; }
+.workspace-form label { font-size:12px; color:var(--muted); }
+.workspace-form select,.workspace-form button { min-height:44px; max-width:100%; border:1px solid var(--strong); border-radius:8px; padding:8px 12px; background:var(--surface); color:var(--text); }
+.workspace-form button { cursor:pointer; font-weight:650; }
 :root[data-theme="light"] .challenge-panel { background:#fff5df; }
 @media (max-width:680px) {
   .sidebar-shortcuts { display:flex; gap:6px; overflow-x:auto; padding:8px 0 0; white-space:nowrap; }

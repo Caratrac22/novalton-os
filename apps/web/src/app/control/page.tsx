@@ -5,18 +5,21 @@ import { getWorkflowRuns } from "@/lib/api/workflows";
 import { summarizeWorkflows } from "@/lib/workflow-summary";
 import { humanize } from "@/lib/format";
 import { PAGE_SIZE, pageHref, pageOffset } from "@/lib/pagination";
+import { scopedErrorMessage } from "@/lib/api/scoped";
 
 export const metadata: Metadata = { title: "Centre de contrôle" };
 export const dynamic = "force-dynamic";
 
 export default async function ControlPage({ searchParams }: Readonly<{ searchParams: Promise<{ page?: string | string[] }> }>) {
   const offset = pageOffset((await searchParams).page);
-  const runs = offset === null ? null : await getWorkflowRuns(offset, PAGE_SIZE).catch(() => null);
+  const result = offset === null ? { runs: null, error: null } : await getWorkflowRuns(offset, PAGE_SIZE)
+    .then((runs) => ({ runs, error: null })).catch((error: unknown) => ({ runs: null, error }));
+  const { runs } = result;
   const summary = runs === null ? null : summarizeWorkflows(runs);
   return <div className="page-stack">
     <section className="page-heading" aria-labelledby="control-title"><p className="eyebrow">Supervision</p><div><h1 id="control-title">Centre de contrôle</h1><p>Consultez les workflows accessibles, les événements d’exécution et les décisions opérateur, sans contourner les approbations requises.</p></div></section>
     <section aria-labelledby="control-state-title"><div className="section-heading"><div><p className="eyebrow">Suivi du travail</p><h2 id="control-state-title">État des workflows</h2></div><span className="section-note">{offset === null ? "Page invalide" : `Page ${offset / PAGE_SIZE + 1} · jusqu’à ${PAGE_SIZE} exécutions`}</span></div>
-      {summary === null ? <div className="state-panel" role="status"><h2>État indisponible</h2><p>Impossible de consulter les workflows. Cette erreur n’est pas assimilée à zéro exécution.</p></div> :
+      {summary === null ? <div className="state-panel" role="status"><h2>État indisponible</h2><p>{offset === null ? "Page invalide." : scopedErrorMessage(result.error)} Aucun nombre fictif n’est affiché.</p></div> :
       <div className="metric-grid" aria-label="Workflows chargés par statut">
         <div className="metric-card"><strong>{summary.RUNNING}</strong><span>En cours</span></div>
         <div className="metric-card"><strong>{summary.CREATED}</strong><span>Créés</span></div>
