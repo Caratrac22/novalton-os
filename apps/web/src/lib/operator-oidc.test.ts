@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { test } from "node:test";
-import { configuration, discover, exchangeCode, newTransaction, openTransaction, sealTransaction } from "./operator-oidc.ts";
+import { clearOperatorSessionCookies, configuration, discover, exchangeCode, newTransaction, openTransaction, sealTransaction, sessionCookie, transactionCookie, workspaceCookie } from "./operator-oidc.ts";
 
 test("login requires an exact HTTPS issuer, web origin, and server transaction secret", () => {
   const before = { ...process.env };
@@ -32,6 +32,22 @@ test("login transaction rejects tampering, expiration, future timestamps and sub
   assert.equal(openTransaction(`${sealed}x`, secret), null);
   assert.equal(openTransaction(sealTransaction({ ...tx, created: Date.now() - 301_000 }, secret), secret), null);
   assert.equal(openTransaction(sealTransaction({ ...tx, created: Date.now() + 1_000 }, secret), secret), null);
+});
+
+test("failed sign-in and sign-out expire the transaction, old identity and selected workspace", () => {
+  const expired: string[] = [];
+  clearOperatorSessionCookies({
+    set(name, value, options) {
+      assert.equal(value, "");
+      assert.equal(options.maxAge, 0);
+      assert.equal(options.secure, true);
+      assert.equal(options.httpOnly, true);
+      assert.equal(options.sameSite, "lax");
+      assert.equal(options.path, "/");
+      expired.push(name);
+    },
+  });
+  assert.deepEqual(expired, [transactionCookie, sessionCookie, workspaceCookie]);
 });
 
 test("OIDC code exchange validates state, nonce, human authentication, signature and PKCE", async () => {
