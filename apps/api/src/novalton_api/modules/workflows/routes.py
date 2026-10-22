@@ -198,6 +198,7 @@ async def list_runs(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
     run_status: Annotated[WorkflowRunStatus | None, Query(alias="status")] = None,
+    task_id: UUID | None = None,
 ) -> WorkflowRunListResponse:
     runs = await service.list_runs(
         session,
@@ -206,6 +207,7 @@ async def list_runs(
         limit=limit,
         offset=offset,
         status=run_status,
+        task_id=task_id,
     )
     return WorkflowRunListResponse(
         items=[await _run_response(session, run) for run in runs], limit=limit, offset=offset

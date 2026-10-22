@@ -45,12 +45,19 @@ async def stream_events(
     heartbeat_interval: float = HEARTBEAT_INTERVAL_SECONDS,
     clock: Callable[[], float] = monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    authorize: Callable[[object], Awaitable[None]] | None = None,
 ) -> AsyncIterator[str]:
     """Yield scoped frames while releasing the database session after every poll."""
     last_heartbeat = clock()
     current = cursor
     while not await is_disconnected():
         async with database.session_factory() as session:
+            if authorize is not None:
+                try:
+                    await authorize(session)
+                except Exception:
+                    # A revoked grant terminates an open stream before another private frame.
+                    return
             batch = await service.list_stream_batch(
                 session,
                 tenant_id=tenant_id,

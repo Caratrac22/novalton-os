@@ -29,6 +29,8 @@ PERMISSIONS = frozenset(
         "dispatch.read",
         "dispatch.cancel",
         "dispatch.resolve",
+        "workspace.read",
+        "workspace.write",
     }
 )
 _SEAL = object()

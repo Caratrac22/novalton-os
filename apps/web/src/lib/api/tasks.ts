@@ -10,11 +10,19 @@ function parseTask(value: unknown): Task | null {
   return { id: value.id, projectId: value.project_id, title: value.title, description: value.description, status: value.status as TaskStatus, createdAt: value.created_at, updatedAt: value.updated_at };
 }
 
-export async function getProjectTasks(projectId: string): Promise<Task[]> {
+export async function getProjectTasks(projectId: string, offset = 0, limit = 100): Promise<Task[]> {
   if (!isUuid(projectId)) throw new Error("Invalid project selection");
-  const value = await fetchScopedJson(`projects/${projectId}/tasks?limit=100&offset=0`);
-  if (!isRecord(value) || !Array.isArray(value.items) || value.limit !== 100 || value.offset !== 0) throw new Error("Invalid task response");
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid page");
+  const value = await fetchScopedJson(`projects/${projectId}/tasks?limit=${limit}&offset=${offset}`);
+  if (!isRecord(value) || !Array.isArray(value.items) || value.limit !== limit || value.offset !== offset || value.items.length > limit) throw new Error("Invalid task response");
   const tasks = value.items.map(parseTask);
   if (tasks.some((task) => task === null)) throw new Error("Invalid task response");
   return tasks as Task[];
+}
+
+export async function getProjectTask(projectId: string, taskId: string): Promise<Task> {
+  if (!isUuid(projectId) || !isUuid(taskId)) throw new Error("Invalid task selection");
+  const task = parseTask(await fetchScopedJson(`projects/${projectId}/tasks/${taskId}`));
+  if (!task || task.projectId !== projectId) throw new Error("Invalid task response");
+  return task;
 }

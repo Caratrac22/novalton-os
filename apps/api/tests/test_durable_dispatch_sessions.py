@@ -11,7 +11,8 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, update
+from test_development_workflow import _cleanup, _seed
 from test_durable_dispatch import db_call, operator_for
 
 from novalton_api.core.config import Settings, get_settings
@@ -19,9 +20,15 @@ from novalton_api.core.database import Database
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.main import create_app
 from novalton_api.modules.durable_dispatch import oidc_keys, provisioning, service
-from novalton_api.modules.durable_dispatch.identity import FederatedOperatorIdentity
+from novalton_api.modules.durable_dispatch.identity import (
+    FederatedOperatorIdentity,
+    HumanOperator,
+    TenantOperatorMembership,
+    WorkspaceOperatorPermission,
+)
 from novalton_api.modules.durable_dispatch.models import DispatchActivation
 from novalton_api.modules.durable_dispatch.sessions import authenticate_session
+from novalton_api.modules.projects.models import Project
 
 pytest_plugins = ["test_durable_dispatch"]
 
@@ -400,3 +407,226 @@ def test_concurrent_session_decision_serializes_revoke(scope, federated):
             ).status_code
             == 401
         )
+
+
+def test_saas_routes_require_human_grants_and_isolate_sql_scopes(scope, federated, monkeypatch):
+    """Direct HTTP, two humans/tenants, real rows, pagination, revocation on test PostgreSQL."""
+    other = asyncio.run(_seed())
+    other_user = uuid4()
+    extra_ids = [uuid4() for _ in range(105)]
+    from novalton_api.modules.workspaces.models import Workspace
+
+    async def provision(session):
+        session.add(HumanOperator(id=other_user, label="human-b", active=True))
+        session.add(
+            TenantOperatorMembership(
+                user_id=other_user, tenant_id=other.tenant_id, role="MEMBER", active=True
+            )
+        )
+        session.add(
+            FederatedOperatorIdentity(
+                user_id=other_user,
+                issuer="https://identity.example.test/",
+                subject="human-b",
+                active=True,
+            )
+        )
+        session.add_all(
+            [
+                WorkspaceOperatorPermission(
+                    user_id=operator_for(scope).user_id,
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    permission=permission,
+                    active=True,
+                )
+                for permission in ("workspace.read", "workspace.write")
+            ]
+        )
+        session.add_all(
+            [
+                WorkspaceOperatorPermission(
+                    user_id=other_user,
+                    tenant_id=other.tenant_id,
+                    workspace_id=other.workspace_id,
+                    permission=permission,
+                    active=True,
+                )
+                for permission in ("workspace.read", "workspace.write")
+            ]
+        )
+        session.add(Workspace(tenant_id=scope.tenant_id, name="Ungrant workspace", slug="ungrant"))
+        session.add_all(
+            [
+                Project(
+                    id=identifier,
+                    workspace_id=scope.workspace_id,
+                    name=f"Additional {index}",
+                    slug=f"additional-{index}",
+                    status="ACTIVE",
+                )
+                for index, identifier in enumerate(extra_ids)
+            ]
+        )
+        await session.commit()
+
+    async def cleanup(session):
+        await session.execute(delete(Project).where(Project.id.in_(extra_ids)))
+        await session.execute(
+            delete(Workspace).where(
+                Workspace.tenant_id == scope.tenant_id, Workspace.slug == "ungrant"
+            )
+        )
+        await session.execute(
+            delete(WorkspaceOperatorPermission).where(
+                WorkspaceOperatorPermission.user_id == other_user
+            )
+        )
+        await session.execute(
+            delete(WorkspaceOperatorPermission).where(
+                WorkspaceOperatorPermission.user_id == operator_for(scope).user_id,
+                WorkspaceOperatorPermission.permission.in_(["workspace.read", "workspace.write"]),
+            )
+        )
+        await session.execute(
+            delete(FederatedOperatorIdentity).where(FederatedOperatorIdentity.user_id == other_user)
+        )
+        await session.execute(
+            delete(TenantOperatorMembership).where(TenantOperatorMembership.user_id == other_user)
+        )
+        await session.execute(delete(HumanOperator).where(HumanOperator.id == other_user))
+        await session.commit()
+
+    try:
+        db_call(provision)
+        monkeypatch.setenv("NOVALTON_TEST_LEGACY_API_AUTH_BYPASS", "false")
+        get_settings.cache_clear()
+        base_a = f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
+        base_b = f"/api/v1/tenants/{other.tenant_id}/workspaces/{other.workspace_id}"
+        valid_a = {"Authorization": "Bearer " + federated()}
+        valid_b = {"Authorization": "Bearer " + federated(subject="human-b")}
+        with TestClient(create_app()) as client:
+            assert client.get(f"{base_a}/projects").status_code == 401
+            assert (
+                client.post(
+                    f"{base_a}/projects", json={"name": "forged", "slug": "forged"}
+                ).status_code
+                == 401
+            )
+            assert client.get(f"{base_a}/events/stream").status_code == 401
+            assert (
+                client.get(
+                    f"{base_a}/projects", headers={"X-Workspace-ID": str(scope.workspace_id)}
+                ).status_code
+                == 401
+            )
+            assert (
+                client.get(
+                    f"{base_a}/projects",
+                    headers={"Authorization": "Bearer " + federated(offset=-3600)},
+                ).status_code
+                == 401
+            )
+            page = client.get(
+                f"{base_a}/projects", headers=valid_a, params={"limit": 20, "offset": 100}
+            )
+            assert page.status_code == 200 and len(page.json()["items"]) == 6
+            first = client.get(
+                f"{base_a}/projects", headers=valid_a, params={"limit": 100, "offset": 0}
+            )
+            assert not {row["id"] for row in first.json()["items"]} & {
+                row["id"] for row in page.json()["items"]
+            }
+            assert client.get(f"{base_b}/projects", headers=valid_a).status_code == 403
+            assert (
+                client.get(
+                    f"{base_b}/projects",
+                    headers={**valid_a, "X-Workspace-ID": str(other.workspace_id)},
+                ).status_code
+                == 403
+            )
+            assert (
+                client.post(
+                    f"{base_b}/projects", headers=valid_a, json={"name": "forged", "slug": "forged"}
+                ).status_code
+                == 403
+            )
+            assert (
+                client.get(f"{base_b}/projects/{other.project_id}", headers=valid_b).status_code
+                == 200
+            )
+            assert (
+                client.get(f"{base_a}/projects/{other.project_id}", headers=valid_a).status_code
+                == 404
+            )
+            assert (
+                client.get(
+                    f"{base_a}/projects/{scope.project_id}/tasks/{other.task_id}", headers=valid_a
+                ).status_code
+                == 404
+            )
+            assert (
+                client.get(
+                    f"{base_b}/projects/{other.project_id}/tasks/{other.task_id}", headers=valid_b
+                ).status_code
+                == 200
+            )
+            assert (
+                client.patch(
+                    f"{base_b}/projects/{other.project_id}/tasks/{other.task_id}",
+                    headers=valid_a,
+                    json={"title": "forged"},
+                ).status_code
+                == 403
+            )
+            assert client.get(f"{base_b}/workflow-runs", headers=valid_a).status_code == 403
+            assert client.get(f"{base_a}/workflow-runs", headers=valid_a).status_code == 200
+            assert (
+                client.get(
+                    f"{base_a}/workflow-runs",
+                    headers=valid_a,
+                    params={"task_id": str(other.task_id)},
+                ).json()["items"]
+                == []
+            )
+            assert (
+                client.patch(
+                    f"{base_a}/projects/{scope.project_id}",
+                    headers=valid_a,
+                    json={"name": "A authorized"},
+                ).status_code
+                == 200
+            )
+
+            # A grant removed after a page load fences the next mutation and read.
+            async def revoke(session):
+                await session.execute(
+                    update(WorkspaceOperatorPermission)
+                    .where(
+                        WorkspaceOperatorPermission.user_id == operator_for(scope).user_id,
+                        WorkspaceOperatorPermission.tenant_id == scope.tenant_id,
+                        WorkspaceOperatorPermission.workspace_id == scope.workspace_id,
+                        WorkspaceOperatorPermission.permission.in_(
+                            ["workspace.read", "workspace.write"]
+                        ),
+                    )
+                    .values(active=False, revoked_at=datetime.now(UTC))
+                )
+                await session.commit()
+
+            db_call(revoke)
+            assert (
+                client.patch(
+                    f"{base_a}/projects/{scope.project_id}",
+                    headers=valid_a,
+                    json={"name": "denied"},
+                ).status_code
+                == 403
+            )
+            assert client.get(f"{base_a}/projects", headers=valid_a).status_code == 403
+            assert client.get(f"{base_b}/projects", headers=valid_b).status_code == 200
+    finally:
+        monkeypatch.setenv("NOVALTON_TEST_LEGACY_API_AUTH_BYPASS", "true")
+        get_settings.cache_clear()
+        db_call(cleanup)
+        asyncio.run(_cleanup(other))

@@ -138,15 +138,23 @@ async def list_runs(
     limit: int,
     offset: int,
     status: str | None,
+    task_id: UUID | None = None,
 ) -> list[WorkflowRun]:
     statement: Select[tuple[WorkflowRun]] = select(WorkflowRun).where(
         WorkflowRun.tenant_id == tenant_id, WorkflowRun.workspace_id == workspace_id
     )
     if status is not None:
         statement = statement.where(WorkflowRun.status == status)
+    if task_id is not None:
+        statement = statement.where(WorkflowRun.task_id == task_id)
     return list(
         await session.scalars(
-            statement.order_by(WorkflowRun.created_at.asc(), WorkflowRun.id.asc())
+            statement.order_by(
+                WorkflowRun.created_at.desc()
+                if task_id is not None
+                else WorkflowRun.created_at.asc(),
+                WorkflowRun.id.desc() if task_id is not None else WorkflowRun.id.asc(),
+            )
             .limit(limit)
             .offset(offset)
         )

@@ -4,7 +4,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from novalton_api import __version__
 from novalton_api.api.v1.health import router as health_router
@@ -26,6 +26,7 @@ from novalton_api.modules.approvals.routes import router as approvals_router
 from novalton_api.modules.developer_manager.routes import router as developer_manager_router
 from novalton_api.modules.developer_worker.routes import router as developer_worker_router
 from novalton_api.modules.durable_dispatch.routes import router as durable_dispatch_router
+from novalton_api.modules.durable_dispatch.saas_access import require_saas_access
 from novalton_api.modules.git_changesets.routes import router as git_changesets_router
 from novalton_api.modules.github_publications.routes import router as github_publications_router
 from novalton_api.modules.memories.routes import router as memories_router
@@ -119,26 +120,28 @@ def create_app(
     register_exception_handlers(application)
     application.add_middleware(CorrelationIdMiddleware)
     application.include_router(health_router, prefix="/api/v1")
-    application.include_router(projects_router, prefix="/api/v1")
-    application.include_router(tasks_router, prefix="/api/v1")
-    application.include_router(runtime_events_router, prefix="/api/v1")
-    application.include_router(approvals_router, prefix="/api/v1")
-    application.include_router(git_changesets_router, prefix="/api/v1")
-    application.include_router(github_publications_router, prefix="/api/v1")
-    application.include_router(developer_manager_router, prefix="/api/v1")
-    application.include_router(developer_worker_router, prefix="/api/v1")
+    # Every non-dispatch workspace route shares this server-side identity boundary.
+    scoped = {"prefix": "/api/v1", "dependencies": [Depends(require_saas_access)]}
+    application.include_router(projects_router, **scoped)
+    application.include_router(tasks_router, **scoped)
+    application.include_router(runtime_events_router, **scoped)
+    application.include_router(approvals_router, **scoped)
+    application.include_router(git_changesets_router, **scoped)
+    application.include_router(github_publications_router, **scoped)
+    application.include_router(developer_manager_router, **scoped)
+    application.include_router(developer_worker_router, **scoped)
     application.include_router(durable_dispatch_router, prefix="/api/v1")
-    application.include_router(qa_worker_router, prefix="/api/v1")
-    application.include_router(definitions_router, prefix="/api/v1")
-    application.include_router(runs_router, prefix="/api/v1")
-    application.include_router(policy_router, prefix="/api/v1")
-    application.include_router(model_catalog_router, prefix="/api/v1")
-    application.include_router(model_router_router, prefix="/api/v1")
-    application.include_router(model_usage_router, prefix="/api/v1")
-    application.include_router(memories_router, prefix="/api/v1")
-    application.include_router(plans_router, prefix="/api/v1")
-    application.include_router(workflow_runs_router, prefix="/api/v1")
-    application.include_router(orchestrator_router, prefix="/api/v1")
+    application.include_router(qa_worker_router, **scoped)
+    application.include_router(definitions_router, **scoped)
+    application.include_router(runs_router, **scoped)
+    application.include_router(policy_router, **scoped)
+    application.include_router(model_catalog_router, **scoped)
+    application.include_router(model_router_router, **scoped)
+    application.include_router(model_usage_router, **scoped)
+    application.include_router(memories_router, **scoped)
+    application.include_router(plans_router, **scoped)
+    application.include_router(workflow_runs_router, **scoped)
+    application.include_router(orchestrator_router, **scoped)
     return application
 
 

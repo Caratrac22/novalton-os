@@ -1,9 +1,11 @@
+import { verifiedMutationOrigin } from "@/lib/operator-origin";
 import { postWorkflow } from "@/lib/api/workflows";
 import { isRecord, isUuid } from "@/lib/api/scoped";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request, context: { params: Promise<{ runId: string; stepRunId: string }> }): Promise<Response> {
+  if (!verifiedMutationOrigin(request)) return new Response("Forbidden", { status: 403 });
   const { runId, stepRunId } = await context.params;
   if (!isUuid(runId) || !isUuid(stepRunId)) return Response.json({ message: "Invalid challenge selection." }, { status: 400 });
   let body: unknown;

@@ -254,3 +254,44 @@ async def test_heartbeat_and_disconnect_are_deterministic_and_close_sessions(
         assert database.engine.pool.checkedout() == 0
     finally:
         await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stream_stops_after_grant_revocation_before_next_poll(
+    scopes: tuple[Scope, Scope],
+) -> None:
+    first, _ = scopes
+    database = Database.from_settings(Settings())
+    decisions = 0
+
+    async def authorize(_session) -> None:
+        nonlocal decisions
+        decisions += 1
+        if decisions == 2:
+            raise PermissionError("grant revoked")
+
+    async def connected() -> bool:
+        return False
+
+    async def proceed(_seconds: float) -> None:
+        return None
+
+    try:
+        frames = [
+            frame
+            async for frame in stream_events(
+                database,
+                tenant_id=first.tenant_id,
+                workspace_id=first.workspace_id,
+                cursor=None,
+                is_disconnected=connected,
+                authorize=authorize,
+                clock=lambda: 0.0,
+                sleep=proceed,
+            )
+        ]
+        assert frames == []
+        assert decisions == 2
+        assert database.engine.pool.checkedout() == 0
+    finally:
+        await database.dispose()

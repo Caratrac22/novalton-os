@@ -1,11 +1,11 @@
 import "server-only";
-import { fetchScopedJson, isRecord, isTimestamp, isUuid } from "@/lib/api/scoped";
-import { getApiBaseUrl, scopedApiPath } from "@/lib/api/config";
+import { fetchScopedJson, scopedSessionFetch, isRecord, isTimestamp, isUuid } from "@/lib/api/scoped";
 import { WORKFLOW_RUN_STATUSES, WORKFLOW_STEP_STATUSES, type OperatorWorkflow, type WorkflowPlan, type WorkflowRun, type WorkflowStep } from "@/lib/api/workflow-types";
 
-export async function getWorkflowRuns(): Promise<WorkflowRun[]> {
-  const value = await fetchScopedJson("workflow-runs?limit=100&offset=0");
-  if (!isRecord(value) || !Array.isArray(value.items) || value.limit !== 100 || value.offset !== 0 || value.items.length > 100 || !value.items.every(isWorkflowRun)) throw new Error("Invalid workflow response");
+export async function getWorkflowRuns(offset = 0, limit = 100, taskId?: string): Promise<WorkflowRun[]> {
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100 || (taskId !== undefined && !isUuid(taskId))) throw new Error("Invalid page");
+  const value = await fetchScopedJson(`workflow-runs?limit=${limit}&offset=${offset}${taskId ? `&task_id=${taskId}` : ""}`);
+  if (!isRecord(value) || !Array.isArray(value.items) || value.limit !== limit || value.offset !== offset || value.items.length > limit || !value.items.every(isWorkflowRun)) throw new Error("Invalid workflow response");
   return value.items as WorkflowRun[];
 }
 
@@ -75,5 +75,5 @@ function isToolCall(value: unknown): boolean {
 }
 
 export async function postWorkflow(path: string, body?: unknown): Promise<Response> {
-  return fetch(`${getApiBaseUrl()}${scopedApiPath(path)}`, { method: "POST", cache: "no-store", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15000) });
+  return scopedSessionFetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15000) });
 }
