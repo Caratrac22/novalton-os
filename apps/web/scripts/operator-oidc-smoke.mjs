@@ -218,12 +218,13 @@ try {
   assert.match(replay.headers.location, /auth=failed/);
   const consoleResponse = await httpsCall(`${webOrigin}/operator`, { cookie: session });
   assert.equal(consoleResponse.status, 200);
-  assert.match(consoleResponse.body, new RegExp(workflowId));
+  assert.match(consoleResponse.body, new RegExp(`Workflow <!-- -->${workflowId.slice(0, 8)}`));
+  assert.match(consoleResponse.body, new RegExp(dispatchId));
   const details = await httpsCall(`${webOrigin}/operator/${dispatchId}`, { cookie: session });
   assert.equal(details.status, 200);
   for (const role of ["Manager", "Developer", "QA"])
     assert.match(details.body, new RegExp(role));
-  assert.match(details.body, /BILLING_UNVERIFIED/);
+  assert.match(details.body, /Facturation du fournisseur non v.rifi.e/);
   assert.equal((await httpsCall(`${webOrigin}/api/operator/workspace`, {
     method: "POST", cookie: session, origin: "https://forged.example.test",
     body: `workspace_id=${scope.workspace}`,
@@ -251,7 +252,7 @@ try {
     revoked = true;
   }
   const revokedResponse = await httpsCall(`${webOrigin}/operator`, { cookie: session });
-  assert.match(revokedResponse.body, /permission revoked/);
+  assert.match(revokedResponse.body, /permission r.voqu.e/);
   assert.equal((await httpsCall(`${webOrigin}/api/operator/auth/logout`, {
     method: "POST", cookie: session, origin: "https://forged.example.test",
   })).status, 403);
