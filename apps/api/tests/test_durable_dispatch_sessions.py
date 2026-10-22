@@ -11,7 +11,7 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, update
+from sqlalchemy import delete, select, update
 from test_development_workflow import _cleanup, _seed
 from test_durable_dispatch import db_call, operator_for
 
@@ -499,6 +499,13 @@ def test_saas_routes_require_human_grants_and_isolate_sql_scopes(scope, federate
 
     try:
         db_call(provision)
+        ungranted = db_call(
+            lambda session: session.scalar(
+                select(Workspace.id).where(
+                    Workspace.tenant_id == scope.tenant_id, Workspace.slug == "ungrant"
+                )
+            )
+        )
         monkeypatch.setenv("NOVALTON_TEST_LEGACY_API_AUTH_BYPASS", "false")
         get_settings.cache_clear()
         base_a = f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}"
@@ -538,6 +545,13 @@ def test_saas_routes_require_human_grants_and_isolate_sql_scopes(scope, federate
                 row["id"] for row in page.json()["items"]
             }
             assert client.get(f"{base_b}/projects", headers=valid_a).status_code == 403
+            assert (
+                client.get(
+                    f"/api/v1/tenants/{scope.tenant_id}/workspaces/{ungranted}/projects",
+                    headers=valid_a,
+                ).status_code
+                == 403
+            )
             assert (
                 client.get(
                     f"{base_b}/projects",
