@@ -51,6 +51,8 @@ async def create_conversation(
     owner_id: UUID,
     title: str,
 ) -> CadrageConversation:
+    if not title.strip():
+        raise ApplicationError("invalid_title", "Conversation title is empty", status_code=422)
     project = await projects_service.get_project(
         session, tenant_id=tenant_id, workspace_id=workspace_id, project_id=project_id
     )

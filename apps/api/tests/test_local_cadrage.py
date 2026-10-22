@@ -15,6 +15,7 @@ from sqlalchemy import delete, select, update
 
 from novalton_api.core.config import Settings, get_settings
 from novalton_api.core.database import Database
+from novalton_api.core.exceptions import ApplicationError
 from novalton_api.infrastructure.providers.openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProvider,
@@ -22,6 +23,7 @@ from novalton_api.infrastructure.providers.openai_compatible import (
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.main import create_app
 from novalton_api.modules.audit.models import AuditRecord
+from novalton_api.modules.cadrage import service as cadrage_service
 from novalton_api.modules.cadrage.models import CadrageConversation, CadrageMessage
 from novalton_api.modules.durable_dispatch.identity import (
     HumanOperator,
@@ -164,6 +166,7 @@ def test_local_owner_auth_and_durable_scoped_chat(initialized):
         )
         assert project.status_code == 201
         base = path(scope) + f"/projects/{project.json()['id']}/conversations"
+        assert client.post(base, headers=auth, json={"title": "  "}).status_code == 422
         conversation = client.post(base, headers=auth, json={"title": "Site pour artisans"})
         assert conversation.status_code == 201
         endpoint = base + f"/{conversation.json()['id']}/messages"
@@ -436,6 +439,61 @@ def test_two_local_accounts_isolate_tenants_and_private_conversations(initialize
         db_call(lambda session: wipe(session, second))
 
 
+def test_concurrent_messages_reserve_one_model_reply(initialized):
+    scope, password, _ = initialized
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login",
+            json={"login": scope.login, "password": password},
+        ).json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        project = client.post(
+            path(scope) + "/projects",
+            headers=auth,
+            json={"name": "Concurrence", "slug": "concurrency", "description": None},
+        ).json()
+        base = path(scope) + f"/projects/{project['id']}/conversations"
+        conversation = client.post(base, headers=auth, json={"title": "Test simultané"}).json()
+
+        async def race():
+            db = Database.from_settings(Settings.from_environment())
+
+            async def contender(content):
+                async with db.session_factory() as session:
+                    row = await cadrage_service.get_conversation(
+                        session,
+                        tenant_id=scope.tenant,
+                        workspace_id=scope.workspace,
+                        project_id=UUID(project["id"]),
+                        owner_id=scope.owner,
+                        conversation_id=UUID(conversation["id"]),
+                        lock=True,
+                    )
+                    return await cadrage_service.append_user_message(
+                        session,
+                        conversation=row,
+                        content=content,
+                        request_id=uuid4(),
+                        reserve_for_model=True,
+                    )
+
+            try:
+                return await asyncio.gather(
+                    contender("Première demande"),
+                    contender("Deuxième demande"),
+                    return_exceptions=True,
+                )
+            finally:
+                await db.dispose()
+
+        results = asyncio.run(race())
+        assert sum(isinstance(item, tuple) for item in results) == 1
+        denied = next(item for item in results if isinstance(item, Exception))
+        assert isinstance(denied, ApplicationError) and denied.status_code == 409
+        rows = client.get(base + f"/{conversation['id']}/messages", headers=auth).json()["items"]
+        assert len(rows) == 1 and rows[0]["role"] == "USER"
+
+
 def test_bootstrap_one_owner_and_transaction_failure(monkeypatch):
     settings, name = settings_for_new_scope()
     password = "First-Owner-Passphrase-For-Tests"
@@ -570,7 +628,12 @@ def test_local_http_model_two_adaptive_turns_and_malformed_reply(initialized, mo
         assert request.url.host == "127.0.0.1" and request.url.path == "/v1/chat/completions"
         body = json.loads(request.content)
         seen.append(body)
-        user_messages = [item["content"] for item in body["messages"] if item["role"] == "user"]
+        assert sum(item["role"] == "system" for item in body["messages"]) == 1
+        user_messages = [
+            item["content"]
+            for item in body["messages"]
+            if item["role"] == "user" and not item["content"].startswith("Titre du projet (")
+        ]
         if "malformed" in user_messages[-1]:
             content = "not JSON"
         elif len(user_messages) == 1:

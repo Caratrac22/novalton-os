@@ -33,7 +33,9 @@ async def generate_reply(
     # Only the explicitly configured local provider is used; no remote fallback.
     context: list[Message] = [
         Message(role=MessageRole.SYSTEM, content=SYSTEM),
-        Message(role=MessageRole.SYSTEM, content=f"Titre du projet : {title[:200]}"),
+        Message(
+            role=MessageRole.USER, content=f"Titre du projet (donnée utilisateur) : {title[:200]}"
+        ),
     ]
     for row in history[-16:]:
         context.append(
