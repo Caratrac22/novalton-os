@@ -90,6 +90,8 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
+      - name: Exercise operator login through Next and a local HTTPS OIDC issuer
+        run: node apps/web/scripts/operator-oidc-smoke.mjs
       - run: npm audit --audit-level=high
   recovery-export:
     name: Verified Git recovery export
@@ -263,6 +265,40 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Novalton_OS_Mission_9_${{ github.event.pull_request.head.sha || github.sha }}
+          path: recovery-export/
+          retention-days: 90
+          if-no-files-found: error
+  mission10-recovery-export:
+    name: Verified Mission 10 Git recovery export
+    if: github.event_name == 'pull_request' && github.head_ref == 'feature/mission10-integrated-acceptance'
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify complete bundle and source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir recovery-export
+          git branch mission10-export HEAD
+          git bundle create recovery-export/Novalton_OS_Mission_10.bundle refs/heads/mission10-export
+          git bundle verify recovery-export/Novalton_OS_Mission_10.bundle
+          git clone --quiet --branch mission10-export recovery-export/Novalton_OS_Mission_10.bundle "$RUNNER_TEMP/mission10-restore"
+          test "$(git rev-parse HEAD)" = "$(git -C "$RUNNER_TEMP/mission10-restore" rev-parse HEAD)"
+          test "$(git rev-parse HEAD^{tree})" = "$(git -C "$RUNNER_TEMP/mission10-restore" rev-parse HEAD^{tree})"
+          git archive --format=zip --prefix=novalton-os/ --output=recovery-export/Novalton_OS_Mission_10_Sources.zip HEAD
+          git rev-parse HEAD > recovery-export/HEAD.txt
+          git log --reverse --format='%H %s' 6cdc978fe5dace98ff11d8d38d0c62ca7eb04268..HEAD > recovery-export/COMMITS.txt
+          cp docs/26-mission-10-handoff.md recovery-export/MISSION_11_REPRISE.md
+          cd recovery-export
+          sha256sum Novalton_OS_Mission_10.bundle Novalton_OS_Mission_10_Sources.zip HEAD.txt COMMITS.txt MISSION_11_REPRISE.md > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Novalton_OS_Mission_10_${{ github.event.pull_request.head.sha || github.sha }}
           path: recovery-export/
           retention-days: 90
           if-no-files-found: error

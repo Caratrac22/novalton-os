@@ -12,9 +12,14 @@ export async function GET(request: NextRequest) {
   try {
     const { issuer, client, redirectUri, secret } = configuration();
     const tx = openTransaction(request.cookies.get(transactionCookie)?.value, secret);
-    if (!tx || new URL(request.url).origin !== origin) return failure;
+    // Next may expose its internal port in request.url behind a TLS reverse proxy.
+    // Bind the callback to the configured public host and HTTPS scheme instead.
+    if (!tx || request.headers.get("host") !== new URL(origin).host ||
+        request.headers.get("x-forwarded-proto") !== "https") return failure;
     const as = await discover(issuer);
-    const { token, maxAge } = await exchangeCode(as, client, redirectUri, tx, new URL(request.url),
+    const callback = new URL(redirectUri);
+    callback.search = new URL(request.url).search;
+    const { token, maxAge } = await exchangeCode(as, client, redirectUri, tx, callback,
       process.env.NOVALTON_OPERATOR_OIDC_CLIENT_SECRET);
     const result = NextResponse.redirect(`${origin}/operator`);
     result.cookies.set(transactionCookie, "", { ...cookieOptions, maxAge: 0 });

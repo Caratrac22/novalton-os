@@ -197,6 +197,64 @@ def test_federated_workflow_evidence_requires_read_authority(scope, federated):
         )
 
 
+def test_signed_human_operates_completed_workflow_and_loses_authority(scope, federated):
+    """Exercise signed identity, real API routes, PostgreSQL and all three agent steps."""
+    from test_development_workflow import QueueProvider, _manager, _qa, _worker
+    from test_durable_dispatch import enqueue, other_task, snapshot, tick
+
+    provider = QueueProvider([_manager(), _worker(), _qa("PASS")])
+    completed, _, _ = enqueue(scope, provider, max_attempts=3, max_model_calls=3)
+    base = f"/api/v1/tenants/{scope.tenant_id}/workspaces/{scope.workspace_id}/dispatch"
+    headers = {"Authorization": f"Bearer {federated()}"}
+    with TestClient(create_app()) as client:
+        assert str(completed.id) in {
+            item["id"] for item in client.get(f"{base}/requests", headers=headers).json()
+        }
+        assert [tick(scope, provider).outcome.value for _ in range(3)] == [
+            "STEP_COMPLETED",
+            "STEP_COMPLETED",
+            "WORKFLOW_COMPLETED",
+        ]
+        dispatch, attempts, models = snapshot(scope, completed.id)
+        assert dispatch.status == "DONE"
+        assert len(attempts) == len(models) == len(provider.calls) == 3
+        assert [model.status for model in models] == ["SUCCEEDED"] * 3
+        view = client.get(f"{base}/requests/{completed.id}/workflow", headers=headers)
+        assert view.status_code == 200
+        assert view.json()["workflow_run"]["status"] == "COMPLETED"
+        assert len(view.json()["step_details"]) == 3
+        evidence = client.get(f"{base}/requests/{completed.id}/cost-evidence", headers=headers)
+        assert evidence.status_code == 200 and len(evidence.json()) == 3
+        assert all(not item["provider_billing_verified"] for item in evidence.json())
+        history = client.get(f"{base}/requests/{completed.id}/attempts", headers=headers)
+        assert history.status_code == 200 and len(history.json()) == 3
+        pending, _, _ = enqueue(other_task(scope), QueueProvider([]), max_attempts=3)
+        cancel_path = f"{base}/requests/{pending.id}/cancel"
+        assert client.post(cancel_path, headers=headers).status_code == 200
+        assert client.post(cancel_path, headers=headers).status_code == 200
+        assert (
+            client.get(f"{base}/requests/{pending.id}/workflow", headers=headers).status_code == 200
+        )
+        assert (
+            client.get(
+                f"/api/v1/tenants/{uuid4()}/workspaces/{scope.workspace_id}/dispatch/requests",
+                headers=headers,
+            ).status_code
+            == 403
+        )
+        db_call(
+            lambda session: provisioning.revoke_federated_subject(
+                session,
+                operator=operator_for(scope),
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                subject_id=operator_for(scope).user_id,
+            )
+        )
+        assert client.get(f"{base}/requests", headers=headers).status_code == 401
+        assert client.post(cancel_path, headers=headers).status_code == 401
+
+
 def test_bound_session_fenced_after_revocation_with_reused_session(scope, federated):
     async def work():
         database = Database.from_settings(Settings.from_environment())
