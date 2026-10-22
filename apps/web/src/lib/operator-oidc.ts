@@ -63,7 +63,7 @@ export function openTransaction(value: string | undefined, secret: string): Tran
 }
 
 /** Only a callback for our live login transaction may replace an existing human session. */
-export function matchesOidcCallback(tx: Transaction | null, callback: URL, origin: string): boolean {
+export function matchesOidcCallback(tx: Transaction | null, callback: URL, origin: string): tx is Transaction {
   const states = callback.searchParams.getAll("state");
   return tx !== null && callback.origin === origin && states.length === 1 && states[0] === tx.state;
 }
