@@ -675,6 +675,19 @@ def test_saas_routes_require_human_grants_and_isolate_sql_scopes(scope, federate
                 ).status_code
                 == 403
             )
+
+            async def revoke_identity(session):
+                await session.execute(
+                    update(FederatedOperatorIdentity)
+                    .where(
+                        FederatedOperatorIdentity.user_id == other_user,
+                    )
+                    .values(active=False, revoked_at=datetime.now(UTC))
+                )
+                await session.commit()
+
+            db_call(revoke_identity)
+            assert client.get(f"{base_b}/projects", headers=valid_b).status_code == 401
     finally:
         monkeypatch.setenv("NOVALTON_TEST_LEGACY_API_AUTH_BYPASS", "true")
         get_settings.cache_clear()
