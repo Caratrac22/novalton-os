@@ -93,6 +93,20 @@ stable UUIDs configured in `.env`. It is transactionally idempotent, refuses con
 records, and is disabled when `NOVALTON_ENV=production`. It never creates users or other business
 records.
 
+For a first local Novalton account after applying all migrations, run the privileged CLI in a
+local terminal. It prompts for a new password without placing it in shell history:
+
+```bash
+uv run --project apps/api python -m novalton_api.modules.local_auth.bootstrap mon_identifiant
+```
+
+It provisions the first human owner and explicit read/write grants for the configured tenant and
+workspace in one transaction. The existing `make db-bootstrap` only creates that scope and is
+still safe to run first. No public signup or default password exists. Set `NOVALTON_WEB_ORIGIN`
+to the exact trusted HTTPS origin of the TLS proxy before logging in; the secure cookie and Origin
+checks intentionally refuse an unconfigured HTTP origin. See [mission 12A handoff](docs/29-mission-12a-handoff.md)
+for limits and recovery work still required.
+
 Every HTTP response includes `X-Correlation-ID`. A client may supply this header using 1–128 ASCII letters, digits, `.`, `_`, `:`, or `-`; invalid or missing values are replaced with a generated `req_...` identifier. The same identifier is attached to request-scoped structured logs and deterministic API error responses.
 
 Projects are exposed only through an explicit tenant and workspace path:
@@ -143,8 +157,8 @@ with a `NEXT_PUBLIC_` prefix: browser code does not need the backend origin or a
 
 `NOVALTON_TENANT_ID` and `NOVALTON_WORKSPACE_ID` define the single explicit frontend scope in the
 same server-only configuration boundary. Their development defaults match the deterministic local
-bootstrap UUIDs. Projects are fetched once with a 100-item bound. Tasks fetch that same bounded
-project list and only the selected project's bounded 100-item task list. Activity uses native
+bootstrap UUIDs. Projects, tasks and workflow runs use bounded server pagination; an inaccessible
+URL never selects a different project. Activity uses native
 `EventSource` against a same-origin Next.js route; the route adds the server-only backend/scope and
 forwards the browser's standard `Last-Event-ID` header so reconnects resume through the I-010 cursor.
 No activity is persisted in browser storage.
