@@ -1,7 +1,7 @@
 # Matcher adapter for Next's fast-glob dependency
 
 This private development package replaces only `micromatch` beneath
-`fast-glob@3.3.1`, used by `@next/eslint-plugin-next@16.3.8`. It is not part of
+`fast-glob@3.3.1`, used by `@next/eslint-plugin-next@16.4.2`. It is not part of
 the application runtime or the I-044A/I-044B foundation.
 
 Micromatch reaches `braces@3.0.3`, affected by
