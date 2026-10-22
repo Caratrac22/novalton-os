@@ -32,6 +32,7 @@ from novalton_api.modules.local_auth.bootstrap import BootstrapDenied, bootstrap
 from novalton_api.modules.local_auth.models import LocalCredential, LocalLoginThrottle, LocalSession
 from novalton_api.modules.local_auth.service import hash_password
 from novalton_api.modules.projects.models import Project
+from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.workspaces.models import Workspace
 
@@ -69,6 +70,7 @@ def settings_for_new_scope() -> tuple[Settings, str]:
 
 
 async def wipe(session, scope: Scope) -> None:
+    await session.execute(delete(RuntimeEvent).where(RuntimeEvent.tenant_id == scope.tenant))
     await session.execute(
         delete(CadrageMessage).where(
             CadrageMessage.conversation_id.in_(

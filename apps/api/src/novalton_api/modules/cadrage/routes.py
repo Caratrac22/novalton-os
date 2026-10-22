@@ -33,7 +33,7 @@ class ConversationInput(BaseModel):
 class MessageInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     content: str = Field(min_length=1, max_length=4000)
-    client_request_id: UUID
+    client_request_id: UUID = Field(strict=False)
 
 
 def _human(operator: OperatorAuthority | None) -> OperatorAuthority:
