@@ -14,7 +14,7 @@ export type DispatchSummary = {
 export async function dispatchUpstream(path: string, init?: RequestInit, scope?: WorkspaceScope): Promise<Response | null> {
   const cookieJar = await cookies();
   const token = cookieJar.get("__Host-novalton-operator-session")?.value;
-  if (!token || token.length > 8192 || !/^[\w-]+\.[\w-]+\.[\w-]+$/.test(token)) return null;
+  if (!token || token.length > 8192 || !(/^[\w-]+\.[\w-]+\.[\w-]+$/.test(token) || /^nvl_[\w-]{43}$/.test(token))) return null;
   try {
     const chosen = scope ?? selectedOperatorScope(cookieJar.get("__Host-novalton-operator-workspace")?.value);
     return await fetch(`${getApiBaseUrl()}${scopedApiPath(`dispatch/${path}`, chosen)}`, {
