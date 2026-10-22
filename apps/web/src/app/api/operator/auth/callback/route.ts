@@ -17,7 +17,7 @@ export async function GET(request: NextRequest) {
     // Only a genuine ongoing login may replace the previously signed-in human.
     clearOperatorSessionCookies(failure.cookies);
     const as = await discover(issuer);
-    const { token, maxAge } = await exchangeCode(as, client, redirectUri, tx!, callback,
+    const { token, maxAge } = await exchangeCode(as, client, redirectUri, tx, callback,
       process.env.NOVALTON_OPERATOR_OIDC_CLIENT_SECRET);
     const result = NextResponse.redirect(`${origin}/operator`);
     result.cookies.set(transactionCookie, "", { ...cookieOptions, maxAge: 0 });
