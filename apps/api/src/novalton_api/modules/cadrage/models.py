@@ -4,6 +4,7 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import (
+    JSON,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -84,3 +85,59 @@ class CadrageMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     reply_to_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True), ForeignKey("cadrage_messages.id", ondelete="SET NULL")
     )
+
+
+class CadrageSpecification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Immutable snapshots; one document with monotone versions per conversation."""
+
+    __tablename__ = "cadrage_specifications"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "version", name="uq_cadrage_spec_version"),
+        CheckConstraint("version > 0", name="ck_cadrage_spec_version"),
+    )
+
+    conversation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("cadrage_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    document: Mapped[dict] = mapped_column(JSON, nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    editor_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("human_operators.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+
+
+class CadragePlan(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Immutable plan content tied to a spec snapshot; human decision is separate state."""
+
+    __tablename__ = "cadrage_plans"
+    __table_args__ = (
+        UniqueConstraint("specification_id", name="uq_cadrage_plan_specification"),
+        CheckConstraint(
+            "status IN ('DRAFT','READY_FOR_REVIEW','APPROVED',"
+            "'REJECTED','NEEDS_CHANGES','SUPERSEDED')",
+            name="ck_cadrage_plan_status",
+        ),
+    )
+
+    conversation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("cadrage_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    specification_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("cadrage_specifications.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    document: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="DRAFT")
+    decided_by: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("human_operators.id", ondelete="RESTRICT")
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

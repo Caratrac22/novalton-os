@@ -9,7 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.modules.audit.schemas import AuditRecordCreate
 from novalton_api.modules.audit.service import append_record
-from novalton_api.modules.cadrage.models import CadrageConversation, CadrageMessage
+from novalton_api.modules.cadrage.models import (
+    CadrageConversation,
+    CadrageMessage,
+    CadragePlan,
+    CadrageSpecification,
+)
 from novalton_api.modules.projects import service as projects_service
 
 
@@ -233,5 +238,93 @@ async def finish_reply(
     conversation.next_sequence += 1
     conversation.status = "OPEN"
     session.add(row)
+    await session.commit()
+    return row
+
+
+async def current_specification(
+    session: AsyncSession, conversation: CadrageConversation
+) -> CadrageSpecification | None:
+    return await session.scalar(
+        select(CadrageSpecification)
+        .where(CadrageSpecification.conversation_id == conversation.id)
+        .order_by(CadrageSpecification.version.desc())
+        .limit(1)
+    )
+
+
+async def list_specifications(
+    session: AsyncSession, conversation: CadrageConversation, *, limit: int, offset: int
+) -> list[CadrageSpecification]:
+    return list(
+        (
+            await session.scalars(
+                select(CadrageSpecification)
+                .where(CadrageSpecification.conversation_id == conversation.id)
+                .order_by(CadrageSpecification.version.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        ).all()
+    )
+
+
+async def save_specification(
+    session: AsyncSession,
+    *,
+    conversation: CadrageConversation,
+    expected_version: int,
+    document: dict,
+    editor_id: UUID,
+    source: str = "HUMAN",
+) -> CadrageSpecification:
+    """Caller holds the conversation lock; rejected stale writes cannot erase human edits."""
+    current = await current_specification(session, conversation)
+    version = current.version if current else 0
+    if version != expected_version:
+        raise ApplicationError(
+            "specification_conflict", "Version modifiée ; rechargez le document", status_code=409
+        )
+    row = CadrageSpecification(
+        conversation_id=conversation.id,
+        version=version + 1,
+        document=document,
+        source=source,
+        editor_id=editor_id,
+    )
+    session.add(row)
+    await session.flush()
+    old_plans = (
+        await session.scalars(
+            select(CadragePlan)
+            .where(
+                CadragePlan.conversation_id == conversation.id,
+                CadragePlan.status.in_(["DRAFT", "READY_FOR_REVIEW", "APPROVED"]),
+            )
+            .with_for_update()
+        )
+    ).all()
+    for plan in old_plans:
+        plan.status = "SUPERSEDED"
+    await append_record(
+        session,
+        data=AuditRecordCreate(
+            tenant_id=conversation.tenant_id,
+            workspace_id=conversation.workspace_id,
+            action="cadrage.specification.update",
+            actor_type="local_user",
+            actor_id=str(editor_id),
+            outcome="success",
+            resource_type="project",
+            resource_id=conversation.project_id,
+            project_id=conversation.project_id,
+            metadata={
+                "conversation_id": str(conversation.id),
+                "version": row.version,
+                "source": source,
+            },
+        ),
+        commit=False,
+    )
     await session.commit()
     return row

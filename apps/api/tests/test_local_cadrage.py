@@ -1,6 +1,7 @@
 """Real PostgreSQL local identity and private project chat; deterministic local HTTP model."""
 
 import asyncio
+import base64
 import hashlib
 import json
 from dataclasses import dataclass
@@ -24,16 +25,26 @@ from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.main import create_app
 from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.cadrage import service as cadrage_service
-from novalton_api.modules.cadrage.models import CadrageConversation, CadrageMessage
+from novalton_api.modules.cadrage.models import (
+    CadrageConversation,
+    CadrageMessage,
+    CadragePlan,
+    CadrageSpecification,
+)
 from novalton_api.modules.durable_dispatch.identity import (
     HumanOperator,
     TenantOperatorMembership,
     WorkspaceOperatorPermission,
 )
-from novalton_api.modules.local_auth.bootstrap import BootstrapDenied, bootstrap_owner
+from novalton_api.modules.local_auth.bootstrap import (
+    BootstrapDenied,
+    bootstrap_owner,
+    recover_owner,
+)
 from novalton_api.modules.local_auth.models import LocalCredential, LocalLoginThrottle, LocalSession
 from novalton_api.modules.local_auth.service import hash_password
 from novalton_api.modules.projects.models import Project
+from novalton_api.modules.provider_keys.models import ProviderKey
 from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.workspaces.models import Workspace
@@ -73,6 +84,21 @@ def settings_for_new_scope() -> tuple[Settings, str]:
 
 async def wipe(session, scope: Scope) -> None:
     await session.execute(delete(RuntimeEvent).where(RuntimeEvent.tenant_id == scope.tenant))
+    await session.execute(delete(ProviderKey).where(ProviderKey.tenant_id == scope.tenant))
+    await session.execute(
+        delete(CadragePlan).where(
+            CadragePlan.conversation_id.in_(
+                select(CadrageConversation.id).where(CadrageConversation.tenant_id == scope.tenant)
+            )
+        )
+    )
+    await session.execute(
+        delete(CadrageSpecification).where(
+            CadrageSpecification.conversation_id.in_(
+                select(CadrageConversation.id).where(CadrageConversation.tenant_id == scope.tenant)
+            )
+        )
+    )
     await session.execute(
         delete(CadrageMessage).where(
             CadrageMessage.conversation_id.in_(
@@ -130,6 +156,231 @@ def initialized(monkeypatch):
 
 def path(scope: Scope) -> str:
     return f"/api/v1/tenants/{scope.tenant}/workspaces/{scope.workspace}"
+
+
+def test_privileged_recovery_revokes_sessions_and_preserves_grants(initialized):
+    scope, password, settings = initialized
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+        ).json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        assert client.get(path(scope) + "/projects", headers=auth).status_code == 200
+
+        async def failed(session):
+            with pytest.raises(BootstrapDenied):
+                async with session.begin():
+                    await recover_owner(
+                        session,
+                        settings=settings,
+                        login="missing-user",
+                        password="New-Recovery-Password-42",
+                    )
+
+        db_call(failed)
+        assert client.get(path(scope) + "/projects", headers=auth).status_code == 200
+
+        async def recover(session):
+            async with session.begin():
+                await recover_owner(
+                    session,
+                    settings=settings,
+                    login=scope.login,
+                    password="New-Recovery-Password-42",
+                )
+
+        db_call(recover)
+        assert client.get(path(scope) + "/projects", headers=auth).status_code == 401
+        assert (
+            client.post(
+                "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+            ).status_code
+            == 401
+        )
+        new = client.post(
+            "/api/v1/local-auth/login",
+            json={"login": scope.login, "password": "New-Recovery-Password-42"},
+        )
+        assert new.status_code == 200
+        assert (
+            client.get(
+                path(scope) + "/projects",
+                headers={"Authorization": f"Bearer {new.json()['token']}"},
+            ).status_code
+            == 200
+        )
+
+
+def test_specification_versions_are_scoped_immutable_and_optimistic(initialized):
+    scope, password, _ = initialized
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+        ).json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        project = client.post(
+            path(scope) + "/projects",
+            headers=auth,
+            json={"name": "Document", "slug": "document", "description": None},
+        )
+        assert project.status_code == 201
+        base = path(scope) + f"/projects/{project.json()['id']}/conversations"
+        conversation = client.post(base, headers=auth, json={"title": "Objectif"}).json()["id"]
+        specs = base + f"/{conversation}/specifications"
+        first = client.put(
+            specs,
+            headers=auth,
+            json={
+                "expected_version": 0,
+                "summary": "Recherche documentaire",
+                "items": [
+                    {
+                        "topic": "objective",
+                        "value": "Comparer des sources",
+                        "provenance": "USER",
+                        "state": "CONFIRMED",
+                    }
+                ],
+            },
+        )
+        assert first.status_code == 200 and first.json()["version"] == 1
+        assert (
+            client.put(
+                specs,
+                headers=auth,
+                json={
+                    "expected_version": 0,
+                    "summary": "Écrasement obsolète",
+                    "items": [],
+                },
+            ).status_code
+            == 409
+        )
+        second = client.put(
+            specs,
+            headers=auth,
+            json={
+                "expected_version": 1,
+                "summary": "Comparaison de sources vérifiées",
+                "items": [
+                    {
+                        "topic": "objective",
+                        "value": "Comparer des sources vérifiées",
+                        "provenance": "USER",
+                        "state": "CONFIRMED",
+                    }
+                ],
+            },
+        )
+        assert second.status_code == 200 and second.json()["version"] == 2
+        assert (
+            client.get(specs + "/1", headers=auth).json()["document"]["summary"]
+            == "Recherche documentaire"
+        )
+        assert [item["version"] for item in client.get(specs, headers=auth).json()["items"]] == [
+            2,
+            1,
+        ]
+        plan_url = base + f"/{conversation}/plans"
+        plan = client.post(plan_url, headers=auth, json={"expected_specification_version": 2})
+        assert plan.status_code == 201 and plan.json()["status"] == "DRAFT"
+        decision_url = plan_url + f"/{plan.json()['id']}/decision"
+        assert (
+            client.post(decision_url, headers=auth, json={"decision": "APPROVED"}).status_code
+            == 409
+        )
+        ready = client.post(decision_url, headers=auth, json={"decision": "READY_FOR_REVIEW"})
+        assert ready.status_code == 200
+        approved = client.post(decision_url, headers=auth, json={"decision": "APPROVED"})
+        assert approved.status_code == 200 and approved.json()["decided_by"] == str(scope.owner)
+        assert (
+            client.post(decision_url, headers=auth, json={"decision": "APPROVED"}).status_code
+            == 409
+        )
+        assert (
+            client.put(
+                specs,
+                headers=auth,
+                json={
+                    "expected_version": 2,
+                    "summary": "Changement de périmètre",
+                    "items": [],
+                },
+            ).status_code
+            == 200
+        )
+        assert client.get(plan_url, headers=auth).json()["items"][0]["status"] == "SUPERSEDED"
+        assert (
+            client.post(decision_url, headers=auth, json={"decision": "APPROVED"}).status_code
+            == 409
+        )
+        assert client.get(specs, headers={"Authorization": "Bearer invalid"}).status_code == 401
+        assert client.get(base + f"/{uuid4()}/specifications", headers=auth).status_code == 404
+
+
+def test_personal_provider_key_is_encrypted_isolated_and_revocable(initialized, monkeypatch):
+    scope, password, _ = initialized
+    monkeypatch.setenv(
+        "NOVALTON_BYOK_KEYRING", json.dumps({"v1": base64.b64encode(b"x" * 32).decode()})
+    )
+    monkeypatch.setenv("NOVALTON_BYOK_ACTIVE_KEY_ID", "v1")
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+        ).json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        url = path(scope) + "/provider-keys/openrouter"
+        secret = "fake-test-secret-never-reveal"
+        assert (
+            client.put(url, json={"secret": secret, "current_password": password}).status_code
+            == 401
+        )
+        assert (
+            client.put(
+                url, headers=auth, json={"secret": secret, "current_password": "wrong"}
+            ).status_code
+            == 401
+        )
+        saved = client.put(url, headers=auth, json={"secret": secret, "current_password": password})
+        assert saved.status_code == 200 and saved.json()["enabled"] is False
+        assert secret not in saved.text
+        listing = client.get(path(scope) + "/provider-keys", headers=auth)
+        assert listing.status_code == 200 and secret not in listing.text
+        assert (
+            client.get(
+                f"/api/v1/tenants/{uuid4()}/workspaces/{scope.workspace}/provider-keys",
+                headers=auth,
+            ).status_code
+            == 403
+        )
+
+        async def encrypted(session):
+            record = await session.scalar(
+                select(ProviderKey).where(ProviderKey.owner_id == scope.owner)
+            )
+            assert record is not None and secret.encode() not in record.ciphertext
+            assert record.key_id == "v1"
+
+        db_call(encrypted)
+        assert (
+            client.patch(
+                url, headers=auth, json={"enabled": True, "current_password": password}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.patch(
+                url, headers=auth, json={"enabled": False, "current_password": password}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.request(
+                "DELETE", url, headers=auth, json={"current_password": password}
+            ).status_code
+            == 204
+        )
+        assert client.get(path(scope) + "/provider-keys", headers=auth).json()["items"] == []
 
 
 def test_local_owner_auth_and_durable_scoped_chat(initialized):
