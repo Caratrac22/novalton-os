@@ -65,7 +65,7 @@ export function SpecificationEditor({ projectId, conversationId }: { projectId: 
           <select aria-label={`État de ${item.topic}`} value={item.state} onChange={(event) => setItems((old) => old.map((entry, position) => position === index ? { ...entry, state: event.target.value as Item["state"], provenance: "USER" } : entry))}><option value="PROPOSED">À confirmer</option><option value="CONFIRMED">Confirmé</option><option value="CONFLICT">Contradiction</option><option value="OPEN">Question ouverte</option></select>
           <button type="button" onClick={() => setItems((old) => old.filter((_, position) => position !== index))}>Retirer cette information</button>
         </div>)}
-        <button type="button" disabled={items.length >= 100} onClick={() => setItems((old) => [...old, { topic: "detail", value: "", provenance: "USER", state: "OPEN" }])}>Ajouter une information</button>
+        <button type="button" disabled={items.length >= 100} onClick={() => setItems((old) => [...old, { topic: `detail_${old.length + 1}`, value: "", provenance: "USER", state: "OPEN" }])}>Ajouter une information</button>
         <button disabled={busy}>{busy ? "Enregistrement…" : "Enregistrer une nouvelle version"}</button>
       </form>}
     <button type="button" onClick={() => void refresh().catch(() => setError("Actualisation impossible."))}>Actualiser le cahier</button>

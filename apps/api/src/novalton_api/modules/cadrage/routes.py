@@ -473,6 +473,7 @@ async def send(
     title = row.title
     current_spec = await service.current_specification(session, row)
     spec_version = current_spec.version if current_spec else 0
+    spec_document = current_spec.document if current_spec else None
     await session.commit()  # Release the read transaction before bounded model network IO.
     try:
         answer, proposals = await generate_reply(
@@ -480,6 +481,7 @@ async def send(
             model_id=settings.local_model_id,
             title=title,
             history=history,
+            specification=spec_document,
         )
     except Exception:
         answer = None
@@ -503,12 +505,26 @@ async def send(
             previous = latest.document if latest else {"summary": "", "items": []}
             items = list(previous["items"])
             # A model may suggest new facts; it cannot replace a human's confirmed correction.
-            known = {item["topic"] for item in items}
-            items.extend(
-                {**item, "provenance": "MODEL_PROPOSAL", "state": "PROPOSED"}
-                for item in proposals
-                if item["topic"] not in known and len(items) < 100
-            )
+            known = {item["topic"]: item["value"] for item in items}
+            for proposal in proposals:
+                if len(items) >= 100:
+                    break
+                topic = proposal["topic"]
+                if topic not in known:
+                    items.append({**proposal, "provenance": "MODEL_PROPOSAL", "state": "PROPOSED"})
+                    known[topic] = proposal["value"]
+                elif known[topic] != proposal["value"]:
+                    conflict_topic = f"conflict.{topic}"
+                    if len(conflict_topic) <= 80 and conflict_topic not in known:
+                        items.append(
+                            {
+                                "topic": conflict_topic,
+                                "value": proposal["value"],
+                                "provenance": "MODEL_PROPOSAL",
+                                "state": "CONFLICT",
+                            }
+                        )
+                        known[conflict_topic] = proposal["value"]
             if len(items) != len(previous["items"]):
                 await service.save_specification(
                     session,

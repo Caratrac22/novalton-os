@@ -4,6 +4,7 @@ The master keyring is supplied out of band by the host, never by SQL or the brow
 """
 
 import base64
+import binascii
 import json
 import os
 import re
@@ -46,7 +47,7 @@ class Keyring:
                 keys[label] = key
             if active not in keys:
                 raise ValueError
-        except (ValueError, TypeError, UnicodeError) as exc:
+        except (ValueError, TypeError, UnicodeError, binascii.Error) as exc:
             raise VaultUnavailable("Provider vault configuration is invalid") from exc
         return cls(active_id=active, keys=keys)
 

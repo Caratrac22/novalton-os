@@ -285,6 +285,20 @@ async def save_specification(
         raise ApplicationError(
             "specification_conflict", "Version modifiée ; rechargez le document", status_code=409
         )
+    if source == "HUMAN":
+        prior = current.document["items"] if current else []
+        preserved = {
+            (item["topic"], item["value"], item["provenance"], item["state"])
+            for item in prior
+            if item["provenance"] != "USER"
+        }
+        for item in document["items"]:
+            if (
+                item["provenance"] != "USER"
+                and (item["topic"], item["value"], item["provenance"], item["state"])
+                not in preserved
+            ):
+                raise ApplicationError("invalid_provenance", "Source invalide", status_code=422)
     row = CadrageSpecification(
         conversation_id=conversation.id,
         version=version + 1,

@@ -15,8 +15,7 @@ from novalton_api.modules.audit.schemas import AuditRecordCreate
 from novalton_api.modules.audit.service import append_record
 from novalton_api.modules.durable_dispatch.operator import OperatorAuthority
 from novalton_api.modules.durable_dispatch.saas_access import require_saas_access
-from novalton_api.modules.local_auth.models import LocalCredential
-from novalton_api.modules.local_auth.service import _verify, get_session
+from novalton_api.modules.local_auth.service import get_session, verify_sensitive_password
 from novalton_api.modules.provider_keys.models import ProviderKey
 from novalton_api.modules.provider_keys.vault import Keyring, VaultUnavailable
 
@@ -73,11 +72,7 @@ async def _reauth(
         raise ApplicationError(
             "reauth_required", "Reconnectez-vous avant de modifier les clés", status_code=401
         )
-    credential = await session.scalar(
-        select(LocalCredential).where(LocalCredential.user_id == user_id).with_for_update()
-    )
-    if credential is None or not _verify(credential.password_hash, password):
-        raise ApplicationError("reauth_invalid", "Identifiants indisponibles", status_code=401)
+    await verify_sensitive_password(session, user_id=user_id, password=password)
     return user_id
 
 
@@ -197,6 +192,9 @@ async def put(
         session.add(row)
     else:
         row.key_id, row.nonce, row.ciphertext, row.enabled = key_id, nonce, ciphertext, False
+        row.updated_at = datetime.now(UTC)
+    await session.flush()
+    public = _public(row)
     await _audit(
         session,
         tenant=tenant_id,
@@ -206,7 +204,7 @@ async def put(
         provider=provider,
     )
     await session.commit()
-    return _public(row)
+    return public
 
 
 @router.patch("/{provider}")
@@ -242,6 +240,8 @@ async def toggle(
                 "vault_unavailable", "Coffre indisponible", status_code=503
             ) from exc
     row.enabled = data.enabled
+    row.updated_at = datetime.now(UTC)
+    public = _public(row)
     await _audit(
         session,
         tenant=tenant_id,
@@ -251,7 +251,7 @@ async def toggle(
         provider=provider,
     )
     await session.commit()
-    return _public(row)
+    return public
 
 
 @router.delete("/{provider}", status_code=204)

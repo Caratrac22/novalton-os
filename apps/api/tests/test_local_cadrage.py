@@ -383,6 +383,35 @@ def test_personal_provider_key_is_encrypted_isolated_and_revocable(initialized, 
         assert client.get(path(scope) + "/provider-keys", headers=auth).json()["items"] == []
 
 
+def test_sensitive_key_reauthentication_is_rate_limited(initialized, monkeypatch):
+    scope, password, _ = initialized
+    monkeypatch.setenv(
+        "NOVALTON_BYOK_KEYRING", json.dumps({"v1": base64.b64encode(b"x" * 32).decode()})
+    )
+    monkeypatch.setenv("NOVALTON_BYOK_ACTIVE_KEY_ID", "v1")
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+        ).json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        url = path(scope) + "/provider-keys/openrouter"
+        for _ in range(5):
+            assert (
+                client.put(
+                    url,
+                    headers=auth,
+                    json={"secret": "fake-secret-test", "current_password": "invalid"},
+                ).status_code
+                == 401
+            )
+        assert (
+            client.put(
+                url, headers=auth, json={"secret": "fake-secret-test", "current_password": password}
+            ).status_code
+            == 401
+        )
+
+
 def test_local_owner_auth_and_durable_scoped_chat(initialized):
     scope, password, settings = initialized
     with TestClient(create_app()) as client:
@@ -664,9 +693,37 @@ def test_two_local_accounts_isolate_tenants_and_private_conversations(initialize
             base = path(second) + f"/projects/{project.json()['id']}/conversations"
             conversation = client.post(base, headers=b, json={"title": "Objectif B"})
             assert conversation.status_code == 201
+            specs = base + f"/{conversation.json()['id']}/specifications"
+            created = client.put(
+                specs,
+                headers=b,
+                json={
+                    "expected_version": 0,
+                    "summary": "Privé à B",
+                    "items": [
+                        {
+                            "topic": "objective",
+                            "value": "Document B",
+                            "provenance": "USER",
+                            "state": "CONFIRMED",
+                        }
+                    ],
+                },
+            )
+            assert created.status_code == 200
+            plans = base + f"/{conversation.json()['id']}/plans"
+            assert (
+                client.post(
+                    plans, headers=b, json={"expected_specification_version": 1}
+                ).status_code
+                == 201
+            )
             assert client.get(path(second) + "/projects", headers=a).status_code == 403
             assert client.get(base, headers=a).status_code == 403
             assert client.get(base + f"/{conversation.json()['id']}", headers=a).status_code == 403
+            assert client.get(specs, headers=a).status_code == 403
+            assert client.get(plans, headers=a).status_code == 403
+            assert client.get(path(second) + "/provider-keys", headers=a).status_code == 403
             assert client.post(base, headers=a, json={"title": "Intrusion"}).status_code == 403
             assert client.get(path(first) + "/projects", headers=b).status_code == 403
 
@@ -684,6 +741,24 @@ def test_two_local_accounts_isolate_tenants_and_private_conversations(initialize
             db_call(revoke_second)
             assert (
                 client.post(base, headers=b, json={"title": "Après révocation"}).status_code == 403
+            )
+            assert (
+                client.put(
+                    specs,
+                    headers=b,
+                    json={
+                        "expected_version": 1,
+                        "summary": "Après révocation",
+                        "items": [],
+                    },
+                ).status_code
+                == 403
+            )
+            assert (
+                client.post(
+                    plans, headers=b, json={"expected_specification_version": 1}
+                ).status_code
+                == 403
             )
             assert client.get(base, headers=b).status_code == 200
     finally:
@@ -893,6 +968,7 @@ def test_local_http_model_two_adaptive_turns_and_malformed_reply(initialized, mo
                     "reply": "Quel public visez-vous ?",
                     "questions": ["Qui visitera le site ?"],
                     "unresolved": ["public"],
+                    "proposals": [{"topic": "objective", "value": "Site vitrine"}],
                 }
             )
         else:
@@ -901,6 +977,7 @@ def test_local_http_model_two_adaptive_turns_and_malformed_reply(initialized, mo
                     "reply": "Vous ciblez des artisans.",
                     "questions": ["Quelles pages faut-il ?"],
                     "unresolved": ["pages"],
+                    "proposals": [{"topic": "objective", "value": "Site marchand"}],
                 }
             )
         return httpx.Response(
@@ -953,6 +1030,11 @@ def test_local_http_model_two_adaptive_turns_and_malformed_reply(initialized, mo
                 and "Quelles pages" in second.json()["assistant"]["content"]
             )
             assert len(seen) == 2 and "Je veux un site web" in str(seen[1]["messages"])
+            specs = client.get(base + f"/{conversation['id']}/specifications", headers=auth)
+            assert specs.status_code == 200
+            entries = specs.json()["items"][0]["document"]["items"]
+            assert entries[0]["state"] == "PROPOSED"
+            assert entries[1]["topic"] == "conflict.objective" and entries[1]["state"] == "CONFLICT"
             bad = client.post(
                 endpoint,
                 headers=auth,

@@ -161,9 +161,10 @@ async def recover_owner(
             tenant_id=settings.bootstrap_tenant_id,
             workspace_id=settings.bootstrap_workspace_id,
             action="account.password.recover",
-            actor_type="host_administrator",
+            actor_type="service",
             actor_id=str(credential.user_id),
             outcome="success",
+            metadata={"authority": "privileged_host_cli"},
         ),
         commit=False,
     )
