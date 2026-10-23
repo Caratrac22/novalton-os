@@ -52,7 +52,11 @@ def await_http(url, seconds=30):
 
 
 def webdriver(port, method, path, payload=None):
-    body = None if payload is None else json.dumps(payload).encode()
+    body = (
+        json.dumps({} if payload is None else payload).encode()
+        if method == "POST"
+        else None
+    )
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
         data=body,
@@ -144,6 +148,7 @@ def proxy_handler(next_port):
             size = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(size) if size else None
             upstream = http.client.HTTPConnection("127.0.0.1", next_port, timeout=20)
+            headers_sent = False
             headers = dict(self.headers)
             headers.update(
                 {
@@ -158,6 +163,7 @@ def proxy_handler(next_port):
                 response = upstream.getresponse()
                 payload = response.read()
                 self.send_response(response.status)
+                headers_sent = True
                 for name, value in response.getheaders():
                     if name.lower() not in {
                         "content-length",
@@ -169,7 +175,13 @@ def proxy_handler(next_port):
                 self.end_headers()
                 self.wfile.write(payload)
             except (OSError, TimeoutError):
-                self.send_error(502)
+                # Chrome cancels pending asset requests during navigation. Once
+                # headers were sent, writing a second HTTP response is invalid.
+                if not headers_sent:
+                    try:
+                        self.send_error(502)
+                    except OSError:
+                        pass
             finally:
                 upstream.close()
 
@@ -431,6 +443,7 @@ def main():
                 },
             )["sessionId"]
             browser = Browser(driver_port, session)
+            browser.call("POST", "/timeouts", {"implicit": 10000, "pageLoad": 30000})
             run(browser, origin)
         finally:
             if browser:
