@@ -377,6 +377,7 @@ def test_financial_authorization_requires_explicit_reauth_and_is_revocable(initi
             "confirmation": "AUTHORIZE_ESTIMATED_EXPOSURE",
             "provider_id": "openrouter",
             "model_id": "test-model",
+            "currency": "USD",
             "request_limit": 1,
             "token_limit": 100,
             "estimated_limit": "0.01",
@@ -399,6 +400,7 @@ def test_financial_authorization_requires_explicit_reauth_and_is_revocable(initi
         grant = created.json()
         assert grant["paid_generation_enabled"] is False
         assert grant["billing"] == "BILLING_UNVERIFIED"
+        assert grant["currency"] == "USD"
         assert len(client.get(url, headers=auth).json()["items"]) == 1
 
         async def attempt(session, *, request_id, model="test-model", tokens=30):
@@ -414,6 +416,7 @@ def test_financial_authorization_requires_explicit_reauth_and_is_revocable(initi
                 project_id=UUID(project["id"]),
                 provider_id="openrouter",
                 model_id=model,
+                currency="USD",
                 request_id=request_id,
                 tokens=tokens,
                 estimated_exposure=Decimal("0.004"),
@@ -448,12 +451,38 @@ def test_financial_authorization_requires_explicit_reauth_and_is_revocable(initi
                         project_id=project_id,
                         provider_id="openrouter",
                         model_id="test-model",
+                        currency="USD",
                         request_id=uuid4(),
                         tokens=tokens,
                         estimated_exposure=estimate,
                     )
 
         db_call(denied_boundaries)
+        assert (
+            client.post(url, headers=auth, json={**payload, "currency": "EUR"}).status_code == 422
+        )
+
+        async def wrong_currency(session):
+            operator = await authenticate_session(
+                session, token=token, tenant_id=scope.tenant, workspace_id=scope.workspace
+            )
+            with pytest.raises(ApplicationError):
+                await reserve_financial(
+                    session,
+                    operator=operator,
+                    authorization_id=UUID(grant["id"]),
+                    tenant_id=scope.tenant,
+                    workspace_id=scope.workspace,
+                    project_id=UUID(project["id"]),
+                    provider_id="openrouter",
+                    model_id="test-model",
+                    currency="EUR",
+                    request_id=uuid4(),
+                    tokens=1,
+                    estimated_exposure=Decimal("0.001"),
+                )
+
+        db_call(wrong_currency)
 
         async def set_grant(session, active):
             await session.execute(
@@ -540,6 +569,7 @@ def test_financial_reservation_serializes_concurrent_requests(initialized):
                 "confirmation": "AUTHORIZE_ESTIMATED_EXPOSURE",
                 "provider_id": "openrouter",
                 "model_id": "test-model",
+                "currency": "USD",
                 "request_limit": 1,
                 "token_limit": 20,
                 "estimated_limit": "0.01",
@@ -573,6 +603,7 @@ def test_financial_reservation_serializes_concurrent_requests(initialized):
                             project_id=UUID(project["id"]),
                             provider_id="openrouter",
                             model_id="test-model",
+                            currency="USD",
                             request_id=uuid4(),
                             tokens=20,
                             estimated_exposure=Decimal("0.01"),

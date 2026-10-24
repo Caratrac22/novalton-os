@@ -51,6 +51,7 @@ def upgrade() -> None:
         sa.Column("project_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("provider_id", sa.String(64), nullable=False),
         sa.Column("model_id", sa.String(256), nullable=False),
+        sa.Column("currency", sa.String(3), nullable=False),
         sa.Column("version", sa.Integer(), nullable=False),
         sa.Column("request_limit", sa.Integer(), nullable=False),
         sa.Column("request_count", sa.Integer(), nullable=False),
@@ -84,6 +85,7 @@ def upgrade() -> None:
             "char_length(provider_id) BETWEEN 1 AND 64 AND char_length(model_id) BETWEEN 1 AND 256",
             name="ck_financial_model",
         ),
+        sa.CheckConstraint("currency = 'USD'", name="ck_financial_currency"),
     )
     op.create_index(
         "ix_financial_scope",

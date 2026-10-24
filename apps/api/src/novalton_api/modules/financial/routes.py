@@ -34,6 +34,7 @@ class AuthorizeInput(BaseModel):
     confirmation: Literal["AUTHORIZE_ESTIMATED_EXPOSURE"]
     provider_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")
     model_id: str = Field(min_length=1, max_length=256)
+    currency: Literal["USD"]
     request_limit: int = Field(gt=0, le=100_000)
     token_limit: int = Field(gt=0, le=100_000_000)
     estimated_limit: Decimal = Field(gt=0, max_digits=20, decimal_places=10, strict=False)
@@ -74,6 +75,7 @@ def public(row: FinancialAuthorization) -> dict[str, object]:
         "version": row.version,
         "provider_id": row.provider_id,
         "model_id": row.model_id,
+        "currency": row.currency,
         "request_limit": row.request_limit,
         "request_count": row.request_count,
         "token_limit": row.token_limit,
@@ -125,6 +127,7 @@ async def authorize(
         project_id=project_id,
         provider_id=data.provider_id,
         model_id=data.model_id,
+        currency=data.currency,
         version=1,
         request_limit=data.request_limit,
         request_count=0,

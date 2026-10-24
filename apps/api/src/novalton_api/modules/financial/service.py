@@ -61,6 +61,7 @@ async def reserve(
     project_id: UUID,
     provider_id: str,
     model_id: str,
+    currency: str,
     request_id: UUID,
     tokens: int,
     estimated_exposure: Decimal | None,
@@ -106,6 +107,7 @@ async def reserve(
         or row.expires_at <= datetime.now(UTC)
         or row.provider_id != provider_id
         or row.model_id != model_id
+        or row.currency != currency
     ):
         raise denied()
     existing = await session.scalar(

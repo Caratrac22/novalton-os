@@ -26,6 +26,9 @@ La création exige une session locale récente, le mot de passe actuel, une
 confirmation structurée, un projet actif et un grant de workspace. Chaque
 autorisation lie l'humain, le tenant, workspace, projet, fournisseur et modèle
 exact. Requêtes, tokens et exposition **estimée** ont des limites indépendantes.
+La première version accepte explicitement la devise USD seulement et refuse
+les estimations d'une précision supérieure à dix décimales, afin d'éviter un
+arrondi silencieux qui viderait le plafond.
 Une révocation incrémente la version ; création, révocation et réservation
 produisent une trace d'audit. La réservation exige à nouveau la session et
 le grant humains actifs, verrouille l'autorisation, refuse mauvaise portée,
@@ -71,6 +74,7 @@ retries doubles. La proposition et le préflight restent donc consultatifs.
 - Premier run CI sur `b7b3ce6` : le test local a révélé un HTTP 422 pour deux valeurs JSON usuelles (`estimated_limit`, `expires_at`) car le modèle Pydantic était strict. La validation de ces deux champs a été corrigée avec `strict=False` ; résultat PostgreSQL du HEAD corrigé à relever sur la prochaine CI.
 - Deuxième run CI sur `ab75fdf` : les champs JSON passent, mais le filtre d'audit existant refuse la clé de métadonnée `authorization_id` (contient un marqueur réservé aux secrets). Le champ d'audit est devenu `financial_policy_id` ; aucun assouplissement du filtre. La nouvelle révision doit encore passer PostgreSQL. Le frontend de ce run était SUCCESS ; Chromium #40140031116 est SUCCESS avec huit captures aux quatre largeurs et deux thèmes.
 - Troisième run CI #40140167676 sur `a5b779e` : migration et suite ciblée `test_local_cadrage.py` ont passé l'étape PostgreSQL ; suite complète encore en cours lors de cette note. Les ajouts locaux ultérieurs (refus projet PAUSED et vraie contention sur la ligne de consentement) devront être revérifiés sur leur HEAD définitif.
+- Chromium #40140353588 sur `3eff414` a trouvé une assertion de test erronée : la double connexion de la seconde identité crée deux sessions, donc la révocation modifiait deux lignes, et non une. Assertion corrigée sans retirer le test ; [Chromium #40140457651](https://github.com/Caratrac22/novalton-os/actions/runs/40140457651) est SUCCESS sur `fcc718b` avec perte/restauration de grant et révocation de session vérifiées.
 
 ## Étapes suivantes
 

@@ -54,6 +54,7 @@ class FinancialAuthorization(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "char_length(provider_id) BETWEEN 1 AND 64 AND char_length(model_id) BETWEEN 1 AND 256",
             name="ck_financial_model",
         ),
+        CheckConstraint("currency = 'USD'", name="ck_financial_currency"),
         Index("ix_financial_scope", "owner_id", "tenant_id", "workspace_id", "project_id"),
     )
 
@@ -73,6 +74,7 @@ class FinancialAuthorization(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     project_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
     provider_id: Mapped[str] = mapped_column(String(64), nullable=False)
     model_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     request_limit: Mapped[int] = mapped_column(Integer, nullable=False)
     request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
