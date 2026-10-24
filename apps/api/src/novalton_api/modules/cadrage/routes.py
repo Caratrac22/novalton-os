@@ -71,7 +71,7 @@ class PlanDecision(BaseModel):
 
 class CompilationInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    task_id: UUID
+    task_id: UUID = Field(strict=False)
 
 
 def _compilation(row: CadrageCompilation) -> dict[str, object]:

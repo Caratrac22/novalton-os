@@ -9,7 +9,7 @@
 | 12C-H préflight | P0 | G | PARTIAL | Résultat relu sous identité courante, lancement toujours bloqué | Contrôler agents, modèle, budget et activation dans la même transaction que le lancement |
 | 12C-I simulation | P1 | G/H | PARTIAL | Lecture des étapes fixes sans effet externe | Acceptation navigateur et sandbox jetable |
 | 12C-E finance | P0 | Coffre BYOK | TODO | `BILLING_UNVERIFIED`, aucune dépense autorisée | Conception d'une autorisation révocable avant tout appel facturable |
-| 12C-A/B qualité IA | P0/P1 | Modèle local | BLOCKED | `REAL_MODEL_QUALITY_NOT_VERIFIED` ; aucune preuve de modèle local dans ce runtime | Harnais reproductible et essai sur modèle local autorisé |
+| 12C-A/B qualité IA | P0/P1 | Modèle local | PARTIAL | Corpus local reproductible de 11 cas ; `REAL_MODEL_QUALITY_NOT_VERIFIED`, aucun modèle local dans ce runtime | Exécuter le corpus sur modèle local autorisé et noter les sorties |
 | 12C-J/K lancement et suivi | P1 | H + autorisation distincte | TODO | Aucune route de lancement depuis le cadrage | Développer après préflight complet et acceptation isolée |
 | 12C-L/M/N/O | P0/P2 | CI navigateur, coffre | TODO | Scénarios hostiles et audit complets non exécutés | Parcours multi-identités et validation transverse |
 
@@ -43,3 +43,19 @@ attester la présence des définitions d'agents ni leur droit d'exécution. La
 simulation n'est qu'une inspection. Les contrôles financiers et de fournisseur
 ne sont pas implémentés : `BILLING_UNVERIFIED`. Aucun raccourci par une simple
 approbation du plan ne doit ouvrir le lancement.
+
+## Évaluation conversationnelle
+
+`uv run --project apps/api python apps/api/scripts/evaluate_cadrage.py --list`
+affiche les 11 cas : site, logiciel, automatisation, recherche, projet général,
+demande vague, contradiction, correction tardive, reprise, manque d'informations
+et tentative d'injection. `--run --url http://127.0.0.1:1234/v1 --model ID`
+accepte uniquement un endpoint HTTP de boucle locale et appelle le véritable
+adaptateur local. Il produit les réponses et critères de revue sans attribuer
+un score automatique trompeur. La grille humaine donne 0 (absent ou contraire),
+1 (partiel) ou 2 (exact et utile) pour : pertinence et priorité des questions,
+respect des réponses acquises, contradictions/corrections, synthèse et
+incertitude, portée des permissions et dépenses. Chaque note doit citer un
+extrait observable, indiquer le modèle et son identifiant, puis distinguer
+échec de format JSON et défaut de qualité. Aucune exécution réelle n'a été
+tentée : `REAL_MODEL_QUALITY_NOT_VERIFIED`.
