@@ -119,15 +119,20 @@ async def run(url: str, model: str) -> list[dict]:
     ) as provider:
         registry = ProviderRegistry([provider])
         for case in CASES:
-            history = [CadrageMessage(role="USER", content=turn) for turn in case["turns"]]
+            history: list[CadrageMessage] = []
+            replies: list[str] = []
             try:
-                response, proposals = await generate_reply(
-                    registry, model_id=model, title=case["title"], history=history
-                )
+                for turn in case["turns"]:
+                    history.append(CadrageMessage(role="USER", content=turn))
+                    response, proposals = await generate_reply(
+                        registry, model_id=model, title=case["title"], history=history
+                    )
+                    replies.append(response)
+                    history.append(CadrageMessage(role="ASSISTANT", content=response))
                 results.append(
                     {
                         "id": case["id"],
-                        "response": response,
+                        "replies": replies,
                         "proposals": proposals,
                         "manual_criteria": case["expect"],
                         "manual_score": None,

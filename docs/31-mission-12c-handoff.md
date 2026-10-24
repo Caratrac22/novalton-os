@@ -11,7 +11,7 @@
 | 12C-E finance | P0 | Coffre BYOK | TODO | `BILLING_UNVERIFIED`, aucune dépense autorisée | Conception d'une autorisation révocable avant tout appel facturable |
 | 12C-A/B qualité IA | P0/P1 | Modèle local | PARTIAL | Corpus local reproductible de 11 cas ; `REAL_MODEL_QUALITY_NOT_VERIFIED`, aucun modèle local dans ce runtime | Exécuter le corpus sur modèle local autorisé et noter les sorties |
 | 12C-J/K lancement et suivi | P1 | H + autorisation distincte | PARTIAL | Bouton de lancement distinct et désactivé, aucune route de lancement depuis le cadrage | Développer après préflight complet et acceptation isolée |
-| 12C-L/M/N/O | P0/P2 | CI navigateur, coffre | TODO | Scénarios hostiles et audit complets non exécutés | Parcours multi-identités et validation transverse |
+| 12C-L/M/N/O | P0/P2 | CI navigateur, coffre | PARTIAL | Parcours Chromium de refus d'un plan générique ajouté ; scénarios hostiles multi-identités et audit complets non exécutés | Vérifier le run 12C et poursuivre l'isolation |
 
 ## Matrice plan → moteur réel
 
@@ -37,6 +37,7 @@ elle devra enregistrer le lien vers le run et protéger les doubles requêtes.
 - `POST .../plans/{plan_id}/compilations` avec `task_id` explicite. Nécessite la session humaine et `workspace.write`, le propriétaire, le plan approuvé non obsolète et la portée de la tâche. Résultat `BLOCKED` avec diagnostics si les informations confirmées ne suffisent pas, `PROPOSED` pour le seul graphe fixe I-028.
 - `GET .../compilations/{id}/preflight` relit l'accès humain, la version, les états du projet et de la tâche. Il retourne la proposition et un rapport de simulation. `ready_for_launch` est **toujours faux** ; ce n'est pas une autorisation de lancer.
 - Le navigateur choisit une tâche existante du projet, prépare la proposition et affiche le préflight et ses diagnostics. Le bouton de lancement reste désactivé avec le motif. L'éditeur permet de saisir les champs confirmés `execution.kind`, `objective` et `acceptance.*`.
+- Le workflow Chromium existant est ouvert à la branche 12C et vérifie qu'un plan générique est bloqué et que le lancement n'est pas activable. Ce test ne couvre pas encore la simulation d'un plan complet ni deux identités.
 - Aucun modèle distant, clé BYOK, agent, outil, worker, coût ni effet externe n'est déclenché.
 
 La proposition conserve les capacités nominales du graphe existant, sans
