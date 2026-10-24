@@ -292,4 +292,4 @@ pre { max-width:100%; overflow:auto; }
 .chat-user { margin-inline-start: min(8%, 3rem); }
 .chat-assistant { margin-inline-end: min(8%, 3rem); }
 .chat-thread textarea { width: 100%; min-width: 0; box-sizing: border-box; }
-@media (max-width: 720px) { .chat-layout { grid-template-columns: minmax(0, 1fr); } .chat-user { margin-inline-start: 1rem; } .chat-assistant { margin-inline-end: 1rem; } }
+@media (max-width: 900px) { .chat-layout { grid-template-columns: minmax(0, 1fr); } .chat-user { margin-inline-start: 1rem; } .chat-assistant { margin-inline-end: 1rem; } }

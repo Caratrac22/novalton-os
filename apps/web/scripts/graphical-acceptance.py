@@ -301,7 +301,14 @@ def run(browser, origin):
                 "return {width: innerWidth, page: document.documentElement.scrollWidth, "
                 "theme: document.documentElement.dataset.theme}"
             )
-            assert metrics["width"] == width and metrics["page"] <= width + 2, metrics
+            if metrics["width"] != width or metrics["page"] > width + 2:
+                metrics["overflowing"] = browser.script(
+                    "return [...document.querySelectorAll('*')].filter(e => "
+                    "e.getBoundingClientRect().right > innerWidth + 2).slice(0, 12)"
+                    ".map(e => ({tag:e.tagName, className:String(e.className).slice(0, 90), "
+                    "right:Math.round(e.getBoundingClientRect().right)}))"
+                )
+                raise AssertionError(metrics)
             assert metrics["theme"] == ("light" if theme == "Clair" else "dark"), (
                 metrics
             )
