@@ -10,9 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from novalton_api.core.config import get_settings
 from novalton_api.core.database import get_async_session
 from novalton_api.core.exceptions import ApplicationError
+from novalton_api.modules.cadrage import plan as plan_service
 from novalton_api.modules.cadrage import service
 from novalton_api.modules.cadrage.generation import generate_reply
-from novalton_api.modules.cadrage.models import CadrageConversation, CadrageMessage
+from novalton_api.modules.cadrage.models import (
+    CadrageConversation,
+    CadrageMessage,
+    CadragePlan,
+    CadrageSpecification,
+)
 from novalton_api.modules.durable_dispatch.operator import OperatorAuthority
 from novalton_api.modules.durable_dispatch.saas_access import require_saas_access
 from novalton_api.modules.projects import service as projects_service
@@ -34,6 +40,224 @@ class MessageInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     content: str = Field(min_length=1, max_length=4000)
     client_request_id: UUID = Field(strict=False)
+
+
+class SpecificationItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    topic: str = Field(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_.-]*$")
+    value: str = Field(min_length=1, max_length=2000)
+    provenance: str = Field(pattern="^(USER|MODEL_PROPOSAL|INFERENCE)$")
+    state: str = Field(pattern="^(PROPOSED|CONFIRMED|CONFLICT|OPEN)$")
+
+
+class SpecificationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expected_version: int = Field(ge=0)
+    summary: str = Field(max_length=3000)
+    items: list[SpecificationItem] = Field(max_length=100)
+
+
+class PlanInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expected_specification_version: int = Field(ge=1)
+
+
+class PlanDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    decision: str = Field(pattern="^(READY_FOR_REVIEW|APPROVED|REJECTED|NEEDS_CHANGES)$")
+
+
+def _plan(row: CadragePlan) -> dict[str, object]:
+    return {
+        "id": row.id,
+        "specification_id": row.specification_id,
+        "source_version": row.source_version,
+        "document": row.document,
+        "status": row.status,
+        "decided_by": row.decided_by,
+        "decided_at": row.decided_at,
+        "created_at": row.created_at,
+    }
+
+
+@router.get("/{conversation_id}/plans")
+async def plans(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    project_id: UUID,
+    conversation_id: UUID,
+    session: Session,
+    operator: Human,
+) -> dict[str, object]:
+    from sqlalchemy import select
+
+    conversation = await _scoped_conversation(
+        session, operator, tenant_id, workspace_id, project_id, conversation_id
+    )
+    rows = (
+        await session.scalars(
+            select(CadragePlan)
+            .where(CadragePlan.conversation_id == conversation.id)
+            .order_by(CadragePlan.source_version.desc())
+            .limit(50)
+        )
+    ).all()
+    return {"items": [_plan(row) for row in rows]}
+
+
+@router.post("/{conversation_id}/plans", status_code=201)
+async def prepare_plan(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    project_id: UUID,
+    conversation_id: UUID,
+    data: PlanInput,
+    session: Session,
+    operator: Human,
+) -> dict[str, object]:
+    conversation = await _scoped_conversation(
+        session, operator, tenant_id, workspace_id, project_id, conversation_id, lock=True
+    )
+    row = await plan_service.create_plan(
+        session,
+        conversation=conversation,
+        expected_version=data.expected_specification_version,
+        owner=_human(operator).user_id,
+    )
+    return _plan(row)
+
+
+@router.post("/{conversation_id}/plans/{plan_id}/decision")
+async def plan_decision(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    project_id: UUID,
+    conversation_id: UUID,
+    plan_id: UUID,
+    data: PlanDecision,
+    session: Session,
+    operator: Human,
+) -> dict[str, object]:
+    conversation = await _scoped_conversation(
+        session, operator, tenant_id, workspace_id, project_id, conversation_id, lock=True
+    )
+    row = await plan_service.get_plan(
+        session, conversation=conversation, plan_id=plan_id, lock=True
+    )
+    return _plan(
+        await plan_service.decide(
+            session,
+            conversation=conversation,
+            plan=row,
+            owner=_human(operator).user_id,
+            decision=data.decision,
+        )
+    )
+
+
+def _spec(row: CadrageSpecification) -> dict[str, object]:
+    return {
+        "id": row.id,
+        "conversation_id": row.conversation_id,
+        "version": row.version,
+        "document": row.document,
+        "source": row.source,
+        "editor_id": row.editor_id,
+        "created_at": row.created_at,
+    }
+
+
+async def _scoped_conversation(
+    session: AsyncSession,
+    operator: OperatorAuthority | None,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    project_id: UUID,
+    conversation_id: UUID,
+    *,
+    lock: bool = False,
+) -> CadrageConversation:
+    return await service.get_conversation(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        conversation_id=conversation_id,
+        owner_id=_human(operator).user_id,
+        lock=lock,
+    )
+
+
+@router.get("/{conversation_id}/specifications")
+async def specification_versions(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    project_id: UUID,
+    conversation_id: UUID,
+    session: Session,
+    operator: Human,
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    offset: Annotated[int, Query(ge=0, le=100_000)] = 0,
+) -> dict[str, object]:
+    conversation = await _scoped_conversation(
+        session, operator, tenant_id, workspace_id, project_id, conversation_id
+    )
+    rows = await service.list_specifications(session, conversation, limit=limit, offset=offset)
+    return {"items": [_spec(row) for row in rows], "limit": limit, "offset": offset}
+
+
+@router.get("/{conversation_id}/specifications/{version}")
+async def specification_version(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    project_id: UUID,
+    conversation_id: UUID,
+    version: int,
+    session: Session,
+    operator: Human,
+) -> dict[str, object]:
+    conversation = await _scoped_conversation(
+        session, operator, tenant_id, workspace_id, project_id, conversation_id
+    )
+    from sqlalchemy import select
+
+    row = await session.scalar(
+        select(CadrageSpecification).where(
+            CadrageSpecification.conversation_id == conversation.id,
+            CadrageSpecification.version == version,
+        )
+    )
+    if row is None:
+        raise service._missing()
+    return _spec(row)
+
+
+@router.put("/{conversation_id}/specifications")
+async def specification_update(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    project_id: UUID,
+    conversation_id: UUID,
+    data: SpecificationInput,
+    session: Session,
+    operator: Human,
+) -> dict[str, object]:
+    conversation = await _scoped_conversation(
+        session, operator, tenant_id, workspace_id, project_id, conversation_id, lock=True
+    )
+    if conversation.pending_request_id is not None:
+        # The generation may finish only against its prior snapshot; a manual edit wins.
+        conversation.pending_request_id = None
+        conversation.pending_since = None
+    document = {"summary": data.summary, "items": [entry.model_dump() for entry in data.items]}
+    row = await service.save_specification(
+        session,
+        conversation=conversation,
+        expected_version=data.expected_version,
+        document=document,
+        editor_id=_human(operator).user_id,
+    )
+    return _spec(row)
 
 
 def _human(operator: OperatorAuthority | None) -> OperatorAuthority:
@@ -247,16 +471,21 @@ async def send(
         session, conversation=row, after=max(0, message.sequence - 16), limit=17
     )
     title = row.title
+    current_spec = await service.current_specification(session, row)
+    spec_version = current_spec.version if current_spec else 0
+    spec_document = current_spec.document if current_spec else None
     await session.commit()  # Release the read transaction before bounded model network IO.
     try:
-        answer = await generate_reply(
+        answer, proposals = await generate_reply(
             request.app.state.provider_registry,
             model_id=settings.local_model_id,
             title=title,
             history=history,
+            specification=spec_document,
         )
     except Exception:
         answer = None
+        proposals = []
     # A revoked session or grant cannot persist a late model result.
     await _human(operator).require_human(
         session, "workspace.write", tenant_id=tenant_id, workspace_id=workspace_id
@@ -270,6 +499,41 @@ async def send(
         owner_id=_human(operator).user_id,
         lock=True,
     )
+    if row.pending_request_id == message.client_request_id and proposals:
+        latest = await service.current_specification(session, row)
+        if (latest.version if latest else 0) == spec_version:
+            previous = latest.document if latest else {"summary": "", "items": []}
+            items = list(previous["items"])
+            # A model may suggest new facts; it cannot replace a human's confirmed correction.
+            known = {item["topic"]: item["value"] for item in items}
+            for proposal in proposals:
+                if len(items) >= 100:
+                    break
+                topic = proposal["topic"]
+                if topic not in known:
+                    items.append({**proposal, "provenance": "MODEL_PROPOSAL", "state": "PROPOSED"})
+                    known[topic] = proposal["value"]
+                elif known[topic] != proposal["value"]:
+                    conflict_topic = f"conflict.{topic}"
+                    if len(conflict_topic) <= 80 and conflict_topic not in known:
+                        items.append(
+                            {
+                                "topic": conflict_topic,
+                                "value": proposal["value"],
+                                "provenance": "MODEL_PROPOSAL",
+                                "state": "CONFLICT",
+                            }
+                        )
+                        known[conflict_topic] = proposal["value"]
+            if len(items) != len(previous["items"]):
+                await service.save_specification(
+                    session,
+                    conversation=row,
+                    expected_version=spec_version,
+                    document={"summary": previous["summary"], "items": items},
+                    editor_id=_human(operator).user_id,
+                    source="MODEL",
+                )
     assistant = await service.finish_reply(
         session, conversation=row, user_message=message, content=answer
     )

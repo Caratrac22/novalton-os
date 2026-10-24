@@ -208,7 +208,7 @@ h2 { margin-bottom:0; font-size:19px; font-weight:650; letter-spacing:-.02em; }
 .secondary-navigation { margin:0; }
 @media (max-width:900px) { .settings-grid { grid-template-columns:1fr; } }
 @media (max-width:680px) {
-  .primary-nav { display:flex; gap:6px; overflow-x:auto; margin-top:12px; padding-bottom:5px; scrollbar-width:thin; }
+  .primary-nav { display:flex; flex:none; flex-direction:row; gap:6px; overflow-x:auto; margin-top:12px; padding-bottom:5px; scrollbar-width:thin; }
   .nav-link { flex:0 0 112px; min-height:58px; justify-content:center; gap:4px; padding:6px 4px; font-size:11px; text-align:center; }
   .nav-link span { line-height:1.15; }
   .sidebar-shortcuts { display:none; }
@@ -292,4 +292,4 @@ pre { max-width:100%; overflow:auto; }
 .chat-user { margin-inline-start: min(8%, 3rem); }
 .chat-assistant { margin-inline-end: min(8%, 3rem); }
 .chat-thread textarea { width: 100%; min-width: 0; box-sizing: border-box; }
-@media (max-width: 720px) { .chat-layout { grid-template-columns: minmax(0, 1fr); } .chat-user { margin-inline-start: 1rem; } .chat-assistant { margin-inline-end: 1rem; } }
+@media (max-width: 900px) { .chat-layout { grid-template-columns: minmax(0, 1fr); } .chat-user { margin-inline-start: 1rem; } .chat-assistant { margin-inline-end: 1rem; } }

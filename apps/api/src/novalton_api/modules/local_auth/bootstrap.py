@@ -6,7 +6,7 @@ import getpass
 import sys
 from datetime import UTC, datetime
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +19,7 @@ from novalton_api.modules.durable_dispatch.identity import (
     TenantOperatorMembership,
     WorkspaceOperatorPermission,
 )
-from novalton_api.modules.local_auth.models import LocalCredential
+from novalton_api.modules.local_auth.models import LocalCredential, LocalSession
 from novalton_api.modules.local_auth.service import hash_password, normalize_login
 from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.workspaces.models import Workspace
@@ -121,6 +121,62 @@ async def run_bootstrap(login: str, password: str) -> None:
     try:
         async with db.session_factory.begin() as session:
             await bootstrap_owner(session, settings=settings, login=login, password=password)
+    finally:
+        await db.dispose()
+
+
+async def recover_owner(
+    session: AsyncSession, *, settings: Settings, login: str, password: str
+) -> None:
+    """Host-authorized recovery; retains every existing membership and grant."""
+    normalized, encoded = normalize_login(login), hash_password(password)
+    await session.execute(text("SELECT pg_advisory_xact_lock(1314276940)"))
+    credential = await session.scalar(
+        select(LocalCredential).where(LocalCredential.login == normalized).with_for_update()
+    )
+    if credential is None:
+        raise BootstrapDenied("Local account unavailable")
+    membership = await session.scalar(
+        select(TenantOperatorMembership)
+        .where(
+            TenantOperatorMembership.user_id == credential.user_id,
+            TenantOperatorMembership.tenant_id == settings.bootstrap_tenant_id,
+            TenantOperatorMembership.role == "OWNER",
+            TenantOperatorMembership.active.is_(True),
+        )
+        .with_for_update()
+    )
+    if membership is None:
+        raise BootstrapDenied("Local owner unavailable for configured tenant")
+    now = datetime.now(UTC)
+    credential.password_hash, credential.changed_at = encoded, now
+    await session.execute(
+        update(LocalSession)
+        .where(LocalSession.user_id == credential.user_id, LocalSession.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+    await append_record(
+        session,
+        data=AuditRecordCreate(
+            tenant_id=settings.bootstrap_tenant_id,
+            workspace_id=settings.bootstrap_workspace_id,
+            action="account.password.recover",
+            actor_type="service",
+            actor_id=str(credential.user_id),
+            outcome="success",
+            metadata={"authority": "privileged_host_cli"},
+        ),
+        commit=False,
+    )
+
+
+async def run_recovery(login: str, password: str) -> None:
+    settings = get_settings()
+    await verify_database_identity(settings)
+    db = Database.from_settings(settings)
+    try:
+        async with db.session_factory.begin() as session:
+            await recover_owner(session, settings=settings, login=login, password=password)
     finally:
         await db.dispose()
 

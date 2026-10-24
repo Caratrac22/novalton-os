@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { SpecificationEditor } from "@/components/specification-editor";
 
 type Conversation = { id: string; title: string; status: string };
 type Message = { id: string; sequence: number; role: "USER" | "ASSISTANT"; content: string };
@@ -89,7 +90,7 @@ export function ProjectChat({ projectId, initialConversation }: { projectId: str
       <ol className="chat-messages">{messages.map((item) => <li key={item.id} className={item.role === "USER" ? "chat-user" : "chat-assistant"}><strong>{item.role === "USER" ? "Vous" : "Assistant local"}</strong><p>{item.content}</p></li>)}</ol>
       {active && more && <button type="button" disabled={busy} onClick={() => void loadMessages(active.id, after).catch(() => setError("Suite des messages indisponible."))}>Afficher la suite</button>}
       {active && <form className="workspace-form" onSubmit={send}><label htmlFor="chat-content">Votre message</label><textarea id="chat-content" name="content" rows={4} maxLength={4000} required placeholder="Je voudrais créer…" /><button disabled={busy}>{busy ? "Envoi en cours…" : "Envoyer"}</button></form>}
-      {active && <p className="section-note">Le dialogue ne lance aucun agent. Le cahier des charges et l’approbation ne sont pas encore disponibles.</p>}
+      {active && <><SpecificationEditor key={`${active.id}-${messages.length}`} projectId={projectId} conversationId={active.id} /><p className="section-note">Le dialogue, le cahier et l’approbation du plan ne lancent aucun agent. Le lancement gouverné fera l’objet d’une étape distincte.</p></>}
       {error && <p role="alert">{error}</p>}
     </section>
   </div>;

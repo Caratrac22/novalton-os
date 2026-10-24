@@ -37,6 +37,8 @@ from novalton_api.modules.audit.models import AuditRecord  # noqa: E402, F401
 from novalton_api.modules.cadrage.models import (  # noqa: E402, F401
     CadrageConversation,
     CadrageMessage,
+    CadragePlan,
+    CadrageSpecification,
 )
 from novalton_api.modules.durable_dispatch.identity import (  # noqa: E402, F401, I001
     FederatedOperatorIdentity,
@@ -65,6 +67,7 @@ from novalton_api.modules.model_usage.models import ModelRun  # noqa: E402, F401
 from novalton_api.modules.orchestrator.models import AgentChallengeResolution  # noqa: E402, F401
 from novalton_api.modules.policy.models import PolicyRule  # noqa: E402, F401
 from novalton_api.modules.projects.models import Project  # noqa: E402, F401
+from novalton_api.modules.provider_keys.models import ProviderKey  # noqa: E402, F401
 from novalton_api.modules.runtime_events.models import RuntimeEvent  # noqa: E402, F401
 from novalton_api.modules.tasks.models import Task  # noqa: E402, F401
 from novalton_api.modules.tenants.models import Tenant  # noqa: E402, F401

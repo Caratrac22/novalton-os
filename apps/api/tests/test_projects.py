@@ -145,6 +145,9 @@ def test_project_metadata_has_workspace_scope_and_constraints() -> None:
         "local_login_throttles",
         "cadrage_conversations",
         "cadrage_messages",
+        "cadrage_specifications",
+        "personal_provider_keys",
+        "cadrage_plans",
     }
     table = Base.metadata.tables["projects"]
     names = {constraint.name for constraint in table.constraints}

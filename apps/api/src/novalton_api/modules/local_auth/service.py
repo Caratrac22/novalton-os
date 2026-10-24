@@ -153,6 +153,47 @@ async def logout(session: AsyncSession, token: str) -> None:
     await session.commit()
 
 
+async def verify_sensitive_password(
+    session: AsyncSession, *, user_id: UUID, password: str
+) -> LocalCredential:
+    """Serialize and bound reauthentication attempts for sensitive account changes."""
+    credential = await session.scalar(
+        select(LocalCredential).where(LocalCredential.user_id == user_id).with_for_update()
+    )
+    if credential is None:
+        raise ApplicationError(
+            "local_reauth_invalid", "Identifiants indisponibles", status_code=401
+        )
+    key = hashlib.sha256(credential.login.encode()).hexdigest()
+    now = datetime.now(UTC)
+    await session.execute(
+        insert(LocalLoginThrottle)
+        .values(login_sha256=key, failures=0, window_start=now)
+        .on_conflict_do_nothing()
+    )
+    throttle = await session.scalar(
+        select(LocalLoginThrottle)
+        .where(LocalLoginThrottle.login_sha256 == key)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    assert throttle is not None
+    if throttle.window_start + timedelta(minutes=15) <= now:
+        throttle.failures, throttle.window_start, throttle.locked_until = 0, now, None
+    if (throttle.locked_until and throttle.locked_until > now) or not _verify(
+        credential.password_hash, password
+    ):
+        throttle.failures += 1
+        if throttle.failures >= 5:
+            throttle.locked_until = now + timedelta(minutes=15)
+        await session.commit()
+        raise ApplicationError(
+            "local_reauth_invalid", "Identifiants indisponibles", status_code=401
+        )
+    throttle.failures, throttle.locked_until = 0, None
+    return credential
+
+
 async def change_password(
     session: AsyncSession,
     *,
@@ -163,13 +204,7 @@ async def change_password(
     workspace_id: UUID,
 ) -> None:
     row = await get_session(session, token, lock=True)
-    credential = await session.scalar(
-        select(LocalCredential).where(LocalCredential.user_id == row.user_id).with_for_update()
-    )
-    if credential is None or not _verify(credential.password_hash, current):
-        raise ApplicationError(
-            "local_reauth_invalid", "Identifiants indisponibles", status_code=401
-        )
+    credential = await verify_sensitive_password(session, user_id=row.user_id, password=current)
     encoded = hash_password(replacement)
     now = datetime.now(UTC)
     credential.password_hash, credential.changed_at = encoded, now

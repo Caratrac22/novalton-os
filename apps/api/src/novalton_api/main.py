@@ -39,6 +39,7 @@ from novalton_api.modules.model_usage.routes import router as model_usage_router
 from novalton_api.modules.orchestrator.routes import router as orchestrator_router
 from novalton_api.modules.policy.routes import router as policy_router
 from novalton_api.modules.projects.routes import router as projects_router
+from novalton_api.modules.provider_keys.routes import router as provider_keys_router
 from novalton_api.modules.qa_worker.routes import router as qa_worker_router
 from novalton_api.modules.runtime_events.routes import router as runtime_events_router
 from novalton_api.modules.tasks.routes import router as tasks_router
@@ -142,6 +143,7 @@ def create_app(
     scoped = {"prefix": "/api/v1", "dependencies": [Depends(require_saas_access)]}
     application.include_router(projects_router, **scoped)
     application.include_router(cadrage_router, **scoped)
+    application.include_router(provider_keys_router, **scoped)
     application.include_router(local_account_router, **scoped)
     application.include_router(tasks_router, **scoped)
     application.include_router(runtime_events_router, **scoped)
