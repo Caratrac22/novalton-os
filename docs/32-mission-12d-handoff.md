@@ -13,7 +13,7 @@ La PR empilée et les résultats distants sont à inscrire après publication.
 | 12D-C seconde autorisation | P0 | TODO | Aucune autorisation de lancement ni clé d'idempotence de run. |
 | 12D-D jonction workflow | P0 | BLOCKED | Conditionnée à B et C ; aucun run créé depuis le cadrage. |
 | 12D-E exécution jetable | P0 | BLOCKED | Aucun PASS de bout en bout cadrage → Manager → Developer → QA. |
-| 12D-I Chromium hostile | P0 | PARTIAL | [Chromium #40140031116](https://github.com/Caratrac22/novalton-os/actions/runs/40140031116) SUCCESS sur `ab75fdf` : second tenant/propriétaire, projet privé et refus UI/API. Scénarios de perte de grant et révocation de session après page ouverte ajoutés ensuite, à revérifier en CI ; expiration naturelle et plan obsolète en page restent à couvrir. |
+| 12D-I Chromium hostile | P0 | PARTIAL | [Chromium #40140611400](https://github.com/Caratrac22/novalton-os/actions/runs/40140611400) SUCCESS sur `7ba53eb` : second tenant/propriétaire, projet privé, perte/restauration de grant et révocation de session UI/API. Refus d'accès au coffre BYOK du premier tenant ajouté ensuite, à revérifier ; expiration naturelle et plan obsolète en page restent à couvrir. |
 | 12D-K CI | P0 | IN_PROGRESS | Ruff, format, compilation Python et SQL Alembic local ; PostgreSQL et pipelines distants à relever. |
 | 12D-F interface et suivi | P1 | TODO | Lancement désactivé. |
 | 12D-G modèle réel | P1 | BLOCKED | Aucun modèle local accessible dans ce runtime ; `REAL_MODEL_QUALITY_NOT_VERIFIED`. |

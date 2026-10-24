@@ -11,7 +11,7 @@ type Preflight = { ready_for_simulation: boolean; ready_for_launch: boolean; dia
 const diagnosticLabels: Record<string, string> = {
   plan_obsolete_or_not_approved: "Le plan a changé ou son approbation n’est plus valable.",
   project_or_task_unavailable: "Le projet ou la tâche n’est plus disponible.",
-  task_not_runnable: "Cette tâche est terminée ou annulée.",
+  task_not_runnable: "Cette tâche n’est pas prête à être exécutée.",
   trusted_agents_unavailable: "Les définitions approuvées des agents ne sont pas disponibles.",
   dispatch_inactive: "Le dispatch est désactivé pour cet espace de travail.",
   operator_permissions_missing: "Les autorisations nécessaires manquent à votre compte.",

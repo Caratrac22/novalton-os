@@ -496,6 +496,18 @@ def run(browser, origin, second):
                 raise AssertionError(f"Foreign resource allowed: {method} {response.status}")
         except urllib.error.HTTPError as error:
             assert error.code in (403, 404), (method, error.code)
+    primary_tenant = os.environ.get("NOVALTON_TENANT_ID", "89cfc055-366e-5bcb-b65f-4f367185bf6d")
+    primary_workspace = os.environ.get("NOVALTON_WORKSPACE_ID", "b640b64f-8e55-53e8-a5b2-3beff9d5af82")
+    foreign_vault = urllib.request.Request(
+        f"http://127.0.0.1:8000/api/v1/tenants/{primary_tenant}/"
+        f"workspaces/{primary_workspace}/provider-keys",
+        headers={"Authorization": f"Bearer {token2}"},
+    )
+    try:
+        with urllib.request.urlopen(foreign_vault, timeout=10) as response:
+            raise AssertionError(f"Foreign BYOK allowed: {response.status}")
+    except urllib.error.HTTPError as error:
+        assert error.code == 403, error.code
     browser.navigate(origin + "/settings")
     browser.wait("return document.body.innerText.includes('Clés personnelles')",
                  "other tenant settings")
