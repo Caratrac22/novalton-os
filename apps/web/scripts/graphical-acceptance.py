@@ -22,7 +22,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from socket import socket
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 ROOT = Path(__file__).resolve().parents[3]
 ARTIFACTS = (
@@ -244,6 +244,48 @@ def provision_second_identity():
     return (*asyncio.run(create()), login, password)
 
 
+def change_second_authority(tenant_id, workspace_id, login, *, grant_active=None, revoke=False):
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select, update
+
+    from novalton_api.core.config import get_settings
+    from novalton_api.core.database import Database, verify_database_identity
+    from novalton_api.modules.durable_dispatch.identity import WorkspaceOperatorPermission
+    from novalton_api.modules.local_auth.models import LocalCredential, LocalSession
+
+    async def change():
+        settings = get_settings()
+        assert settings.environment == "test"
+        await verify_database_identity(settings)
+        db = Database.from_settings(settings)
+        try:
+            async with db.session_factory.begin() as session:
+                person = await session.scalar(select(LocalCredential).where(
+                    LocalCredential.login == login
+                ))
+                assert person is not None
+                if grant_active is not None:
+                    result = await session.execute(update(WorkspaceOperatorPermission).where(
+                        WorkspaceOperatorPermission.user_id == person.user_id,
+                        WorkspaceOperatorPermission.tenant_id == UUID(tenant_id),
+                        WorkspaceOperatorPermission.workspace_id == UUID(workspace_id),
+                        WorkspaceOperatorPermission.permission == "workspace.read",
+                    ).values(active=grant_active,
+                             revoked_at=None if grant_active else datetime.now(UTC)))
+                    assert result.rowcount == 1
+                if revoke:
+                    result = await session.execute(update(LocalSession).where(
+                        LocalSession.user_id == person.user_id,
+                        LocalSession.revoked_at.is_(None),
+                    ).values(revoked_at=datetime.now(UTC)))
+                    assert result.rowcount == 1
+        finally:
+            await db.dispose()
+
+    asyncio.run(change())
+
+
 def run(browser, origin, second):
     browser.navigate(origin + "/projects")
     browser.wait(
@@ -457,14 +499,33 @@ def run(browser, origin, second):
     browser.navigate(origin + "/settings")
     browser.wait("return document.body.innerText.includes('Clés personnelles')",
                  "other tenant settings")
-    browser.click_text("Se déconnecter")
-    browser.wait("return location.pathname === '/login'", "second identity logout")
+    change_second_authority(tenant2, workspace2, login2, grant_active=False)
+    browser.navigate(origin + "/projects")
+    browser.wait("return document.body.innerText.includes('Vous n’avez pas accès à cet espace.')",
+                 "grant removed while page open")
+    change_second_authority(tenant2, workspace2, login2, grant_active=True)
+    browser.navigate(origin + "/projects")
+    browser.wait("return document.body.innerText.includes('Aucun projet')",
+                 "grant restored")
+    change_second_authority(tenant2, workspace2, login2, revoke=True)
+    browser.navigate(origin + "/projects")
+    browser.wait("return document.body.innerText.includes('Connexion requise')",
+                 "revoked session denied after page reload")
+    revoked_request = urllib.request.Request(
+        f"http://127.0.0.1:8000/api/v1/tenants/{tenant2}/workspaces/{workspace2}/projects",
+        headers={"Authorization": f"Bearer {token2}"},
+    )
+    try:
+        with urllib.request.urlopen(revoked_request, timeout=10) as response:
+            raise AssertionError(f"Revoked session allowed: {response.status}")
+    except urllib.error.HTTPError as error:
+        assert error.code == 401, error.code
     print(
         json.dumps(
             {
                 "browser": "Chrome headless",
                 "identity": "local disposable owner",
-                "isolation": "second tenant denied by browser and API",
+                "isolation": "second tenant denied by browser and API; grant and session revoked",
                 "database": "novalton_test",
                 "project_chat_plan": "persisted and approved",
                 "screenshots": 8,

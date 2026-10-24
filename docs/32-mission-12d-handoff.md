@@ -13,7 +13,7 @@ La PR empilée et les résultats distants sont à inscrire après publication.
 | 12D-C seconde autorisation | P0 | TODO | Aucune autorisation de lancement ni clé d'idempotence de run. |
 | 12D-D jonction workflow | P0 | BLOCKED | Conditionnée à B et C ; aucun run créé depuis le cadrage. |
 | 12D-E exécution jetable | P0 | BLOCKED | Aucun PASS de bout en bout cadrage → Manager → Developer → QA. |
-| 12D-I Chromium hostile | P0 | PARTIAL | [Chromium #40140031116](https://github.com/Caratrac22/novalton-os/actions/runs/40140031116) SUCCESS sur `ab75fdf` : second tenant/propriétaire, projet privé et refus UI/API. Session expirée, révocation en page ouverte et perte de grant restent à vérifier. |
+| 12D-I Chromium hostile | P0 | PARTIAL | [Chromium #40140031116](https://github.com/Caratrac22/novalton-os/actions/runs/40140031116) SUCCESS sur `ab75fdf` : second tenant/propriétaire, projet privé et refus UI/API. Scénarios de perte de grant et révocation de session après page ouverte ajoutés ensuite, à revérifier en CI ; expiration naturelle et plan obsolète en page restent à couvrir. |
 | 12D-K CI | P0 | IN_PROGRESS | Ruff, format, compilation Python et SQL Alembic local ; PostgreSQL et pipelines distants à relever. |
 | 12D-F interface et suivi | P1 | TODO | Lancement désactivé. |
 | 12D-G modèle réel | P1 | BLOCKED | Aucun modèle local accessible dans ce runtime ; `REAL_MODEL_QUALITY_NOT_VERIFIED`. |
@@ -53,6 +53,14 @@ des diagnostics, jamais une erreur de génération ou un lancement implicite.
 `ready_for_test_launch` et `ready_for_launch` restent faux : les contrôles
 non vérifiés sont indiqués. `ready_for_simulation` conserve sa définition
 historique (proposition lisible et non obsolète, sans effet).
+
+La jonction n'est pas une simple invocation de
+`create_development_workflow` : ce service appelle `_create_plan` puis
+`create_run`, chacun avec son propre commit. Sans refactorisation de ces
+frontières, la vérification finale du consentement et de la seconde décision,
+l'association durable à la compilation et la création du run ne peuvent pas
+être atomiques. L'activer maintenant laisserait des runs orphelins ou des
+retries doubles. La proposition et le préflight restent donc consultatifs.
 
 ## Validation et limites
 
