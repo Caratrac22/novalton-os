@@ -1,8 +1,14 @@
 # Mission 12D — tranche de contrôle financier et préflight
 
-Base : PR #104, `775d75ef353478a3ef0ad36cb1fbee39bbefe2c6`.
-Branche : `feature/mission12d-governed-execution-financial-authorization`.
-La PR empilée et les résultats distants sont à inscrire après publication.
+PR brouillon empilée : [#105](https://github.com/Caratrac22/novalton-os/pull/105),
+branche `feature/mission12d-governed-execution-financial-authorization`,
+base PR #104 à `775d75ef353478a3ef0ad36cb1fbee39bbefe2c6`.
+Code avant cette actualisation documentaire : `ab4eec644fd687b961b02310efb8db73daee1b60`.
+Les commits de la branche portent successivement sur le consentement financier,
+les tests de refus, les correctifs de validation JSON/audit, la contention,
+la révocation navigateur, la devise USD et l'isolation BYOK. Le HEAD publié
+définitif est à vérifier sur la PR et dans l'export `HEAD.txt` : un commit
+documentaire ne peut inclure son propre SHA. Aucun merge ni force-push.
 
 ## Registre priorisé
 
@@ -75,6 +81,7 @@ retries doubles. La proposition et le préflight restent donc consultatifs.
 - Deuxième run CI sur `ab75fdf` : les champs JSON passent, mais le filtre d'audit existant refuse la clé de métadonnée `authorization_id` (contient un marqueur réservé aux secrets). Le champ d'audit est devenu `financial_policy_id` ; aucun assouplissement du filtre. La nouvelle révision doit encore passer PostgreSQL. Le frontend de ce run était SUCCESS ; Chromium #40140031116 est SUCCESS avec huit captures aux quatre largeurs et deux thèmes.
 - Troisième run CI #40140167676 sur `a5b779e` : migration et suite ciblée `test_local_cadrage.py` ont passé l'étape PostgreSQL ; suite complète encore en cours lors de cette note. Les ajouts locaux ultérieurs (refus projet PAUSED et vraie contention sur la ligne de consentement) devront être revérifiés sur leur HEAD définitif.
 - Chromium #40140353588 sur `3eff414` a trouvé une assertion de test erronée : la double connexion de la seconde identité crée deux sessions, donc la révocation modifiait deux lignes, et non une. Assertion corrigée sans retirer le test ; [Chromium #40140457651](https://github.com/Caratrac22/novalton-os/actions/runs/40140457651) est SUCCESS sur `fcc718b` avec perte/restauration de grant et révocation de session vérifiées.
+- Sur `7ba53eb`, [CI #40140611392](https://github.com/Caratrac22/novalton-os/actions/runs/40140611392) a passé migration, suite ciblée PostgreSQL et frontend ; API complète encore en cours à la rédaction. [Chromium #40140611400](https://github.com/Caratrac22/novalton-os/actions/runs/40140611400) est SUCCESS. [I-044A/B #40140611402](https://github.com/Caratrac22/novalton-os/actions/runs/40140611402) : fondation I-044B SUCCESS, source/API et installation en cours. Les résultats du HEAD définitif sont à relever séparément.
 
 ## Étapes suivantes
 
