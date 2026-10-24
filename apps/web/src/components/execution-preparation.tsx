@@ -49,7 +49,7 @@ export function ExecutionPreparation({ projectId, conversationId, planId }: {
     } catch (cause) { setProposal(null); setPreflight(null); setError(cause instanceof Error ? cause.message : "Service indisponible."); }
     finally { setBusy(false); }
   }
-  return <section aria-label="Préparation de l’exécution">
+  return <section className="execution-preparation" aria-label="Préparation de l’exécution">
     <h3>Préparer l’exécution</h3>
     <p>Le plan approuvé sert à construire une proposition à examiner. La préparation et la simulation ne lancent aucun agent.</p>
     <label htmlFor="execution-task">Tâche de ce projet</label>

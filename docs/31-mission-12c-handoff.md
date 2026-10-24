@@ -11,7 +11,8 @@
 | 12C-E finance | P0 | Coffre BYOK | TODO | `BILLING_UNVERIFIED`, aucune dépense autorisée | Conception d'une autorisation révocable avant tout appel facturable |
 | 12C-A/B qualité IA | P0/P1 | Modèle local | PARTIAL | Corpus local reproductible de 11 cas ; `REAL_MODEL_QUALITY_NOT_VERIFIED`, aucun modèle local dans ce runtime | Exécuter le corpus sur modèle local autorisé et noter les sorties |
 | 12C-J/K lancement et suivi | P1 | H + autorisation distincte | PARTIAL | Bouton de lancement distinct et désactivé, aucune route de lancement depuis le cadrage | Développer après préflight complet et acceptation isolée |
-| 12C-L/M/N/O | P0/P2 | CI navigateur, coffre | PARTIAL | Parcours Chromium de refus d'un plan générique ajouté ; scénarios hostiles multi-identités et audit complets non exécutés | Vérifier le run 12C et poursuivre l'isolation |
+| 12C-L/M/O | P0/P2 | CI navigateur | PARTIAL | Parcours Chromium de refus d'un plan générique ajouté ; scénarios hostiles multi-identités et audit complets non exécutés | Vérifier le run 12C et poursuivre l'isolation |
+| 12C-N coffre BYOK | P0 | Coffre existant | PARTIAL | Revue statique de `vault.py`, `routes.py`, `rotate.py` et des tests ciblés | Tester révocation concurrente, rotation/restauration et accès navigateur multi-identités |
 
 ## Matrice plan → moteur réel
 
@@ -61,3 +62,28 @@ incertitude, portée des permissions et dépenses. Chaque note doit citer un
 extrait observable, indiquer le modèle et son identifiant, puis distinguer
 échec de format JSON et défaut de qualité. Aucune exécution réelle n'a été
 tentée : `REAL_MODEL_QUALITY_NOT_VERIFIED`.
+
+## Revue ciblée du coffre et de la finance
+
+Le code chiffre la valeur avec AES-256-GCM, nonce aléatoire de 96 bits et AAD
+liant propriétaire, tenant, workspace et fournisseur. La clé maîtresse vient de
+l'environnement de l'hôte ; la lecture et la mutation SQL filtrent toutes ces
+portées. Les mutations exigent un compte local récent, le mot de passe courant,
+un grant d'écriture et ne retournent pas la valeur. Les tests existants vérifient
+chiffrement, séparation des tenants, révocation et limitation des échecs de
+réauthentification. La revue des références à `ProviderKey` dans `apps/api/src`
+n'a trouvé aucun chemin de génération facturable consommant cette clé. Un
+`enabled=True` du coffre ne vaut donc pas autorisation financière.
+
+Le dispatch existant réserve un nombre maximal d'appels et peut réserver une
+exposition **estimée** lorsqu'un prix de catalogue récent est connu. Cette
+capacité d'opérateur ne constitue pas encore l'autorisation de dépense humaine,
+révocable, propre à un projet/modèle et séparée de la clé demandée par 12C-E.
+La future politique devra fermer tous les points d'entrée vers un fournisseur
+facturable, y compris ceux qui ne passent pas par une réservation de dispatch,
+avant d'activer des clés BYOK.
+
+Cette lecture du code n'est pas une preuve de résistance à toutes les courses,
+ni une vérification de facture. La rotation et la restauration avec anciennes
+sauvegardes, l'isolation navigateur et la révocation pendant une réponse SSE
+restent à accepter séparément. `BILLING_UNVERIFIED` demeure obligatoire.

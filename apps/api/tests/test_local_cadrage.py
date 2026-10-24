@@ -394,6 +394,20 @@ def test_approved_plan_compilation_is_idempotent_scoped_and_revoked(initialized)
         assert client.post(decision, headers=auth, json={"decision": "APPROVED"}).status_code == 200
         unknown = client.post(compile_url, headers=auth, json={"task_id": str(uuid4())})
         assert unknown.status_code == 404
+        other_project = client.post(
+            path(scope) + "/projects",
+            headers=auth,
+            json={"name": "Autre projet", "slug": "other-compilation", "description": None},
+        ).json()
+        other_task = client.post(
+            path(scope) + f"/projects/{other_project['id']}/tasks",
+            headers=auth,
+            json={"title": "Tâche hors projet"},
+        ).json()
+        assert (
+            client.post(compile_url, headers=auth, json={"task_id": other_task["id"]}).status_code
+            == 404
+        )
         first = client.post(compile_url, headers=auth, json={"task_id": task["id"]})
         assert first.status_code == 201 and first.json()["status"] == "PROPOSED"
         repeated = client.post(compile_url, headers=auth, json={"task_id": task["id"]})
@@ -411,6 +425,7 @@ def test_approved_plan_compilation_is_idempotent_scoped_and_revoked(initialized)
         check = client.get(check_url, headers=auth).json()["preflight"]
         assert check["ready_for_simulation"] is False
         assert "plan_obsolete_or_not_approved" in check["diagnostics"]
+        assert client.get(check_url, headers={"Authorization": "Bearer invalid"}).status_code == 401
 
 
 def test_personal_provider_key_is_encrypted_isolated_and_revocable(initialized, monkeypatch):
