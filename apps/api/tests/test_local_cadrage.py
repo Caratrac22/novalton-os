@@ -476,6 +476,26 @@ def test_financial_authorization_requires_explicit_reauth_and_is_revocable(initi
 
         db_call(revoked_grant)
         db_call(lambda session: set_grant(session, True))
+
+        async def set_project_status(session, status):
+            await session.execute(
+                update(Project)
+                .where(
+                    Project.id == UUID(project["id"]),
+                    Project.workspace_id == scope.workspace,
+                )
+                .values(status=status)
+            )
+            await session.commit()
+
+        db_call(lambda session: set_project_status(session, "PAUSED"))
+
+        async def paused_project(session):
+            with pytest.raises(ApplicationError):
+                await attempt(session, request_id=uuid4())
+
+        db_call(paused_project)
+        db_call(lambda session: set_project_status(session, "ACTIVE"))
         one = uuid4()
         first = db_call(lambda session: attempt(session, request_id=one))
         assert first == db_call(lambda session: attempt(session, request_id=one))
@@ -532,16 +552,18 @@ def test_financial_reservation_serializes_concurrent_requests(initialized):
 
         async def race():
             db = Database.from_settings(Settings.from_environment())
+            async with db.session_factory() as auth_session:
+                operator = await authenticate_session(
+                    auth_session,
+                    token=token,
+                    tenant_id=scope.tenant,
+                    workspace_id=scope.workspace,
+                )
+                await auth_session.rollback()
 
             async def one():
                 async with db.session_factory() as session:
                     try:
-                        operator = await authenticate_session(
-                            session,
-                            token=token,
-                            tenant_id=scope.tenant,
-                            workspace_id=scope.workspace,
-                        )
                         await reserve_financial(
                             session,
                             operator=operator,
@@ -644,6 +666,7 @@ def test_approved_plan_compilation_is_idempotent_scoped_and_revoked(initialized)
         assert check["ready_for_test_launch"] is False
         assert "trusted_agents_unavailable" in check["diagnostics"]
         assert "dispatch_inactive" in check["diagnostics"]
+        assert "task_not_runnable" in check["diagnostics"]
         assert check["checked_capabilities"]["dispatch_generation"] is None
         assert client.get(compile_url + f"/{uuid4()}/preflight", headers=auth).status_code == 404
         document["expected_version"] = 1

@@ -17,6 +17,7 @@ from novalton_api.modules.audit.schemas import AuditRecordCreate
 from novalton_api.modules.audit.service import append_record
 from novalton_api.modules.durable_dispatch.operator import OperatorAuthority
 from novalton_api.modules.financial.models import FinancialAuthorization, FinancialReservation
+from novalton_api.modules.projects.models import Project
 
 
 def denied() -> ApplicationError:
@@ -80,6 +81,17 @@ async def reserve(
     await operator.require_human(
         session, "workspace.write", tenant_id=tenant_id, workspace_id=workspace_id
     )
+    project = await session.scalar(
+        select(Project)
+        .where(
+            Project.id == project_id,
+            Project.workspace_id == workspace_id,
+            Project.status == "ACTIVE",
+        )
+        .with_for_update(read=True)
+    )
+    if project is None:
+        raise denied()
     row = await scoped_authorization(
         session,
         authorization_id=authorization_id,

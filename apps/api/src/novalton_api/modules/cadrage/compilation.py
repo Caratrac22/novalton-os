@@ -168,9 +168,9 @@ async def preflight(
         or project.status != "ACTIVE"
     ):
         diagnostics.append("project_or_task_unavailable")
-    if task is not None and task.status in {"DONE", "CANCELLED"}:
-        diagnostics.append("task_not_runnable")
     proposal_diagnostics = list(diagnostics)
+    if task is not None and task.status not in {"READY", "IN_PROGRESS"}:
+        diagnostics.append("task_not_runnable")
     definitions = (
         (
             await agent_repository.latest_definition(

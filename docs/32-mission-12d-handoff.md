@@ -62,6 +62,7 @@ historique (proposition lisible et non obsolète, sans effet).
 - Le parcours complet, navigateur hostile, I-044A/B, HTTPS et modèle réel restent non validés sur cette branche tant que les runs GitHub ne le confirment pas.
 - Premier run CI sur `b7b3ce6` : le test local a révélé un HTTP 422 pour deux valeurs JSON usuelles (`estimated_limit`, `expires_at`) car le modèle Pydantic était strict. La validation de ces deux champs a été corrigée avec `strict=False` ; résultat PostgreSQL du HEAD corrigé à relever sur la prochaine CI.
 - Deuxième run CI sur `ab75fdf` : les champs JSON passent, mais le filtre d'audit existant refuse la clé de métadonnée `authorization_id` (contient un marqueur réservé aux secrets). Le champ d'audit est devenu `financial_policy_id` ; aucun assouplissement du filtre. La nouvelle révision doit encore passer PostgreSQL. Le frontend de ce run était SUCCESS ; Chromium #40140031116 est SUCCESS avec huit captures aux quatre largeurs et deux thèmes.
+- Troisième run CI #40140167676 sur `a5b779e` : migration et suite ciblée `test_local_cadrage.py` ont passé l'étape PostgreSQL ; suite complète encore en cours lors de cette note. Les ajouts locaux ultérieurs (refus projet PAUSED et vraie contention sur la ligne de consentement) devront être revérifiés sur leur HEAD définitif.
 
 ## Étapes suivantes
 
