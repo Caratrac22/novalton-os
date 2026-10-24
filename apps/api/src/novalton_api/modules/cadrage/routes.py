@@ -10,10 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from novalton_api.core.config import get_settings
 from novalton_api.core.database import get_async_session
 from novalton_api.core.exceptions import ApplicationError
+from novalton_api.modules.cadrage import compilation as compilation_service
 from novalton_api.modules.cadrage import plan as plan_service
 from novalton_api.modules.cadrage import service
 from novalton_api.modules.cadrage.generation import generate_reply
 from novalton_api.modules.cadrage.models import (
+    CadrageCompilation,
     CadrageConversation,
     CadrageMessage,
     CadragePlan,
@@ -65,6 +67,24 @@ class PlanInput(BaseModel):
 class PlanDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     decision: str = Field(pattern="^(READY_FOR_REVIEW|APPROVED|REJECTED|NEEDS_CHANGES)$")
+
+
+class CompilationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    task_id: UUID
+
+
+def _compilation(row: CadrageCompilation) -> dict[str, object]:
+    return {
+        "id": row.id,
+        "plan_id": row.plan_id,
+        "task_id": row.task_id,
+        "source_version": row.source_version,
+        "proposal_version": row.proposal_version,
+        "status": row.status,
+        "document": row.document,
+        "created_at": row.created_at,
+    }
 
 
 def _plan(row: CadragePlan) -> dict[str, object]:
@@ -153,6 +173,67 @@ async def plan_decision(
             decision=data.decision,
         )
     )
+
+
+@router.post("/{conversation_id}/plans/{plan_id}/compilations", status_code=201)
+async def compile_approved_plan(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    project_id: UUID,
+    conversation_id: UUID,
+    plan_id: UUID,
+    data: CompilationInput,
+    session: Session,
+    operator: Human,
+) -> dict[str, object]:
+    conversation = await _scoped_conversation(
+        session, operator, tenant_id, workspace_id, project_id, conversation_id, lock=True
+    )
+    plan = await plan_service.get_plan(
+        session, conversation=conversation, plan_id=plan_id, lock=True
+    )
+    row = await compilation_service.compile_plan(
+        session,
+        conversation=conversation,
+        plan=plan,
+        task_id=data.task_id,
+        owner=_human(operator).user_id,
+    )
+    return _compilation(row)
+
+
+@router.get("/{conversation_id}/plans/{plan_id}/compilations/{compilation_id}/preflight")
+async def compilation_preflight(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    project_id: UUID,
+    conversation_id: UUID,
+    plan_id: UUID,
+    compilation_id: UUID,
+    session: Session,
+    operator: Human,
+) -> dict[str, object]:
+    from sqlalchemy import select
+
+    conversation = await _scoped_conversation(
+        session, operator, tenant_id, workspace_id, project_id, conversation_id
+    )
+    plan = await plan_service.get_plan(session, conversation=conversation, plan_id=plan_id)
+    row = await session.scalar(
+        select(CadrageCompilation).where(
+            CadrageCompilation.id == compilation_id,
+            CadrageCompilation.plan_id == plan.id,
+            CadrageCompilation.owner_id == _human(operator).user_id,
+        )
+    )
+    if row is None:
+        raise plan_service.missing()
+    return {
+        "compilation": _compilation(row),
+        "preflight": await compilation_service.preflight(
+            session, conversation=conversation, plan=plan, compilation=row
+        ),
+    }
 
 
 def _spec(row: CadrageSpecification) -> dict[str, object]:

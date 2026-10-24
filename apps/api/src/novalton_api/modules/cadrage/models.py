@@ -141,3 +141,31 @@ class CadragePlan(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         PostgreSQLUUID(as_uuid=True), ForeignKey("human_operators.id", ondelete="RESTRICT")
     )
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CadrageCompilation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """An inspectable proposal, never an authority to create a workflow run."""
+
+    __tablename__ = "cadrage_compilations"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "task_id", name="uq_cadrage_compilation_plan_task"),
+        CheckConstraint("status IN ('BLOCKED','PROPOSED')", name="ck_cadrage_compilation_status"),
+    )
+
+    plan_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("cadrage_plans.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False
+    )
+    owner_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("human_operators.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    proposal_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    document: Mapped[dict] = mapped_column(JSON, nullable=False)

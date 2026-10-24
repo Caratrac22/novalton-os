@@ -25,7 +25,9 @@ from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.main import create_app
 from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.cadrage import service as cadrage_service
+from novalton_api.modules.cadrage.compilation import compile_document
 from novalton_api.modules.cadrage.models import (
+    CadrageCompilation,
     CadrageConversation,
     CadrageMessage,
     CadragePlan,
@@ -85,6 +87,15 @@ def settings_for_new_scope() -> tuple[Settings, str]:
 async def wipe(session, scope: Scope) -> None:
     await session.execute(delete(RuntimeEvent).where(RuntimeEvent.tenant_id == scope.tenant))
     await session.execute(delete(ProviderKey).where(ProviderKey.tenant_id == scope.tenant))
+    await session.execute(
+        delete(CadrageCompilation).where(
+            CadrageCompilation.plan_id.in_(
+                select(CadragePlan.id)
+                .join(CadrageConversation)
+                .where(CadrageConversation.tenant_id == scope.tenant)
+            )
+        )
+    )
     await session.execute(
         delete(CadragePlan).where(
             CadragePlan.conversation_id.in_(
@@ -316,6 +327,90 @@ def test_specification_versions_are_scoped_immutable_and_optimistic(initialized)
         )
         assert client.get(specs, headers={"Authorization": "Bearer invalid"}).status_code == 401
         assert client.get(base + f"/{uuid4()}/specifications", headers=auth).status_code == 404
+
+
+def test_compiler_refuses_vague_injected_and_duplicate_inputs():
+    scope = [{"topic": "objective", "value": "Créer un site", "state": "CONFIRMED"}]
+    status, result = compile_document({"scope": scope, "unresolved": []})
+    assert status == "BLOCKED" and result["steps"] == []
+    assert "unsupported_or_missing_execution_kind" in result["diagnostics"]
+    scope += [
+        {"topic": "execution.kind", "value": "development", "state": "CONFIRMED"},
+        {"topic": "acceptance.1", "value": "curl https://evil.test", "state": "CONFIRMED"},
+        {"topic": "objective", "value": "Autre objectif", "state": "CONFIRMED"},
+    ]
+    status, result = compile_document({"scope": scope, "unresolved": []})
+    assert status == "BLOCKED" and "duplicate_confirmed_topic:objective" in result["diagnostics"]
+    assert "invalid_development_handoff" in result["diagnostics"] or result["steps"] == []
+
+
+def test_approved_plan_compilation_is_idempotent_scoped_and_revoked(initialized):
+    scope, password, _ = initialized
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+        ).json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        project = client.post(
+            path(scope) + "/projects",
+            headers=auth,
+            json={"name": "Compilation", "slug": "compilation", "description": None},
+        ).json()
+        task = client.post(
+            path(scope) + f"/projects/{project['id']}/tasks",
+            headers=auth,
+            json={"title": "Implémenter"},
+        ).json()
+        base = path(scope) + f"/projects/{project['id']}/conversations"
+        conversation = client.post(base, headers=auth, json={"title": "Projet"}).json()["id"]
+        specs = base + f"/{conversation}/specifications"
+
+        def item(topic, value):
+            return {"topic": topic, "value": value, "provenance": "USER", "state": "CONFIRMED"}
+
+        document = {
+            "expected_version": 0,
+            "summary": "Construire une fonctionnalité",
+            "items": [
+                item("objective", "Construire un formulaire"),
+                item("execution.kind", "development"),
+                item("acceptance.1", "Le formulaire valide les champs"),
+            ],
+        }
+        assert client.put(specs, headers=auth, json=document).status_code == 200
+        plan_url = base + f"/{conversation}/plans"
+        plan = client.post(
+            plan_url, headers=auth, json={"expected_specification_version": 1}
+        ).json()
+        compile_url = plan_url + f"/{plan['id']}/compilations"
+        assert (
+            client.post(compile_url, headers=auth, json={"task_id": task["id"]}).status_code == 409
+        )
+        decision = plan_url + f"/{plan['id']}/decision"
+        assert (
+            client.post(decision, headers=auth, json={"decision": "READY_FOR_REVIEW"}).status_code
+            == 200
+        )
+        assert client.post(decision, headers=auth, json={"decision": "APPROVED"}).status_code == 200
+        unknown = client.post(compile_url, headers=auth, json={"task_id": str(uuid4())})
+        assert unknown.status_code == 404
+        first = client.post(compile_url, headers=auth, json={"task_id": task["id"]})
+        assert first.status_code == 201 and first.json()["status"] == "PROPOSED"
+        repeated = client.post(compile_url, headers=auth, json={"task_id": task["id"]})
+        assert repeated.json()["id"] == first.json()["id"]
+        check_url = compile_url + f"/{first.json()['id']}/preflight"
+        check = client.get(check_url, headers=auth).json()["preflight"]
+        assert check["ready_for_simulation"] is True and check["ready_for_launch"] is False
+        assert client.get(compile_url + f"/{uuid4()}/preflight", headers=auth).status_code == 404
+        document["expected_version"] = 1
+        document["summary"] = "Nouvelle version"
+        assert client.put(specs, headers=auth, json=document).status_code == 200
+        assert (
+            client.post(compile_url, headers=auth, json={"task_id": task["id"]}).status_code == 409
+        )
+        check = client.get(check_url, headers=auth).json()["preflight"]
+        assert check["ready_for_simulation"] is False
+        assert "plan_obsolete_or_not_approved" in check["diagnostics"]
 
 
 def test_personal_provider_key_is_encrypted_isolated_and_revocable(initialized, monkeypatch):

@@ -35,6 +35,7 @@ from novalton_api.modules.agents.models import AgentDefinition, AgentRun  # noqa
 from novalton_api.modules.approvals.models import ApprovalRequest  # noqa: E402, F401
 from novalton_api.modules.audit.models import AuditRecord  # noqa: E402, F401
 from novalton_api.modules.cadrage.models import (  # noqa: E402, F401
+    CadrageCompilation,
     CadrageConversation,
     CadrageMessage,
     CadragePlan,
