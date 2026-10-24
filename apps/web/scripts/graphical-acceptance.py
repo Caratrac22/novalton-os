@@ -455,7 +455,6 @@ def main():
                             "goog:chromeOptions": {
                                 "args": [
                                     "--headless=new",
-                                    "--no-sandbox",
                                     "--ignore-certificate-errors",
                                     "--disable-dev-shm-usage",
                                 ]
