@@ -220,6 +220,7 @@ def run(browser, origin):
     browser.wait(
         "return new URLSearchParams(location.search).has('task')", "task creation"
     )
+    task = browser.script("return new URLSearchParams(location.search).get('task')")
 
     browser.navigate(f"{origin}/projects/{project}/chat")
     browser.wait("return !!document.querySelector('#chat-title')", "project chat")
@@ -262,6 +263,25 @@ def run(browser, origin):
     browser.wait(
         "return document.body.innerText.includes('état : APPROVED')", "human approval"
     )
+    # On the 12C branch, preparation must fail closed for this generic site plan.
+    if browser.script("return !!document.querySelector('#execution-task')"):
+        browser.wait(
+            f"return !!document.querySelector('#execution-task option[value=\"{task}\"]')",
+            "task available for compilation",
+        )
+        browser.script(
+            "const element=document.querySelector('#execution-task'); "
+            "element.value=arguments[0]; element.dispatchEvent(new Event('change',{bubbles:true}));",
+            task,
+        )
+        browser.click_text("Préparer l’exécution")
+        browser.wait(
+            "return document.body.innerText.includes('Proposition : BLOCKED')",
+            "generic plan refused compilation",
+        )
+        assert browser.script(
+            "return !!document.querySelector('button[aria-describedby=\"launch-unavailable\"]:disabled')"
+        ), "launch must remain unavailable"
     browser.navigate(f"{origin}/projects/{project}/chat?conversation={conversation}")
     browser.wait(
         "return document.body.innerText.includes('état : APPROVED') && "

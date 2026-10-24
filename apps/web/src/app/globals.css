@@ -70,6 +70,10 @@ h2 { margin-bottom:0; font-size:19px; font-weight:650; letter-spacing:-.02em; }
 .record-card-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; }
 .record-card-heading>div { min-width:0; }
 .record-card h2 { overflow-wrap:anywhere; }
+.execution-preparation { min-width:0; max-width:100%; overflow-wrap:anywhere; }
+.execution-preparation select { display:block; width:100%; min-width:0; max-width:100%; }
+.execution-preparation button { max-width:100%; white-space:normal; }
+.execution-preparation ol,.execution-preparation ul { padding-inline-start:24px; }
 .record-slug,.record-project { display:block; overflow:hidden; margin:6px 0 0; color:var(--subtle); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
 .record-project { color:var(--accent); font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
 .record-description { min-height:44px; margin:20px 0; color:var(--muted); font-size:13px; line-height:1.65; overflow-wrap:anywhere; }

@@ -1,11 +1,11 @@
-name: Mission 12B graphical acceptance
+name: Cadrage graphical acceptance
 on:
   pull_request:
 permissions:
   contents: read
 jobs:
   graphical:
-    if: github.head_ref == 'feature/mission12b-intelligent-cadrage-byok'
+    if: github.head_ref == 'feature/mission12b-intelligent-cadrage-byok' || github.head_ref == 'feature/mission12c-governed-launch-ai-quality'
     runs-on: ubuntu-24.04
     services:
       postgres:

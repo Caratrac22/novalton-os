@@ -4,6 +4,15 @@ import { isRecord, isUuid } from "@/lib/api/scoped";
 
 export const dynamic = "force-dynamic";
 
+export async function GET(_request: Request, context: { params: Promise<{ projectId: string }> }): Promise<Response> {
+  const { projectId } = await context.params;
+  if (!isUuid(projectId)) return Response.json({ message: "Invalid project selection." }, { status: 400 });
+  try {
+    const upstream = await scopedSessionFetch(`projects/${projectId}/tasks?limit=100`, { cache: "no-store" });
+    return new Response(await upstream.text(), { status: upstream.status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+  } catch { return Response.json({ message: "The task service is unavailable." }, { status: 503 }); }
+}
+
 export async function POST(request: Request, context: { params: Promise<{ projectId: string }> }): Promise<Response> {
   if (!verifiedMutationOrigin(request)) return new Response("Forbidden", { status: 403 });
   const { projectId } = await context.params;
