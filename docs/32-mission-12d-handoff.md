@@ -13,7 +13,7 @@ La PR empilée et les résultats distants sont à inscrire après publication.
 | 12D-C seconde autorisation | P0 | TODO | Aucune autorisation de lancement ni clé d'idempotence de run. |
 | 12D-D jonction workflow | P0 | BLOCKED | Conditionnée à B et C ; aucun run créé depuis le cadrage. |
 | 12D-E exécution jetable | P0 | BLOCKED | Aucun PASS de bout en bout cadrage → Manager → Developer → QA. |
-| 12D-I Chromium hostile | P0 | TODO | Tests historiques 12C seulement ; deux identités et révocation en page ouverte restent à vérifier. |
+| 12D-I Chromium hostile | P0 | PARTIAL | Workflow 12D activé ; second tenant/propriétaire, projet privé et refus UI/API ajoutés. Session expirée, révocation en page ouverte et perte de grant restent à vérifier. |
 | 12D-K CI | P0 | IN_PROGRESS | Ruff, format, compilation Python et SQL Alembic local ; PostgreSQL et pipelines distants à relever. |
 | 12D-F interface et suivi | P1 | TODO | Lancement désactivé. |
 | 12D-G modèle réel | P1 | BLOCKED | Aucun modèle local accessible dans ce runtime ; `REAL_MODEL_QUALITY_NOT_VERIFIED`. |
@@ -60,6 +60,7 @@ historique (proposition lisible et non obsolète, sans effet).
 - Ruff et format complets : PASS local. Migration Alembic tête unique `20261025_0047`, rendu SQL : PASS local. Import FastAPI et validation Pydantic sans base : PASS.
 - PostgreSQL local indisponible ; aucun test de concurrence ou de révocation SQL ne peut être revendiqué PASS local. Des tests réels PostgreSQL ont été ajoutés au fichier d'intégration pour CI : absence de confirmation/réauthentification, quota, modèle, retry, révocation et deux réservations simultanées. Leurs résultats seront relevés après exécution sur `novalton_test`.
 - Le parcours complet, navigateur hostile, I-044A/B, HTTPS et modèle réel restent non validés sur cette branche tant que les runs GitHub ne le confirment pas.
+- Premier run CI sur `b7b3ce6` : le test local a révélé un HTTP 422 pour deux valeurs JSON usuelles (`estimated_limit`, `expires_at`) car le modèle Pydantic était strict. La validation de ces deux champs a été corrigée avec `strict=False` ; résultat PostgreSQL du HEAD corrigé à relever sur la prochaine CI.
 
 ## Étapes suivantes
 

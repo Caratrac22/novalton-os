@@ -36,8 +36,8 @@ class AuthorizeInput(BaseModel):
     model_id: str = Field(min_length=1, max_length=256)
     request_limit: int = Field(gt=0, le=100_000)
     token_limit: int = Field(gt=0, le=100_000_000)
-    estimated_limit: Decimal = Field(gt=0, max_digits=20, decimal_places=10)
-    expires_at: datetime
+    estimated_limit: Decimal = Field(gt=0, max_digits=20, decimal_places=10, strict=False)
+    expires_at: datetime = Field(strict=False)
     current_password: str = Field(min_length=1, max_length=128)
 
 
@@ -165,6 +165,11 @@ async def listing(
     operator: Human,
 ) -> dict[str, object]:
     owner = human(operator)
+    project = await session.scalar(
+        select(Project.id).where(Project.id == project_id, Project.workspace_id == workspace_id)
+    )
+    if project is None:
+        raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
     rows = (
         await session.scalars(
             select(FinancialAuthorization)

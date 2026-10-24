@@ -591,6 +591,10 @@ def test_approved_plan_compilation_is_idempotent_scoped_and_revoked(initialized)
         check_url = compile_url + f"/{first.json()['id']}/preflight"
         check = client.get(check_url, headers=auth).json()["preflight"]
         assert check["ready_for_simulation"] is True and check["ready_for_launch"] is False
+        assert check["ready_for_test_launch"] is False
+        assert "trusted_agents_unavailable" in check["diagnostics"]
+        assert "dispatch_inactive" in check["diagnostics"]
+        assert check["checked_capabilities"]["dispatch_generation"] is None
         assert client.get(compile_url + f"/{uuid4()}/preflight", headers=auth).status_code == 404
         document["expected_version"] = 1
         document["summary"] = "Nouvelle version"
