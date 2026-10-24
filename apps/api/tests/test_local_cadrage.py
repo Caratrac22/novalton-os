@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import httpx
@@ -38,6 +39,9 @@ from novalton_api.modules.durable_dispatch.identity import (
     TenantOperatorMembership,
     WorkspaceOperatorPermission,
 )
+from novalton_api.modules.durable_dispatch.sessions import authenticate_session
+from novalton_api.modules.financial.models import FinancialAuthorization, FinancialReservation
+from novalton_api.modules.financial.service import reserve as reserve_financial
 from novalton_api.modules.local_auth.bootstrap import (
     BootstrapDenied,
     bootstrap_owner,
@@ -86,6 +90,18 @@ def settings_for_new_scope() -> tuple[Settings, str]:
 
 async def wipe(session, scope: Scope) -> None:
     await session.execute(delete(RuntimeEvent).where(RuntimeEvent.tenant_id == scope.tenant))
+    await session.execute(
+        delete(FinancialReservation).where(
+            FinancialReservation.authorization_id.in_(
+                select(FinancialAuthorization.id).where(
+                    FinancialAuthorization.tenant_id == scope.tenant
+                )
+            )
+        )
+    )
+    await session.execute(
+        delete(FinancialAuthorization).where(FinancialAuthorization.tenant_id == scope.tenant)
+    )
     await session.execute(delete(ProviderKey).where(ProviderKey.tenant_id == scope.tenant))
     await session.execute(
         delete(CadrageCompilation).where(
@@ -342,6 +358,166 @@ def test_compiler_refuses_vague_injected_and_duplicate_inputs():
     status, result = compile_document({"scope": scope, "unresolved": []})
     assert status == "BLOCKED" and "duplicate_confirmed_topic:objective" in result["diagnostics"]
     assert "invalid_development_handoff" in result["diagnostics"] or result["steps"] == []
+
+
+def test_financial_authorization_requires_explicit_reauth_and_is_revocable(initialized):
+    scope, password, _ = initialized
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+        ).json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        project = client.post(
+            path(scope) + "/projects",
+            headers=auth,
+            json={"name": "Budget", "slug": "budget", "description": None},
+        ).json()
+        url = path(scope) + f"/projects/{project['id']}/financial-authorizations"
+        payload = {
+            "confirmation": "AUTHORIZE_ESTIMATED_EXPOSURE",
+            "provider_id": "openrouter",
+            "model_id": "test-model",
+            "request_limit": 1,
+            "token_limit": 100,
+            "estimated_limit": "0.01",
+            "expires_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+            "current_password": password,
+        }
+        assert client.post(url, json=payload).status_code == 401
+        assert (
+            client.post(
+                url, headers=auth, json={**payload, "current_password": "wrong"}
+            ).status_code
+            == 401
+        )
+        assert (
+            client.post(url, headers=auth, json={**payload, "confirmation": "yes"}).status_code
+            == 422
+        )
+        created = client.post(url, headers=auth, json=payload)
+        assert created.status_code == 201, created.text
+        grant = created.json()
+        assert grant["paid_generation_enabled"] is False
+        assert grant["billing"] == "BILLING_UNVERIFIED"
+        assert len(client.get(url, headers=auth).json()["items"]) == 1
+
+        async def attempt(session, *, request_id, model="test-model", tokens=30):
+            operator = await authenticate_session(
+                session, token=token, tenant_id=scope.tenant, workspace_id=scope.workspace
+            )
+            result = await reserve_financial(
+                session,
+                operator=operator,
+                authorization_id=UUID(grant["id"]),
+                tenant_id=scope.tenant,
+                workspace_id=scope.workspace,
+                project_id=UUID(project["id"]),
+                provider_id="openrouter",
+                model_id=model,
+                request_id=request_id,
+                tokens=tokens,
+                estimated_exposure=Decimal("0.004"),
+            )
+            await session.commit()
+            return result.id
+
+        async def wrong_model(session):
+            with pytest.raises(ApplicationError):
+                await attempt(session, request_id=uuid4(), model="foreign-model")
+
+        db_call(wrong_model)
+        one = uuid4()
+        first = db_call(lambda session: attempt(session, request_id=one))
+        assert first == db_call(lambda session: attempt(session, request_id=one))
+
+        async def quota(session):
+            with pytest.raises(ApplicationError):
+                await attempt(session, request_id=uuid4())
+
+        db_call(quota)
+        revoked = client.post(
+            url + f"/{grant['id']}/revoke",
+            headers=auth,
+            json={"current_password": password},
+        )
+        assert revoked.status_code == 200 and revoked.json()["version"] == 2
+        assert revoked.json()["revoked_at"] is not None
+
+        async def late(session):
+            with pytest.raises(ApplicationError):
+                await attempt(session, request_id=one)
+
+        db_call(late)
+
+
+def test_financial_reservation_serializes_concurrent_requests(initialized):
+    scope, password, _ = initialized
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+        ).json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        project = client.post(
+            path(scope) + "/projects",
+            headers=auth,
+            json={"name": "Concurrence", "slug": "concurrence", "description": None},
+        ).json()
+        url = path(scope) + f"/projects/{project['id']}/financial-authorizations"
+        grant = client.post(
+            url,
+            headers=auth,
+            json={
+                "confirmation": "AUTHORIZE_ESTIMATED_EXPOSURE",
+                "provider_id": "openrouter",
+                "model_id": "test-model",
+                "request_limit": 1,
+                "token_limit": 20,
+                "estimated_limit": "0.01",
+                "expires_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+                "current_password": password,
+            },
+        )
+        assert grant.status_code == 201, grant.text
+        grant_id = UUID(grant.json()["id"])
+
+        async def race():
+            db = Database.from_settings(Settings.from_environment())
+
+            async def one():
+                async with db.session_factory() as session:
+                    try:
+                        operator = await authenticate_session(
+                            session,
+                            token=token,
+                            tenant_id=scope.tenant,
+                            workspace_id=scope.workspace,
+                        )
+                        await reserve_financial(
+                            session,
+                            operator=operator,
+                            authorization_id=grant_id,
+                            tenant_id=scope.tenant,
+                            workspace_id=scope.workspace,
+                            project_id=UUID(project["id"]),
+                            provider_id="openrouter",
+                            model_id="test-model",
+                            request_id=uuid4(),
+                            tokens=20,
+                            estimated_exposure=Decimal("0.01"),
+                        )
+                        await session.commit()
+                        return "reserved"
+                    except ApplicationError:
+                        await session.rollback()
+                        return "denied"
+
+            try:
+                return await asyncio.gather(one(), one())
+            finally:
+                await db.dispose()
+
+        assert sorted(asyncio.run(race())) == ["denied", "reserved"]
+        assert client.get(url, headers=auth).json()["items"][0]["request_count"] == 1
 
 
 def test_approved_plan_compilation_is_idempotent_scoped_and_revoked(initialized):

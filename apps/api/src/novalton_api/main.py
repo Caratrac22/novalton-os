@@ -19,7 +19,6 @@ from novalton_api.infrastructure.providers.openai_compatible import (
     OpenAICompatibleProvider,
 )
 from novalton_api.infrastructure.providers.openrouter_catalog import OpenRouterCatalogSource
-from novalton_api.infrastructure.providers.openrouter_routes import registered_openrouter_routes
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.modules.agents.routes import definitions_router, runs_router
 from novalton_api.modules.approvals.routes import router as approvals_router
@@ -28,6 +27,7 @@ from novalton_api.modules.developer_manager.routes import router as developer_ma
 from novalton_api.modules.developer_worker.routes import router as developer_worker_router
 from novalton_api.modules.durable_dispatch.routes import router as durable_dispatch_router
 from novalton_api.modules.durable_dispatch.saas_access import require_saas_access
+from novalton_api.modules.financial.routes import router as financial_router
 from novalton_api.modules.git_changesets.routes import router as git_changesets_router
 from novalton_api.modules.github_publications.routes import router as github_publications_router
 from novalton_api.modules.local_auth.routes import router as local_auth_router
@@ -57,27 +57,10 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     application.state.database = database
     owns_provider_registry = not hasattr(application.state, "provider_registry")
     if owns_provider_registry:
+        # An environment key is not human consent. Until every generation entry
+        # point can reserve against a scoped financial authorization, no remote
+        # provider is registered in the default application registry.
         providers = ()
-        if settings.openai_compatible_base_url is not None:
-            providers = (
-                OpenAICompatibleProvider(
-                    OpenAICompatibleConfig(
-                        provider_id=settings.openai_compatible_provider_id,
-                        base_url=settings.openai_compatible_base_url,
-                        api_key=settings.openai_compatible_api_key,
-                        connect_timeout_seconds=settings.provider_connect_timeout_seconds,
-                        read_timeout_seconds=settings.provider_read_timeout_seconds,
-                        write_timeout_seconds=settings.provider_write_timeout_seconds,
-                        pool_timeout_seconds=settings.provider_pool_timeout_seconds,
-                        max_response_bytes=settings.provider_max_response_bytes,
-                        require_parameters=settings.openai_compatible_require_parameters,
-                        response_healing=settings.openai_compatible_response_healing,
-                        provider_managed_routes=registered_openrouter_routes(
-                            settings.openai_compatible_provider_id
-                        ),
-                    )
-                ),
-            )
         if settings.local_model_base_url is not None and settings.local_model_id is not None:
             providers += (
                 OpenAICompatibleProvider(
@@ -144,6 +127,7 @@ def create_app(
     application.include_router(projects_router, **scoped)
     application.include_router(cadrage_router, **scoped)
     application.include_router(provider_keys_router, **scoped)
+    application.include_router(financial_router, **scoped)
     application.include_router(local_account_router, **scoped)
     application.include_router(tasks_router, **scoped)
     application.include_router(runtime_events_router, **scoped)
