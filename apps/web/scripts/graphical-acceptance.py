@@ -319,7 +319,10 @@ def run(browser, origin):
                     "return Math.round(document.querySelector('.primary-nav')"
                     ".getBoundingClientRect().height)"
                 )
-                assert navigation_height <= 80, {"width": width, "nav": navigation_height}
+                assert navigation_height <= 80, {
+                    "width": width,
+                    "nav": navigation_height,
+                }
             browser.screenshot(f"chat-{theme.lower()}-{width}.png")
             browser.navigate(origin + "/settings")
             browser.wait(
