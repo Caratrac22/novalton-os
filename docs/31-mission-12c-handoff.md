@@ -87,3 +87,48 @@ Cette lecture du code n'est pas une preuve de résistance à toutes les courses,
 ni une vérification de facture. La rotation et la restauration avec anciennes
 sauvegardes, l'isolation navigateur et la révocation pendant une réponse SSE
 restent à accepter séparément. `BILLING_UNVERIFIED` demeure obligatoire.
+
+## Transmission GitHub et validation
+
+- PR empilée : [#104](https://github.com/Caratrac22/novalton-os/pull/104), branche `feature/mission12c-governed-launch-ai-quality`, base #103 `feature/mission12b-intelligent-cadrage-byok` à `e8aa91a83ad0df9ea8d15bfa3323d28663e7cc66`. Elle est ouverte et en brouillon, non fusionnée ; #99 reste exclue. Aucun merge dans `main`.
+- Le code validé avant la mise à jour documentaire est `7609d4ab53c13f238993965dc4828752a9acd947`, descendant direct par six commits de la base. Le HEAD publié définitif est celui indiqué sur #104 et dans `HEAD.txt` de l'archive de livraison ; un SHA d'un document ne peut pas contenir sa propre valeur.
+- Les commits distants de cette tranche, dans l'ordre : `c70b5fa` compilation, `0438098` tests UUID et corpus, `f920bb4` interface, `0d01066` multi-tours et navigateur, `16b5d0d` mobile, `7609d4a` inventaire de schéma. La mise à jour de ce rapport vient ensuite.
+- Sur le code `7609d4a` : [CI #40100025540](https://github.com/Caratrac22/novalton-os/actions/runs/40100025540), [I-044A/B #40100025427](https://github.com/Caratrac22/novalton-os/actions/runs/40100025427) et [Chromium #40100025552](https://github.com/Caratrac22/novalton-os/actions/runs/40100025552) ont conclu `SUCCESS`. Les résultats du HEAD documentaire final doivent être contrôlés à nouveau sur la PR, sans attribuer les anciens résultats au nouveau SHA.
+- Vérification locale : Ruff et format Python, tête Alembic unique, TypeScript, ESLint, 25 tests web et build Next.js. PostgreSQL jetable et API complète ont tourné dans les pipelines. Aucun PostgreSQL local n'était disponible.
+
+## Chat, cahier des charges et modèles
+
+Le corpus de 11 scénarios contient les dix cas demandés et une injection de prompt. Le harnais accepte un adaptateur compatible OpenAI sur boucle locale, conserve les tours et imprime les sorties à noter selon la grille ci-dessus. Aucun véritable modèle local n'était accessible dans ce runtime : **modèles réels testés : aucun ; fournisseurs réels contactés : aucun ; résultats mesurés de qualité : aucun**. Les tests déterministes couvrent des contrats, pas la pertinence d'une IA. Les exemples de sorties, erreurs de format et scores humains attendront un modèle autorisé.
+
+Le cahier versionné et l'approbation humaine de 12B restent la source. Cette tranche ajoute la saisie de sujets confirmés d'exécution, l'objectif et les critères d'acceptation, puis refuse les données non confirmées, vagues ou contradictoires au point de compilation. Elle ne modifie pas le moteur de questions adaptatives, ne détecte pas les contradictions sémantiques générales, n'enrichit pas les plans au-delà du contrat fixe de développement et ne différencie pas encore les profils de modèles. Une nouvelle version du cahier invalide le plan pour la compilation et le préflight.
+
+## Raccordement, simulation et première exécution
+
+Le mapping et les services réutilisés figurent plus haut. La compilation est une ligne SQL à clé unique plan/tâche, sous verrou de conversation, avec statut, version, diagnostics et audit ; le tenant et le workspace proviennent de la conversation et la tâche est revalidée dans cette portée. Elle ne crée ni `WorkflowPlan` ni `WorkflowRun`. La proposition ne représente que le graphe fixe Manager → Developer → QA du contrat de développement I-028 ; capacités, définitions d'agents et fournisseur sont encore non attestés.
+
+| Étape | Statut | Preuve et limite |
+|---|---|---|
+| Proposition inspectable et préflight sans effet | PARTIAL | API et navigateur valident refus d'un plan générique ; une proposition complète et tous les contrôles requis pour lancer restent à accepter. |
+| Création de workflow liée au plan de cadrage | BLOCKED | Le service de création actuel crée aussi un run ; il n'est jamais appelé ici, faute de seconde autorisation et de préflight complet. |
+| Exécution déterministe isolée issue du cadrage | BLOCKED | Aucune exécution de ce chemin ; les pipelines I-044 valident leurs contrats existants séparément. |
+| Exécution de production | NON AUTORISÉE | Aucun déploiement, worker durable ou fournisseur payant. |
+
+Le rapport machine-readable `ready_for_simulation` est recalculé ; `ready_for_launch` vaut toujours `false`, avec motifs sur agents/modèle, activation/permissions, finance et autorisation humaine. L'environnement annoncé est `isolated_test_only`, sans capacité de provisionnement attestée. Les permissions nominales sont listées et non accordées. L'annulation et la reprise des effets incertains appartiennent au dispatch existant ; aucune liaison à son état n'est créée par cette tranche.
+
+## Sécurité, navigateur et accessibilité
+
+Les tests de compilation vérifient propriétaire, session, portée projet/tâche, idempotence, obsolescence et refus ; l'API continue de vérifier l'identité et les grants à chaque requête. Les tests existants de BYOK, sessions, révocation, dispatch, concurrence et I-044 tournent dans la suite complète et les pipelines I-044, sans constituer des preuves d'un chemin de lancement cadrage qui n'existe pas encore. Une tentative d'injection est incluse dans le corpus d'évaluation, mais la résistance d'un vrai modèle n'a pas été mesurée. La revue statique du coffre figure ci-dessus ; la politique financière explicite et son essai avec double de fournisseur restent TODO.
+
+Le workflow Chromium réel utilise Next, FastAPI, PostgreSQL `novalton_test` et Chrome headless sur runner jetable. Il couvre création, message, version du cahier, plan approuvé, refus de compilation d'un plan générique, bouton de lancement désactivé, rechargement, connexion/déconnexion, paramètres, modes clair/sombre et largeurs 1440/768/390/320 px. Huit captures sont gardées 14 jours par GitHub Actions ; elles ne prouvent pas l'accessibilité complète. Un débordement de 8 px à 320 px a été détecté puis corrigé. Navigation clavier, lecteurs d'écran, contrastes mesurés, deux identités, tenants multiples, UUID étranger, rôle lecteur, révocation en page ouverte, expiration/SSE et tentative de lancement serveur ne sont pas couverts par ce run.
+
+## Blocages et suite proposée
+
+| Blocage | Diagnostic et tentative | Résultat / action suivante |
+|---|---|---|
+| Pas de modèle local accessible | Harnais de 11 cas et adaptateur local préparés, sans téléchargement ni repli payant. | `REAL_MODEL_QUALITY_NOT_VERIFIED` ; exécuter et noter sur un modèle local autorisé. |
+| UUID JSON strict | Premier run PostgreSQL a révélé le refus Pydantic de l'UUID sérialisé ; champ d'entrée corrigé. | Tests ciblés et CI du code final verts. |
+| Débordement mobile | Chromium à 320 px a exposé un contrôle de préparation trop large ; CSS corrigé. | Run graphique du code final vert aux quatre largeurs. |
+| Inventaire de schéma | L'ajout de la table exigeait une mise à jour du test à ensemble exact ; inventaire corrigé. | CI et I-044 du code final verts. |
+| Autorité de dépense et lancement incomplets | Le coffre et le dispatch ne confèrent pas à eux seuls un consentement financier ni une seconde autorisation. | `BILLING_UNVERIFIED` ; garder le lancement désactivé, développer la politique révocable et le préflight transactionnel avant tout essai de raccordement. |
+
+Prochaine tranche proposée, sans l'engager : politique financière avec doubles de fournisseurs ; vérification des capacités et du modèle réels ; tests navigateur hostiles multi-identités ; planification plus structurée et questions adaptatives évaluées ; seconde autorisation humaine puis lancement déterministe dans un environnement entièrement jetable ; suivi et annulation par les API du moteur existant. Aucune activation de production n'est proposée.
