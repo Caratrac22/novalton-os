@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { ExecutionPreparation } from "@/components/execution-preparation";
 
 type Item = { topic: string; value: string; provenance: "USER" | "MODEL_PROPOSAL" | "INFERENCE"; state: "PROPOSED" | "CONFIRMED" | "CONFLICT" | "OPEN" };
 type Version = { version: number; source: string; document: { summary: string; items: Item[] }; created_at: string };
@@ -60,6 +61,8 @@ export function SpecificationEditor({ projectId, conversationId }: { projectId: 
         <label htmlFor="spec-summary">Résumé</label><textarea id="spec-summary" value={summary} maxLength={3000} rows={3} onChange={(event) => setSummary(event.target.value)} />
         <h3>Informations retenues</h3>
         {items.map((item, index) => <div key={index} className="workspace-form">
+          <label htmlFor={`spec-topic-${index}`}>Champ</label>
+          <input id={`spec-topic-${index}`} value={item.topic} maxLength={80} pattern="[a-z][a-z0-9_.-]*" onChange={(event) => setItems((old) => old.map((entry, position) => position === index ? { ...entry, topic: event.target.value, provenance: "USER" } : entry))} />
           <label htmlFor={`spec-value-${index}`}>{item.topic} · {item.provenance === "MODEL_PROPOSAL" ? "Proposition IA" : "Saisie humaine"}</label>
           <input id={`spec-value-${index}`} value={item.value} maxLength={2000} onChange={(event) => setItems((old) => old.map((entry, position) => position === index ? { ...entry, value: event.target.value, provenance: "USER" } : entry))} />
           <select aria-label={`État de ${item.topic}`} value={item.state} onChange={(event) => setItems((old) => old.map((entry, position) => position === index ? { ...entry, state: event.target.value as Item["state"], provenance: "USER" } : entry))}><option value="PROPOSED">À confirmer</option><option value="CONFIRMED">Confirmé</option><option value="CONFLICT">Contradiction</option><option value="OPEN">Question ouverte</option></select>
@@ -74,6 +77,7 @@ export function SpecificationEditor({ projectId, conversationId }: { projectId: 
         {plans[0].status === "DRAFT" && <button type="button" disabled={busy} onClick={() => void planAction("READY_FOR_REVIEW")}>Soumettre à la revue</button>}
         {plans[0].status === "READY_FOR_REVIEW" && <><button type="button" disabled={busy} onClick={() => void planAction("APPROVED")}>Approuver ce plan</button><button type="button" disabled={busy} onClick={() => void planAction("NEEDS_CHANGES")}>Demander des changements</button><button type="button" disabled={busy} onClick={() => void planAction("REJECTED")}>Rejeter</button></>}
         {plans[0].decided_at && <p>Décision enregistrée le {new Date(plans[0].decided_at).toLocaleString("fr-FR")}.</p>}
+        {plans[0].status === "APPROVED" && <ExecutionPreparation projectId={projectId} conversationId={conversationId} planId={plans[0].id} />}
       </> : <p>Aucun plan préparé pour ce cahier.</p>}
       {versions[0] && (!plans[0] || plans[0].source_version !== versions[0].version) && <button type="button" disabled={busy} onClick={() => void planAction("PREPARE")}>Préparer un brouillon depuis la version {versions[0].version}</button>}
     </section>
