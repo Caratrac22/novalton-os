@@ -7,10 +7,10 @@
 | 12C-F audit | P0 | Aucune | PASS | Matrice ci-dessous, code 12B lu | Vérifier à chaque évolution du moteur |
 | 12C-G compilation | P0 | F | PARTIAL | Proposition SQL, contrôle de portée, tests de refus | CI PostgreSQL, enrichir capacités vérifiées |
 | 12C-H préflight | P0 | G | PARTIAL | Résultat relu sous identité courante, lancement toujours bloqué | Contrôler agents, modèle, budget et activation dans la même transaction que le lancement |
-| 12C-I simulation | P1 | G/H | PARTIAL | Lecture des étapes fixes sans effet externe | Acceptation navigateur et sandbox jetable |
+| 12C-I simulation | P1 | G/H | PARTIAL | Interface de préparation et préflight en lecture, sans effet externe | Acceptation navigateur et sandbox jetable |
 | 12C-E finance | P0 | Coffre BYOK | TODO | `BILLING_UNVERIFIED`, aucune dépense autorisée | Conception d'une autorisation révocable avant tout appel facturable |
 | 12C-A/B qualité IA | P0/P1 | Modèle local | PARTIAL | Corpus local reproductible de 11 cas ; `REAL_MODEL_QUALITY_NOT_VERIFIED`, aucun modèle local dans ce runtime | Exécuter le corpus sur modèle local autorisé et noter les sorties |
-| 12C-J/K lancement et suivi | P1 | H + autorisation distincte | TODO | Aucune route de lancement depuis le cadrage | Développer après préflight complet et acceptation isolée |
+| 12C-J/K lancement et suivi | P1 | H + autorisation distincte | PARTIAL | Bouton de lancement distinct et désactivé, aucune route de lancement depuis le cadrage | Développer après préflight complet et acceptation isolée |
 | 12C-L/M/N/O | P0/P2 | CI navigateur, coffre | TODO | Scénarios hostiles et audit complets non exécutés | Parcours multi-identités et validation transverse |
 
 ## Matrice plan → moteur réel
@@ -36,6 +36,7 @@ elle devra enregistrer le lien vers le run et protéger les doubles requêtes.
 
 - `POST .../plans/{plan_id}/compilations` avec `task_id` explicite. Nécessite la session humaine et `workspace.write`, le propriétaire, le plan approuvé non obsolète et la portée de la tâche. Résultat `BLOCKED` avec diagnostics si les informations confirmées ne suffisent pas, `PROPOSED` pour le seul graphe fixe I-028.
 - `GET .../compilations/{id}/preflight` relit l'accès humain, la version, les états du projet et de la tâche. Il retourne la proposition et un rapport de simulation. `ready_for_launch` est **toujours faux** ; ce n'est pas une autorisation de lancer.
+- Le navigateur choisit une tâche existante du projet, prépare la proposition et affiche le préflight et ses diagnostics. Le bouton de lancement reste désactivé avec le motif. L'éditeur permet de saisir les champs confirmés `execution.kind`, `objective` et `acceptance.*`.
 - Aucun modèle distant, clé BYOK, agent, outil, worker, coût ni effet externe n'est déclenché.
 
 La proposition conserve les capacités nominales du graphe existant, sans
