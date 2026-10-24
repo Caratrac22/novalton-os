@@ -8,6 +8,18 @@ type Proposal = { id: string; status: string; document: {
 } };
 type Preflight = { ready_for_simulation: boolean; ready_for_launch: boolean; diagnostics: string[]; external_effects: boolean };
 
+const diagnosticLabels: Record<string, string> = {
+  plan_obsolete_or_not_approved: "Le plan a changé ou son approbation n’est plus valable.",
+  project_or_task_unavailable: "Le projet ou la tâche n’est plus disponible.",
+  task_not_runnable: "Cette tâche est terminée ou annulée.",
+  trusted_agents_unavailable: "Les définitions approuvées des agents ne sont pas disponibles.",
+  dispatch_inactive: "Le dispatch est désactivé pour cet espace de travail.",
+  operator_permissions_missing: "Les autorisations nécessaires manquent à votre compte.",
+  model_and_environment_unverified: "Le modèle et l’environnement de test doivent être vérifiés.",
+  financial_authorization_unverified: "La politique financière applicable n’est pas vérifiée.",
+  separate_human_launch_authorization_missing: "Une décision humaine distincte de lancement est requise.",
+};
+
 export function ExecutionPreparation({ projectId, conversationId, planId }: {
   projectId: string; conversationId: string; planId: string;
 }) {
@@ -68,7 +80,7 @@ export function ExecutionPreparation({ projectId, conversationId, planId }: {
     </div>}
     {preflight && <div role="status">
       <p>Simulation sans effet externe : {preflight.ready_for_simulation ? "proposition lisible" : "bloquée"}.</p>
-      <ul>{preflight.diagnostics.map((item) => <li key={item}>{item}</li>)}</ul>
+      <ul>{preflight.diagnostics.map((item) => <li key={item}>{diagnosticLabels[item] ?? item}</li>)}</ul>
     </div>}
     <button type="button" disabled aria-describedby="launch-unavailable">Autoriser le lancement</button>
     <p id="launch-unavailable">Lancement indisponible : autorisation humaine distincte, capacités, fournisseur et budget non vérifiés.</p>

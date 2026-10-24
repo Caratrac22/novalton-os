@@ -74,6 +74,7 @@ async def reserve(
         or estimated_exposure is None
         or not estimated_exposure.is_finite()
         or estimated_exposure <= 0
+        or estimated_exposure.as_tuple().exponent < -10
     ):
         raise denied()
     await operator.require_human(
@@ -134,7 +135,7 @@ async def reserve(
             actor_type="local_user",
             actor_id=str(operator.user_id),
             outcome="success",
-            metadata={"authorization_id": str(row.id), "reservation_id": str(reservation.id)},
+            metadata={"financial_policy_id": str(row.id), "reservation_id": str(reservation.id)},
         ),
         commit=False,
     )

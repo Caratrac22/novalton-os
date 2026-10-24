@@ -148,7 +148,7 @@ async def authorize(
             actor_type="local_user",
             actor_id=str(owner.user_id),
             outcome="success",
-            metadata={"authorization_id": str(row.id), "version": 1},
+            metadata={"financial_policy_id": str(row.id), "version": 1},
         ),
         commit=False,
     )
@@ -230,7 +230,7 @@ async def revoke(
                 actor_type="local_user",
                 actor_id=str(owner.user_id),
                 outcome="success",
-                metadata={"authorization_id": str(row.id), "version": row.version},
+                metadata={"financial_policy_id": str(row.id), "version": row.version},
             ),
             commit=False,
         )

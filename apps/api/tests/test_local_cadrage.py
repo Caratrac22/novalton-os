@@ -426,6 +426,56 @@ def test_financial_authorization_requires_explicit_reauth_and_is_revocable(initi
                 await attempt(session, request_id=uuid4(), model="foreign-model")
 
         db_call(wrong_model)
+
+        async def denied_boundaries(session):
+            operator = await authenticate_session(
+                session, token=token, tenant_id=scope.tenant, workspace_id=scope.workspace
+            )
+            for authorization_id, project_id, tokens, estimate in (
+                (uuid4(), UUID(project["id"]), 1, Decimal("0.001")),
+                (UUID(grant["id"]), uuid4(), 1, Decimal("0.001")),
+                (UUID(grant["id"]), UUID(project["id"]), 101, Decimal("0.001")),
+                (UUID(grant["id"]), UUID(project["id"]), 1, Decimal("0.02")),
+                (UUID(grant["id"]), UUID(project["id"]), 1, Decimal("0.00000000001")),
+            ):
+                with pytest.raises(ApplicationError):
+                    await reserve_financial(
+                        session,
+                        operator=operator,
+                        authorization_id=authorization_id,
+                        tenant_id=scope.tenant,
+                        workspace_id=scope.workspace,
+                        project_id=project_id,
+                        provider_id="openrouter",
+                        model_id="test-model",
+                        request_id=uuid4(),
+                        tokens=tokens,
+                        estimated_exposure=estimate,
+                    )
+
+        db_call(denied_boundaries)
+
+        async def set_grant(session, active):
+            await session.execute(
+                update(WorkspaceOperatorPermission)
+                .where(
+                    WorkspaceOperatorPermission.user_id == scope.owner,
+                    WorkspaceOperatorPermission.tenant_id == scope.tenant,
+                    WorkspaceOperatorPermission.workspace_id == scope.workspace,
+                    WorkspaceOperatorPermission.permission == "workspace.write",
+                )
+                .values(active=active, revoked_at=None if active else datetime.now(UTC))
+            )
+            await session.commit()
+
+        db_call(lambda session: set_grant(session, False))
+
+        async def revoked_grant(session):
+            with pytest.raises(ApplicationError):
+                await attempt(session, request_id=uuid4())
+
+        db_call(revoked_grant)
+        db_call(lambda session: set_grant(session, True))
         one = uuid4()
         first = db_call(lambda session: attempt(session, request_id=one))
         assert first == db_call(lambda session: attempt(session, request_id=one))
