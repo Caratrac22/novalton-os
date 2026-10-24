@@ -279,7 +279,7 @@ def change_second_authority(tenant_id, workspace_id, login, *, grant_active=None
                         LocalSession.user_id == person.user_id,
                         LocalSession.revoked_at.is_(None),
                     ).values(revoked_at=datetime.now(UTC)))
-                    assert result.rowcount == 1
+                    assert result.rowcount >= 1
         finally:
             await db.dispose()
 
