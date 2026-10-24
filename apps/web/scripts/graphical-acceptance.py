@@ -294,8 +294,10 @@ def run(browser, origin):
                 f"{origin}/projects/{project}/chat?conversation={conversation}"
             )
             browser.wait(
-                "return document.body.innerText.includes('Cahier des charges')",
-                "responsive chat",
+                "return document.body.innerText.includes('état : APPROVED') && "
+                "document.body.innerText.includes('Je veux créer un site pour mon entreprise.') && "
+                "!document.body.innerText.includes('Chargement des conversations')",
+                "persisted responsive chat and plan",
             )
             metrics = browser.script(
                 "return {width: innerWidth, page: document.documentElement.scrollWidth, "
@@ -312,12 +314,25 @@ def run(browser, origin):
             assert metrics["theme"] == ("light" if theme == "Clair" else "dark"), (
                 metrics
             )
+            if width <= 680:
+                navigation_height = browser.script(
+                    "return Math.round(document.querySelector('.primary-nav')"
+                    ".getBoundingClientRect().height)"
+                )
+                assert navigation_height <= 80, {"width": width, "nav": navigation_height}
             browser.screenshot(f"chat-{theme.lower()}-{width}.png")
             browser.navigate(origin + "/settings")
             browser.wait(
                 "return document.body.innerText.includes('Clés personnelles')",
                 "return to settings",
             )
+    browser.click_text("Se déconnecter")
+    browser.wait("return location.pathname === '/login'", "local logout")
+    browser.navigate(origin + "/projects")
+    browser.wait(
+        "return document.body.innerText.includes('Connexion requise')",
+        "session denied after logout",
+    )
     print(
         json.dumps(
             {
