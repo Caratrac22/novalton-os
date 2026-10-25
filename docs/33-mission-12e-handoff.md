@@ -17,7 +17,7 @@ commit ; un document versionné ne peut indiquer son propre SHA.
 | E exécution jetable complète | P0 | BLOCKED | Aucun parcours cadrage → Manager → Developer → QA qualifié. |
 | F chemins facturables | P0 | PARTIAL | Fournisseur distant désactivé dans le registre standard ; injection explicite non qualifiée pour la dépense. Cartographie à poursuivre. |
 | G BYOK/restauration | P1 | TODO | Rotation, sauvegarde et restauration non validées pour cette mission. |
-| H interface | P1 | BLOCKED | Lancement désactivé tant que B–E restent bloqués. |
+| H interface | P1 | PARTIAL | Formulaire distinct de décision locale et révocation, protégé par Origin sur le proxy cookie Next ; lancement désactivé et aucune progression fictive. Tests web/Chromium de la branche à relever. |
 | I Chromium hostile | P0 | TODO | Scénarios 12D historiques ; nouvelle gate de branche à relever. |
 | J qualité du chat | P1 | BLOCKED | Modèle local indisponible dans ce runtime ; `REAL_MODEL_QUALITY_NOT_VERIFIED`. |
 
@@ -59,6 +59,14 @@ sont atomiques. Le fournisseur est limité par schéma et contrainte SQL à
 
 Il s'agit d'une autorisation préparatoire : le lancement reste absent et la
 validité doit être recontrôlée dans la transaction qui créera le workflow.
+Le proxy Next refuse les mutations sans Origin HTTPS exact et ne transmet que
+les champs nécessaires au backend ; le mot de passe n'est pas conservé après
+la réponse. L'API directe exige un bearer local explicite, sans cookie ambiant.
+
+La première CI avec la nouvelle route a échoué dans un test de refus : il
+attendait l'erreur de tâche `BACKLOG` avant d'ajouter les grants dispatch,
+alors que le serveur refuse correctement l'absence de grant en premier. Le
+scénario a été réordonné pour tester les deux frontières séparément.
 
 ## États d'exécution
 

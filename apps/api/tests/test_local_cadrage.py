@@ -776,15 +776,6 @@ def test_separate_launch_decision_is_scoped_revocable_and_never_creates_run(init
             "current_password": password,
         }
         assert client.post(url, json=request).status_code == 401
-        assert client.post(url, headers=auth, json=request).status_code == 409  # BACKLOG
-
-        async def ready(session):
-            await session.execute(
-                update(Task).where(Task.id == UUID(task["id"])).values(status="READY")
-            )
-            await session.commit()
-
-        db_call(ready)
         assert client.post(url, headers=auth, json=request).status_code == 403
 
         async def grant(session):
@@ -801,6 +792,15 @@ def test_separate_launch_decision_is_scoped_revocable_and_never_creates_run(init
             await session.commit()
 
         db_call(grant)
+        assert client.post(url, headers=auth, json=request).status_code == 409  # BACKLOG
+
+        async def ready(session):
+            await session.execute(
+                update(Task).where(Task.id == UUID(task["id"])).values(status="READY")
+            )
+            await session.commit()
+
+        db_call(ready)
         assert client.post(
             url, headers=auth, json=request | {"current_password": "wrong"}
         ).status_code in {401, 403}
