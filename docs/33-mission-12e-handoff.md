@@ -11,7 +11,7 @@ commit ; un document versionné ne peut indiquer son propre SHA.
 | Tâche | Priorité | État | Preuve / blocage / prochaine action |
 |---|---|---|---|
 | A transaction du workflow | P0 | IN_PROGRESS | Plan, run, audit et handoff dans une transaction unique pour le graphe fixe ; tests de rollback injecté et de transaction contrôlée par l'appelant. PostgreSQL CI à vérifier. |
-| B seconde autorisation humaine | P0 | TODO | Dépend des contrats de session et d'une empreinte stable ; aucun consentement implicite. |
+| B seconde autorisation humaine | P0 | IN_PROGRESS | Décision persistante, révocable, liée au plan/compilation/document/versions, à l'environnement jetable, au modèle local, aux grants et aux limites ; reauth et test PostgreSQL ajoutés, CI à relever. Aucun run créé par cette décision. |
 | C revalidation de lancement | P0 | BLOCKED | Dépend de B et de la preuve de transaction. Préflight de lecture seulement. |
 | D liaison cadrage/workflow | P0 | BLOCKED | Aucun run depuis une compilation tant que B/C ne sont pas démontrés. |
 | E exécution jetable complète | P0 | BLOCKED | Aucun parcours cadrage → Manager → Developer → QA qualifié. |
@@ -36,6 +36,29 @@ contrôlent leur absence après rollback ; un second test crée le graphe comple
 sous transaction de l'appelant, puis annule et vérifie l'absence des quatre
 entités (plan, run, handoff, audit). Le résultat PostgreSQL de ces tests doit
 être relevé sur la CI de la branche avant PASS.
+
+La première CI du refactoring a révélé des réponses HTTP 500 dans les routes
+historiques de création : les valeurs nullable/default chargées depuis la base
+manquaient à la sérialisation après le changement de frontière transactionnelle.
+Le plan et le run sont rechargés avant de revenir au caller ; la nouvelle CI
+doit confirmer la correction sans masquer les erreurs.
+
+## Seconde décision humaine
+
+Un endpoint dédié crée une décision pour un plan approuvé et une compilation
+`PROPOSED` dont le document est recalculé depuis le plan, lorsque la spécification
+reste actuelle, le projet est actif et la tâche exécutable. L'utilisateur local
+doit posséder les trois grants exacts, présenter une session récente et son mot
+de passe, envoyer une confirmation littérale et une clé UUID de requête.
+L'empreinte SHA-256 canonique lie le plan, la compilation, la tâche, les
+versions, les limites, les permissions, l'environnement jetable et le modèle
+local. La clé idempotente est unique par propriétaire et refuse un contenu
+différent. L'expiration est bornée à dix minutes ; la révocation et son audit
+sont atomiques. Le fournisseur est limité par schéma et contrainte SQL à
+`local` ; aucune permission de dépense n'est déduite d'une clé BYOK.
+
+Il s'agit d'une autorisation préparatoire : le lancement reste absent et la
+validité doit être recontrôlée dans la transaction qui créera le workflow.
 
 ## États d'exécution
 

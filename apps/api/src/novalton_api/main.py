@@ -30,6 +30,7 @@ from novalton_api.modules.durable_dispatch.saas_access import require_saas_acces
 from novalton_api.modules.financial.routes import router as financial_router
 from novalton_api.modules.git_changesets.routes import router as git_changesets_router
 from novalton_api.modules.github_publications.routes import router as github_publications_router
+from novalton_api.modules.launch.routes import router as launch_router
 from novalton_api.modules.local_auth.routes import router as local_auth_router
 from novalton_api.modules.local_auth.routes import scoped_router as local_account_router
 from novalton_api.modules.memories.routes import router as memories_router
@@ -128,6 +129,7 @@ def create_app(
     application.include_router(cadrage_router, **scoped)
     application.include_router(provider_keys_router, **scoped)
     application.include_router(financial_router, **scoped)
+    application.include_router(launch_router, **scoped)
     application.include_router(local_account_router, **scoped)
     application.include_router(tasks_router, **scoped)
     application.include_router(runtime_events_router, **scoped)

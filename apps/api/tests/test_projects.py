@@ -150,6 +150,7 @@ def test_project_metadata_has_workspace_scope_and_constraints() -> None:
         "cadrage_plans",
         "cadrage_compilations",
         "financial_authorizations",
+        "launch_authorizations",
         "financial_reservations",
     }
     table = Base.metadata.tables["projects"]

@@ -42,6 +42,7 @@ from novalton_api.modules.durable_dispatch.identity import (
 from novalton_api.modules.durable_dispatch.sessions import authenticate_session
 from novalton_api.modules.financial.models import FinancialAuthorization, FinancialReservation
 from novalton_api.modules.financial.service import reserve as reserve_financial
+from novalton_api.modules.launch.models import LaunchAuthorization
 from novalton_api.modules.local_auth.bootstrap import (
     BootstrapDenied,
     bootstrap_owner,
@@ -52,7 +53,9 @@ from novalton_api.modules.local_auth.service import hash_password
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.provider_keys.models import ProviderKey
 from novalton_api.modules.runtime_events.models import RuntimeEvent
+from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tenants.models import Tenant
+from novalton_api.modules.workflows.models import WorkflowRun
 from novalton_api.modules.workspaces.models import Workspace
 
 
@@ -90,6 +93,9 @@ def settings_for_new_scope() -> tuple[Settings, str]:
 
 async def wipe(session, scope: Scope) -> None:
     await session.execute(delete(RuntimeEvent).where(RuntimeEvent.tenant_id == scope.tenant))
+    await session.execute(
+        delete(LaunchAuthorization).where(LaunchAuthorization.tenant_id == scope.tenant)
+    )
     await session.execute(
         delete(FinancialReservation).where(
             FinancialReservation.authorization_id.in_(
@@ -710,6 +716,133 @@ def test_approved_plan_compilation_is_idempotent_scoped_and_revoked(initialized)
         assert check["ready_for_simulation"] is False
         assert "plan_obsolete_or_not_approved" in check["diagnostics"]
         assert client.get(check_url, headers={"Authorization": "Bearer invalid"}).status_code == 401
+
+
+def test_separate_launch_decision_is_scoped_revocable_and_never_creates_run(initialized):
+    scope, password, _ = initialized
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+        ).json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        project = client.post(
+            path(scope) + "/projects",
+            headers=auth,
+            json={"name": "Launch test", "slug": "launch-test", "description": None},
+        ).json()
+        task = client.post(
+            path(scope) + f"/projects/{project['id']}/tasks",
+            headers=auth,
+            json={"title": "Borne jetable"},
+        ).json()
+        base = path(scope) + f"/projects/{project['id']}/conversations"
+        conversation = client.post(base, headers=auth, json={"title": "Décision"}).json()["id"]
+        specs = base + f"/{conversation}/specifications"
+        document = {
+            "expected_version": 0,
+            "summary": "Un formulaire jetable",
+            "items": [
+                {"topic": key, "value": value, "provenance": "USER", "state": "CONFIRMED"}
+                for key, value in (
+                    ("objective", "Créer un formulaire"),
+                    ("execution.kind", "development"),
+                    ("acceptance.1", "Les champs sont vérifiés"),
+                )
+            ],
+        }
+        assert client.put(specs, headers=auth, json=document).status_code == 200
+        plan_url = base + f"/{conversation}/plans"
+        plan = client.post(
+            plan_url, headers=auth, json={"expected_specification_version": 1}
+        ).json()
+        decision = plan_url + f"/{plan['id']}/decision"
+        assert (
+            client.post(decision, headers=auth, json={"decision": "READY_FOR_REVIEW"}).status_code
+            == 200
+        )
+        assert client.post(decision, headers=auth, json={"decision": "APPROVED"}).status_code == 200
+        compilation = client.post(
+            plan_url + f"/{plan['id']}/compilations", headers=auth, json={"task_id": task["id"]}
+        ).json()
+        url = plan_url + f"/{plan['id']}/compilations/{compilation['id']}/launch-authorizations"
+        request = {
+            "confirmation": "AUTHORIZE_DISPOSABLE_TEST_LAUNCH",
+            "request_id": str(uuid4()),
+            "environment": "DISPOSABLE_TEST",
+            "provider_id": "local",
+            "model_id": "local-test",
+            "max_model_calls": 3,
+            "max_duration_seconds": 180,
+            "current_password": password,
+        }
+        assert client.post(url, json=request).status_code == 401
+        assert client.post(url, headers=auth, json=request).status_code == 409  # BACKLOG
+
+        async def ready(session):
+            await session.execute(
+                update(Task).where(Task.id == UUID(task["id"])).values(status="READY")
+            )
+            await session.commit()
+
+        db_call(ready)
+        assert client.post(url, headers=auth, json=request).status_code == 403
+
+        async def grant(session):
+            for permission in ("activation.configure", "dispatch.enqueue"):
+                session.add(
+                    WorkspaceOperatorPermission(
+                        user_id=scope.owner,
+                        tenant_id=scope.tenant,
+                        workspace_id=scope.workspace,
+                        permission=permission,
+                        active=True,
+                    )
+                )
+            await session.commit()
+
+        db_call(grant)
+        assert client.post(
+            url, headers=auth, json=request | {"current_password": "wrong"}
+        ).status_code in {401, 403}
+        assert (
+            client.post(url, headers=auth, json=request | {"confirmation": "YES"}).status_code
+            == 422
+        )
+        created = client.post(url, headers=auth, json=request)
+        assert created.status_code == 201, created.text
+        assert created.json()["workflow_created"] is False
+        assert created.json()["financial_authorization_id"] is None
+        assert client.post(url, headers=auth, json=request).json()["id"] == created.json()["id"]
+        assert (
+            client.post(url, headers=auth, json=request | {"model_id": "changed"}).status_code
+            == 409
+        )
+        assert client.get(url, headers=auth).json()["items"][0]["id"] == created.json()["id"]
+        assert (
+            client.get(url.replace(str(compilation["id"]), str(uuid4())), headers=auth).status_code
+            == 404
+        )
+
+        async def no_run(session):
+            return await session.scalar(
+                select(WorkflowRun.id).where(WorkflowRun.tenant_id == scope.tenant)
+            )
+
+        assert db_call(no_run) is None
+        revoked = client.post(
+            url + f"/{created.json()['id']}/revoke",
+            headers=auth,
+            json={"current_password": password},
+        )
+        assert revoked.status_code == 200 and revoked.json()["version"] == 2
+        assert client.post(url, headers=auth, json=request).status_code == 409
+        document["expected_version"] = 1
+        document["summary"] = "Cahier mis à jour"
+        assert client.put(specs, headers=auth, json=document).status_code == 200
+        assert (
+            client.post(url, headers=auth, json=request | {"request_id": str(uuid4())}).status_code
+            == 409
+        )
 
 
 def test_personal_provider_key_is_encrypted_isolated_and_revocable(initialized, monkeypatch):

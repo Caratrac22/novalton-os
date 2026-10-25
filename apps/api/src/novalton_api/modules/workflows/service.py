@@ -546,6 +546,10 @@ async def create_development_workflow(
         )
         if commit:
             await session.commit()
+        # The historical HTTP response requires DB-populated nullable/default
+        # columns even when the caller owns the transaction.
+        await session.refresh(plan)
+        await session.refresh(run)
     except IntegrityError:
         await session.rollback()
         raise ApplicationError(
