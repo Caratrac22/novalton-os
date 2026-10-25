@@ -10,14 +10,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.exceptions import ApplicationError
+from novalton_api.modules.agents import repository as agent_repository
 from novalton_api.modules.audit.schemas import AuditRecordCreate
 from novalton_api.modules.audit.service import append_record
 from novalton_api.modules.cadrage.models import CadrageCompilation, CadrageConversation, CadragePlan
 from novalton_api.modules.cadrage.service import current_specification
+from novalton_api.modules.developer_manager import service as manager_service
+from novalton_api.modules.developer_worker import service as developer_service
+from novalton_api.modules.durable_dispatch.identity import WorkspaceOperatorPermission
+from novalton_api.modules.durable_dispatch.models import DispatchActivation
+from novalton_api.modules.durable_dispatch.operator import OperatorAuthority
 from novalton_api.modules.projects.models import Project
+from novalton_api.modules.qa_worker import service as qa_service
 from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.workflows.repository import get_task_scope
 from novalton_api.modules.workflows.schemas import DevelopmentWorkflowCreate
+from novalton_api.modules.workflows.service import _trusted_definition
 
 
 def compile_document(document: dict) -> tuple[str, dict]:
@@ -144,6 +152,7 @@ async def preflight(
     conversation: CadrageConversation,
     plan: CadragePlan,
     compilation: CadrageCompilation,
+    operator: OperatorAuthority,
 ) -> dict:
     """Recompute revocable conditions at read time; no result grants launch authority."""
     spec = await current_specification(session, conversation)
@@ -159,15 +168,105 @@ async def preflight(
         or project.status != "ACTIVE"
     ):
         diagnostics.append("project_or_task_unavailable")
-    if task is not None and task.status in {"DONE", "CANCELLED"}:
+    proposal_diagnostics = list(diagnostics)
+    if task is not None and task.status not in {"READY", "IN_PROGRESS"}:
         diagnostics.append("task_not_runnable")
+    definitions = (
+        (
+            await agent_repository.latest_definition(
+                session,
+                tenant_id=conversation.tenant_id,
+                workspace_id=conversation.workspace_id,
+                slug=manager_service.DEVELOPER_MANAGER_SLUG,
+                exclude_archived=True,
+            ),
+            manager_service.DEVELOPER_MANAGER_NAME,
+            1,
+            manager_service.DEVELOPER_MANAGER_CATEGORY,
+            manager_service.DEVELOPER_MANAGER_MISSION,
+            manager_service.DEVELOPER_MANAGER_CAPABILITIES,
+            [],
+        ),
+        (
+            await agent_repository.latest_definition(
+                session,
+                tenant_id=conversation.tenant_id,
+                workspace_id=conversation.workspace_id,
+                slug=developer_service.DEVELOPER_WORKER_SLUG,
+                exclude_archived=True,
+            ),
+            developer_service.DEVELOPER_WORKER_NAME,
+            developer_service.DEVELOPER_WORKER_VERSION,
+            developer_service.DEVELOPER_WORKER_CATEGORY,
+            developer_service.DEVELOPER_WORKER_MISSION,
+            developer_service.DEVELOPER_WORKER_CAPABILITIES,
+            developer_service.DEVELOPER_WORKER_PERMISSIONS,
+        ),
+        (
+            await agent_repository.latest_definition(
+                session,
+                tenant_id=conversation.tenant_id,
+                workspace_id=conversation.workspace_id,
+                slug=qa_service.QA_WORKER_SLUG,
+                exclude_archived=True,
+            ),
+            qa_service.QA_WORKER_NAME,
+            1,
+            qa_service.QA_WORKER_CATEGORY,
+            qa_service.QA_WORKER_MISSION,
+            qa_service.QA_WORKER_CAPABILITIES,
+            [],
+        ),
+    )
+    agents_available = all(
+        _trusted_definition(
+            item,
+            name=name,
+            version=version,
+            category=category,
+            mission=mission,
+            capabilities=capabilities,
+            permissions=permissions,
+        )
+        and getattr(item, "status", None) == "ENABLED"
+        for item, name, version, category, mission, capabilities, permissions in definitions
+    )
+    if not agents_available:
+        diagnostics.append("trusted_agents_unavailable")
+    activation = await session.scalar(
+        select(DispatchActivation).where(
+            DispatchActivation.tenant_id == conversation.tenant_id,
+            DispatchActivation.workspace_id == conversation.workspace_id,
+        )
+    )
+    if activation is None or not activation.enabled:
+        diagnostics.append("dispatch_inactive")
+    permissions = (
+        await session.scalars(
+            select(WorkspaceOperatorPermission.permission).where(
+                WorkspaceOperatorPermission.user_id == operator.user_id,
+                WorkspaceOperatorPermission.tenant_id == conversation.tenant_id,
+                WorkspaceOperatorPermission.workspace_id == conversation.workspace_id,
+                WorkspaceOperatorPermission.active.is_(True),
+            )
+        )
+    ).all()
+    required = {"workspace.write", "activation.configure", "dispatch.enqueue"}
+    if not required.issubset(permissions):
+        diagnostics.append("operator_permissions_missing")
     return {
-        "ready_for_simulation": compilation.status == "PROPOSED" and not diagnostics,
+        "ready_for_simulation": compilation.status == "PROPOSED" and not proposal_diagnostics,
+        "checked_capabilities": {
+            "trusted_agents_available": agents_available,
+            "dispatch_enabled": bool(activation and activation.enabled),
+            "dispatch_generation": activation.generation if activation else None,
+            "operator_permissions_available": required.issubset(permissions),
+        },
         "ready_for_launch": False,
+        "ready_for_test_launch": False,
         "diagnostics": diagnostics
         + [
-            "trusted_agents_and_model_unverified",
-            "dispatch_activation_and_permissions_unverified",
+            "model_and_environment_unverified",
             "financial_authorization_unverified",
             "separate_human_launch_authorization_missing",
         ],

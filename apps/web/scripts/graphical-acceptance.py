@@ -5,9 +5,11 @@ Only synthetic credentials and project data are created. No agent is launched.
 """
 
 import base64
+import asyncio
 import http.client
 import json
 import os
+import secrets
 import ssl
 import subprocess
 import sys
@@ -20,6 +22,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from socket import socket
+from uuid import UUID, uuid4
 
 ROOT = Path(__file__).resolve().parents[3]
 ARTIFACTS = (
@@ -191,7 +194,99 @@ def proxy_handler(next_port):
     return Proxy
 
 
-def run(browser, origin):
+def provision_second_identity():
+    """A separate tenant and local human on the disposable test database only."""
+    from datetime import UTC, datetime
+
+    from novalton_api.core.config import get_settings
+    from novalton_api.core.database import Database, verify_database_identity
+    from novalton_api.modules.durable_dispatch.identity import (
+        HumanOperator, TenantOperatorMembership, WorkspaceOperatorPermission,
+    )
+    from novalton_api.modules.local_auth.models import LocalCredential
+    from novalton_api.modules.local_auth.service import hash_password
+    from novalton_api.modules.tenants.models import Tenant
+    from novalton_api.modules.workspaces.models import Workspace
+
+    settings = get_settings()
+    assert settings.environment == "test"
+    login = "graphical-other"
+    password = secrets.token_urlsafe(32)
+
+    async def create():
+        await verify_database_identity(settings)
+        db = Database.from_settings(settings)
+        try:
+            async with db.session_factory.begin() as session:
+                tenant = Tenant(id=uuid4(), name="Other test tenant", slug="graphical-other")
+                session.add(tenant)
+                await session.flush()
+                workspace = Workspace(id=uuid4(), tenant_id=tenant.id,
+                                      name="Other test workspace", slug="graphical-other")
+                person = HumanOperator(label=login, active=True)
+                session.add_all([workspace, person])
+                await session.flush()
+                session.add_all([
+                    LocalCredential(user_id=person.id, login=login,
+                                    password_hash=hash_password(password), changed_at=datetime.now(UTC)),
+                    TenantOperatorMembership(user_id=person.id, tenant_id=tenant.id,
+                                             role="OWNER", active=True),
+                ])
+                for permission in ("workspace.read", "workspace.write"):
+                    session.add(WorkspaceOperatorPermission(
+                        user_id=person.id, tenant_id=tenant.id,
+                        workspace_id=workspace.id, permission=permission, active=True,
+                    ))
+                return str(tenant.id), str(workspace.id)
+        finally:
+            await db.dispose()
+
+    return (*asyncio.run(create()), login, password)
+
+
+def change_second_authority(tenant_id, workspace_id, login, *, grant_active=None, revoke=False):
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select, update
+
+    from novalton_api.core.config import get_settings
+    from novalton_api.core.database import Database, verify_database_identity
+    from novalton_api.modules.durable_dispatch.identity import WorkspaceOperatorPermission
+    from novalton_api.modules.local_auth.models import LocalCredential, LocalSession
+
+    async def change():
+        settings = get_settings()
+        assert settings.environment == "test"
+        await verify_database_identity(settings)
+        db = Database.from_settings(settings)
+        try:
+            async with db.session_factory.begin() as session:
+                person = await session.scalar(select(LocalCredential).where(
+                    LocalCredential.login == login
+                ))
+                assert person is not None
+                if grant_active is not None:
+                    result = await session.execute(update(WorkspaceOperatorPermission).where(
+                        WorkspaceOperatorPermission.user_id == person.user_id,
+                        WorkspaceOperatorPermission.tenant_id == UUID(tenant_id),
+                        WorkspaceOperatorPermission.workspace_id == UUID(workspace_id),
+                        WorkspaceOperatorPermission.permission == "workspace.read",
+                    ).values(active=grant_active,
+                             revoked_at=None if grant_active else datetime.now(UTC)))
+                    assert result.rowcount == 1
+                if revoke:
+                    result = await session.execute(update(LocalSession).where(
+                        LocalSession.user_id == person.user_id,
+                        LocalSession.revoked_at.is_(None),
+                    ).values(revoked_at=datetime.now(UTC)))
+                    assert result.rowcount >= 1
+        finally:
+            await db.dispose()
+
+    asyncio.run(change())
+
+
+def run(browser, origin, second):
     browser.navigate(origin + "/projects")
     browser.wait(
         "return document.body.innerText.includes('Connexion requise')",
@@ -356,11 +451,93 @@ def run(browser, origin):
         "return document.body.innerText.includes('Connexion requise')",
         "session denied after logout",
     )
+    tenant2, workspace2, login2, password2 = second
+    browser.navigate(origin + "/login")
+    browser.type("input[name=login]", login2)
+    browser.type("input[name=password]", password2)
+    browser.click("form.workspace-form button")
+    browser.wait(
+        "return location.pathname === '/projects' && "
+        "document.body.innerText.includes('Aucun projet')",
+        "other tenant empty project list",
+    )
+    browser.navigate(f"{origin}/projects/{project}/chat?conversation={conversation}")
+    browser.wait(
+        "return document.body.innerText.includes('Ressource introuvable ou inaccessible.')",
+        "foreign project denied in browser",
+    )
+    assert not browser.script(
+        "return document.body.innerText.includes('Je veux créer un site pour mon entreprise.')"
+    ), "foreign conversation was displayed"
+    # Independent backend boundary: the second identity must not read or mutate
+    # the first tenant's plan, compilation or financial policy via direct API.
+    request = urllib.request.Request(
+        "http://127.0.0.1:8000/api/v1/local-auth/login",
+        data=json.dumps({"login": login2, "password": password2}).encode(),
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        token2 = json.load(response)["token"]
+    for method, suffix, body in (
+        ("GET", f"projects/{project}", None),
+        ("GET", f"projects/{project}/conversations/{conversation}/plans", None),
+        ("GET", f"projects/{project}/financial-authorizations", None),
+        ("POST", f"projects/{project}/conversations", {"title": "foreign mutation"}),
+    ):
+        url = (f"http://127.0.0.1:8000/api/v1/tenants/{tenant2}/workspaces/{workspace2}/"
+               + suffix)
+        req = urllib.request.Request(
+            url, method=method,
+            data=json.dumps(body).encode() if body is not None else None,
+            headers={"Authorization": f"Bearer {token2}", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                raise AssertionError(f"Foreign resource allowed: {method} {response.status}")
+        except urllib.error.HTTPError as error:
+            assert error.code in (403, 404), (method, error.code)
+    primary_tenant = os.environ.get("NOVALTON_TENANT_ID", "89cfc055-366e-5bcb-b65f-4f367185bf6d")
+    primary_workspace = os.environ.get("NOVALTON_WORKSPACE_ID", "b640b64f-8e55-53e8-a5b2-3beff9d5af82")
+    foreign_vault = urllib.request.Request(
+        f"http://127.0.0.1:8000/api/v1/tenants/{primary_tenant}/"
+        f"workspaces/{primary_workspace}/provider-keys",
+        headers={"Authorization": f"Bearer {token2}"},
+    )
+    try:
+        with urllib.request.urlopen(foreign_vault, timeout=10) as response:
+            raise AssertionError(f"Foreign BYOK allowed: {response.status}")
+    except urllib.error.HTTPError as error:
+        assert error.code == 403, error.code
+    browser.navigate(origin + "/settings")
+    browser.wait("return document.body.innerText.includes('Clés personnelles')",
+                 "other tenant settings")
+    change_second_authority(tenant2, workspace2, login2, grant_active=False)
+    browser.navigate(origin + "/projects")
+    browser.wait("return document.body.innerText.includes('Vous n’avez pas accès à cet espace.')",
+                 "grant removed while page open")
+    change_second_authority(tenant2, workspace2, login2, grant_active=True)
+    browser.navigate(origin + "/projects")
+    browser.wait("return document.body.innerText.includes('Aucun projet')",
+                 "grant restored")
+    change_second_authority(tenant2, workspace2, login2, revoke=True)
+    browser.navigate(origin + "/projects")
+    browser.wait("return document.body.innerText.includes('Connexion requise')",
+                 "revoked session denied after page reload")
+    revoked_request = urllib.request.Request(
+        f"http://127.0.0.1:8000/api/v1/tenants/{tenant2}/workspaces/{workspace2}/projects",
+        headers={"Authorization": f"Bearer {token2}"},
+    )
+    try:
+        with urllib.request.urlopen(revoked_request, timeout=10) as response:
+            raise AssertionError(f"Revoked session allowed: {response.status}")
+    except urllib.error.HTTPError as error:
+        assert error.code == 401, error.code
     print(
         json.dumps(
             {
                 "browser": "Chrome headless",
                 "identity": "local disposable owner",
+                "isolation": "second tenant denied by browser and API; grant and session revoked",
                 "database": "novalton_test",
                 "project_chat_plan": "persisted and approved",
                 "screenshots": 8,
@@ -371,6 +548,7 @@ def run(browser, origin):
 
 
 def main():
+    second = provision_second_identity()
     api_port, next_port, proxy_port, driver_port = (
         8000,
         free_port(),
@@ -429,6 +607,11 @@ def main():
                 **os.environ,
                 "NOVALTON_WEB_ORIGIN": origin,
                 "NOVALTON_API_BASE_URL": f"http://127.0.0.1:{api_port}",
+                "NOVALTON_OPERATOR_WORKSPACE_SCOPES": (
+                    f"{os.environ.get('NOVALTON_TENANT_ID', '89cfc055-366e-5bcb-b65f-4f367185bf6d')}:"
+                    f"{os.environ.get('NOVALTON_WORKSPACE_ID', 'b640b64f-8e55-53e8-a5b2-3beff9d5af82')},"
+                    f"{second[0]}:{second[1]}"
+                ),
             }
             processes.append(
                 subprocess.Popen(
@@ -488,7 +671,7 @@ def main():
             )["sessionId"]
             browser = Browser(driver_port, session)
             browser.call("POST", "/timeouts", {"implicit": 10000, "pageLoad": 30000})
-            run(browser, origin)
+            run(browser, origin, second)
         finally:
             if browser:
                 try:

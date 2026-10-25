@@ -231,7 +231,11 @@ async def compilation_preflight(
     return {
         "compilation": _compilation(row),
         "preflight": await compilation_service.preflight(
-            session, conversation=conversation, plan=plan, compilation=row
+            session,
+            conversation=conversation,
+            plan=plan,
+            compilation=row,
+            operator=_human(operator),
         ),
     }
 
