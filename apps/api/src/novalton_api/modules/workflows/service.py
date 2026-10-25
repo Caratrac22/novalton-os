@@ -114,6 +114,7 @@ async def _create_plan(
     change_reason: str | None,
     data: WorkflowPlanCreate,
     audit_action: str,
+    commit: bool = True,
 ) -> WorkflowPlan:
     validate_graph(data)
     await _validate_assignments(session, tenant_id=tenant_id, workspace_id=workspace_id, data=data)
@@ -172,19 +173,22 @@ async def _create_plan(
         ),
         commit=False,
     )
-    await session.commit()
-    await session.refresh(plan)
-    logger.info(
-        "Workflow plan persisted",
-        extra={
-            "event": audit_action,
-            "workflow_plan_id": str(plan.id),
-            "plan_version": version,
-            "tenant_id": str(tenant_id),
-            "workspace_id": str(workspace_id),
-            "task_id": str(task_id),
-        },
-    )
+    if commit:
+        await session.commit()
+        await session.refresh(plan)
+        logger.info(
+            "Workflow plan persisted",
+            extra={
+                "event": audit_action,
+                "workflow_plan_id": str(plan.id),
+                "plan_version": version,
+                "tenant_id": str(tenant_id),
+                "workspace_id": str(workspace_id),
+                "task_id": str(task_id),
+            },
+        )
+    else:
+        await session.flush()
     return plan
 
 
@@ -311,6 +315,13 @@ async def create_run(
     session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID, plan_id: UUID
 ) -> WorkflowRun:
     plan = await get_plan(session, tenant_id=tenant_id, workspace_id=workspace_id, plan_id=plan_id)
+    return await _create_run_for_plan(session, plan=plan, commit=True)
+
+
+async def _create_run_for_plan(
+    session: AsyncSession, *, plan: WorkflowPlan, commit: bool
+) -> WorkflowRun:
+    """Persist the run and step states within the caller's transaction if requested."""
     steps, dependencies = await plan_graph(session, plan)
     if not steps:
         raise _invalid_graph("Workflow plan must contain at least one step")
@@ -337,8 +348,8 @@ async def create_run(
     )
     validate_graph(spec)
     run = WorkflowRun(
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
+        tenant_id=plan.tenant_id,
+        workspace_id=plan.workspace_id,
         project_id=plan.project_id,
         task_id=plan.task_id,
         workflow_plan_id=plan.id,
@@ -360,8 +371,11 @@ async def create_run(
                 else WorkflowStepRunStatus.READY.value,
             )
         )
-    await session.commit()
-    await session.refresh(run)
+    if commit:
+        await session.commit()
+        await session.refresh(run)
+    else:
+        await session.flush()
     return run
 
 
@@ -393,8 +407,13 @@ async def create_development_workflow(
     project_id: UUID,
     task_id: UUID,
     data: DevelopmentWorkflowCreate,
+    commit: bool = True,
 ) -> tuple[WorkflowPlan, WorkflowRun]:
-    """Persist the one fixed Manager -> Developer -> QA graph without model execution."""
+    """Persist the fixed graph and handoff atomically, without model execution.
+
+    With commit=False, the caller owns the transaction and must commit or
+    rollback the complete plan, run, audit and handoff together.
+    """
     scoped_project = await _task_scope(
         session, tenant_id=tenant_id, workspace_id=workspace_id, task_id=task_id
     )
@@ -455,62 +474,83 @@ async def create_development_workflow(
             "Trusted development agents are unavailable",
             status_code=409,
         )
-    plan = await create_plan(
-        session,
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-        task_id=task_id,
-        data=WorkflowPlanCreate(
-            title="Development workflow",
-            summary="Fixed governed Manager to Developer Worker to QA Worker workflow",
-            steps=[
-                {
-                    "step_key": "manager_plan",
-                    "title": "Plan development assignment",
-                    "step_type": "AGENT_TASK",
-                    "assigned_capability": "implementation_planning",
-                    "agent_definition_id": manager.id,
-                    "risk_level": "LOW",
-                    "depends_on": [],
-                },
-                {
-                    "step_key": "developer_execute",
-                    "title": "Execute development assignment",
-                    "step_type": "AGENT_TASK",
-                    "assigned_capability": "software_implementation",
-                    "agent_definition_id": developer.id,
-                    "risk_level": "LOW",
-                    "depends_on": ["manager_plan"],
-                },
-                {
-                    "step_key": "qa_validate",
-                    "title": "Validate development result",
-                    "step_type": "AGENT_TASK",
-                    "assigned_capability": "acceptance_validation",
-                    "agent_definition_id": qa.id,
-                    "risk_level": "LOW",
-                    "depends_on": ["developer_execute"],
-                },
-            ],
-        ),
-    )
-    run = await create_run(session, tenant_id=tenant_id, workspace_id=workspace_id, plan_id=plan.id)
-    ordered = await repository.ordered_step_runs(session, run_id=run.id)
-    manager_step_run = ordered[0][0]
-    await repository.add_handoff(
-        session,
-        WorkflowStepHandoff(
-            workflow_run_id=run.id,
-            workflow_plan_id=plan.id,
-            source_step_run_id=None,
-            destination_step_run_id=manager_step_run.id,
-            handoff_type="DEVELOPMENT_REQUEST",
-            objective=data.objective,
-            acceptance_criteria=data.acceptance_criteria,
-            evidence_items=[],
-        ),
-    )
-    await session.commit()
+    if (
+        await repository.latest_plan(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, task_id=task_id
+        )
+        is not None
+    ):
+        raise ApplicationError(
+            "workflow_plan_exists", "Create a new explicit plan version", status_code=409
+        )
+    try:
+        plan = await _create_plan(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            task_id=task_id,
+            project_id=project_id,
+            version=1,
+            change_reason=None,
+            audit_action="workflow.plan.created",
+            commit=False,
+            data=WorkflowPlanCreate(
+                title="Development workflow",
+                summary="Fixed governed Manager to Developer Worker to QA Worker workflow",
+                steps=[
+                    {
+                        "step_key": "manager_plan",
+                        "title": "Plan development assignment",
+                        "step_type": "AGENT_TASK",
+                        "assigned_capability": "implementation_planning",
+                        "agent_definition_id": manager.id,
+                        "risk_level": "LOW",
+                        "depends_on": [],
+                    },
+                    {
+                        "step_key": "developer_execute",
+                        "title": "Execute development assignment",
+                        "step_type": "AGENT_TASK",
+                        "assigned_capability": "software_implementation",
+                        "agent_definition_id": developer.id,
+                        "risk_level": "LOW",
+                        "depends_on": ["manager_plan"],
+                    },
+                    {
+                        "step_key": "qa_validate",
+                        "title": "Validate development result",
+                        "step_type": "AGENT_TASK",
+                        "assigned_capability": "acceptance_validation",
+                        "agent_definition_id": qa.id,
+                        "risk_level": "LOW",
+                        "depends_on": ["developer_execute"],
+                    },
+                ],
+            ),
+        )
+        run = await _create_run_for_plan(session, plan=plan, commit=False)
+        ordered = await repository.ordered_step_runs(session, run_id=run.id)
+        manager_step_run = ordered[0][0]
+        await repository.add_handoff(
+            session,
+            WorkflowStepHandoff(
+                workflow_run_id=run.id,
+                workflow_plan_id=plan.id,
+                source_step_run_id=None,
+                destination_step_run_id=manager_step_run.id,
+                handoff_type="DEVELOPMENT_REQUEST",
+                objective=data.objective,
+                acceptance_criteria=data.acceptance_criteria,
+                evidence_items=[],
+            ),
+        )
+        if commit:
+            await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise ApplicationError(
+            "workflow_plan_conflict", "Workflow plan creation conflicted", status_code=409
+        ) from None
     return plan, run
 
 
