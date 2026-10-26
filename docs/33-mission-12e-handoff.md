@@ -12,13 +12,13 @@ commit ; un document versionné ne peut indiquer son propre SHA.
 |---|---|---|---|
 | A transaction du workflow | P0 | PASS | Plan, run, audit et handoff dans une transaction unique pour le graphe fixe ; tests PostgreSQL de rollback et CI #40246050058 SUCCESS. |
 | B seconde autorisation humaine | P0 | PASS | Décision persistante et révocable ; reauth, grants et versions ; CI #40246050058 SUCCESS. La décision seule ne crée pas de run. |
-| C revalidation de création | P0 | IN_PROGRESS | La création recontrôle sous verrou l'autorisation, la proposition, les grants, le profil/base de test, l'activation et le modèle local. Nouveau test PostgreSQL à vérifier sur CI. |
-| D liaison cadrage/workflow | P0 | IN_PROGRESS | Un seul run/compilation et liaison durable dans le même commit que graphe, handoff et audit ; idempotence et refus d'exécution dans le test. Migration 0049 et CI à vérifier. |
+| C revalidation de création | P0 | PASS | Recontrôle sous verrou de l'autorisation, de la proposition, des grants, du profil/base de test, de l'activation et du modèle local. Test PostgreSQL et CI #40316187645 SUCCESS. |
+| D liaison cadrage/workflow | P0 | PASS | Un seul run/compilation et liaison durable dans le commit du graphe, handoff et audit ; rollback et idempotence concurrente testés sur PostgreSQL. CI #40316187645 SUCCESS. |
 | E exécution jetable complète | P0 | BLOCKED | Aucun parcours cadrage → Manager → Developer → QA qualifié. |
 | F chemins facturables | P0 | PARTIAL | Fournisseur distant désactivé dans le registre standard ; injection explicite non qualifiée pour la dépense. Cartographie à poursuivre. |
 | G BYOK/restauration | P1 | TODO | Rotation, sauvegarde et restauration non validées pour cette mission. |
 | H interface | P1 | PARTIAL | Formulaire distinct de décision locale et révocation, protégé par Origin sur le proxy cookie Next ; lancement désactivé et aucune progression fictive. Tests web/Chromium de la branche à relever. |
-| I Chromium hostile | P0 | PARTIAL | Gate graphique de branche #40246049990 SUCCESS ; les scénarios propres au nouveau lancement restent à écrire. |
+| I Chromium hostile | P0 | PARTIAL | Gate graphique du code final #40316187661 SUCCESS ; les scénarios hostiles propres à la nouvelle route de création restent à écrire. |
 | J qualité du chat | P1 | BLOCKED | Modèle local indisponible dans ce runtime ; `REAL_MODEL_QUALITY_NOT_VERIFIED`. |
 
 ## Frontière transactionnelle
@@ -86,7 +86,7 @@ La route ne contacte aucun fournisseur.
 Le test PostgreSQL provoque un échec de l'audit après écriture du graphe et
 vérifie le rollback du run et de la liaison. Il envoie ensuite deux requêtes
 concurrentes de même clé et vérifie l'unicité du run, puis refuse une autre clé
-et l'avance directe. Cette vérification concurrente attend sa nouvelle CI.
+et l'avance directe. La CI #40316187645 confirme cette vérification.
 
 Le premier essai concurrent a exposé un verrouillage croisé. La dépendance
 HTTP conservait des verrous partagés sur la session locale et les grants avant
@@ -96,7 +96,7 @@ lecture tout en attendant le grant détenu par la première. Pour les seules
 mutations de lancement, la dépendance identifie l'utilisateur sans prendre
 ces verrous ; la route termine sa transaction de lecture, puis revalide la
 session, les grants et le rôle sous verrous exclusifs avant toute écriture.
-La correction attend sa nouvelle CI.
+La CI #40316187645 confirme la correction.
 
 Les chemins d'avance directe et d'enqueue historiques refusent explicitement
 les runs liés au cadrage avec `launch_execution_unverified`. Ce verrou demeure
@@ -108,13 +108,13 @@ chemins historiques ne changent pas. Cette tranche ne démontre pas E.
 La première CI de la migration 0049 a arrêté le test injecté sur une attente
 erronée : le middleware HTTP a converti l'exception en réponse 500, au lieu
 de la propager à `TestClient`. Le test contrôle désormais cette réponse puis
-l'absence de run et de liaison ; la nouvelle CI reste à relever.
+l'absence de run et de liaison ; la CI #40316187645 est SUCCESS.
 
 ## États d'exécution
 
 | État | Preuve 12E |
 |---|---|
-| `WORKFLOW_CREATED` | Graphe historique confirmé par CI ; création liée au cadrage en attente de la nouvelle CI. |
+| `WORKFLOW_CREATED` | Graphe et liaison depuis le cadrage confirmés sur PostgreSQL par CI #40316187645 ; aucun modèle appelé. |
 | `WORKFLOW_EXECUTED` | Non démontré depuis le cadrage. |
 | `QA_PASSED` | Non démontré depuis le cadrage. |
 | `PRODUCTION_ACCEPTED` | Interdit dans cette mission. |
