@@ -34,9 +34,19 @@ async def require_saas_access(
     token = authorization.removeprefix("Bearer ")
     if token != token.strip() or (token.count(".") != 2 and not token.startswith("nvl_")):
         raise ApplicationError("saas_auth_required", "Session required", status_code=401)
+    launch_mutation = request.method == "POST" and "/launch-authorizations" in request.url.path
     operator = await authenticate_session(
-        session, token=token, tenant_id=tenant_id, workspace_id=workspace_id
+        session,
+        token=token,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        lock_local_session=not launch_mutation,
     )
+    if launch_mutation:
+        # The launch route locks and rechecks the complete identity, grants,
+        # membership role and recent local session before any mutation. Holding
+        # shared locks here first would deadlock a concurrent exclusive recheck.
+        return operator
     permission = "workspace.read" if request.method in {"GET", "HEAD"} else "workspace.write"
     await operator.require_human(
         session, permission, tenant_id=tenant_id, workspace_id=workspace_id
