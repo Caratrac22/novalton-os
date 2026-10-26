@@ -90,6 +90,11 @@ modèle routé et des limites de dépense. La révocation d'une décision après
 création ne peut donc pas déclencher une exécution de ce run. Les autres
 chemins historiques ne changent pas. Cette tranche ne démontre pas E.
 
+La première CI de la migration 0049 a arrêté le test injecté sur une attente
+erronée : le middleware HTTP a converti l'exception en réponse 500, au lieu
+de la propager à `TestClient`. Le test contrôle désormais cette réponse puis
+l'absence de run et de liaison ; la nouvelle CI reste à relever.
+
 ## États d'exécution
 
 | État | Preuve 12E |

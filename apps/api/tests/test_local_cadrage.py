@@ -942,8 +942,7 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(initialized
             return await original_append(session, data=data, commit=commit)
 
         monkeypatch.setattr(launch_routes, "append_record", reject_binding_audit)
-        with pytest.raises(RuntimeError, match="injected binding audit failure"):
-            client.post(launch_url, headers=auth, json=launch_request)
+        assert client.post(launch_url, headers=auth, json=launch_request).status_code == 500
         monkeypatch.setattr(launch_routes, "append_record", original_append)
         assert db_call(no_run) is None
 
