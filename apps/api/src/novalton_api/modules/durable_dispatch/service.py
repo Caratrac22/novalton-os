@@ -37,6 +37,7 @@ from novalton_api.modules.durable_dispatch.operator import (
     require_configured_activator,
 )
 from novalton_api.modules.durable_dispatch.schemas import DispatchRequest
+from novalton_api.modules.launch.models import LaunchAuthorization
 from novalton_api.modules.orchestrator import service as orchestrator_service
 from novalton_api.modules.orchestrator.schemas import OrchestrationResult
 from novalton_api.modules.workflows.cancellation import lock_workflow
@@ -145,6 +146,13 @@ async def enqueue(
     )
     if run is None:
         raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
+    if (
+        await session.scalar(
+            select(LaunchAuthorization.id).where(LaunchAuthorization.workflow_run_id == run.id)
+        )
+        is not None
+    ):
+        raise denied("launch_execution_unverified")
     configured = await repository.activation(
         session, tenant_id=tenant_id, workspace_id=workspace_id, exclusive=True
     )

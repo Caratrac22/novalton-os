@@ -10,15 +10,15 @@ commit ; un document versionné ne peut indiquer son propre SHA.
 
 | Tâche | Priorité | État | Preuve / blocage / prochaine action |
 |---|---|---|---|
-| A transaction du workflow | P0 | IN_PROGRESS | Plan, run, audit et handoff dans une transaction unique pour le graphe fixe ; tests de rollback injecté et de transaction contrôlée par l'appelant. PostgreSQL CI à vérifier. |
-| B seconde autorisation humaine | P0 | IN_PROGRESS | Décision persistante, révocable, liée au plan/compilation/document/versions, à l'environnement jetable, au modèle local, aux grants et aux limites ; reauth et test PostgreSQL ajoutés, CI à relever. Aucun run créé par cette décision. |
-| C revalidation de lancement | P0 | BLOCKED | Dépend de B et de la preuve de transaction. Préflight de lecture seulement. |
-| D liaison cadrage/workflow | P0 | BLOCKED | Aucun run depuis une compilation tant que B/C ne sont pas démontrés. |
+| A transaction du workflow | P0 | PASS | Plan, run, audit et handoff dans une transaction unique pour le graphe fixe ; tests PostgreSQL de rollback et CI #40246050058 SUCCESS. |
+| B seconde autorisation humaine | P0 | PASS | Décision persistante et révocable ; reauth, grants et versions ; CI #40246050058 SUCCESS. La décision seule ne crée pas de run. |
+| C revalidation de création | P0 | IN_PROGRESS | La création recontrôle sous verrou l'autorisation, la proposition, les grants, le profil/base de test, l'activation et le modèle local. Nouveau test PostgreSQL à vérifier sur CI. |
+| D liaison cadrage/workflow | P0 | IN_PROGRESS | Un seul run/compilation et liaison durable dans le même commit que graphe, handoff et audit ; idempotence et refus d'exécution dans le test. Migration 0049 et CI à vérifier. |
 | E exécution jetable complète | P0 | BLOCKED | Aucun parcours cadrage → Manager → Developer → QA qualifié. |
 | F chemins facturables | P0 | PARTIAL | Fournisseur distant désactivé dans le registre standard ; injection explicite non qualifiée pour la dépense. Cartographie à poursuivre. |
 | G BYOK/restauration | P1 | TODO | Rotation, sauvegarde et restauration non validées pour cette mission. |
 | H interface | P1 | PARTIAL | Formulaire distinct de décision locale et révocation, protégé par Origin sur le proxy cookie Next ; lancement désactivé et aucune progression fictive. Tests web/Chromium de la branche à relever. |
-| I Chromium hostile | P0 | TODO | Scénarios 12D historiques ; nouvelle gate de branche à relever. |
+| I Chromium hostile | P0 | PARTIAL | Gate graphique de branche #40246049990 SUCCESS ; les scénarios propres au nouveau lancement restent à écrire. |
 | J qualité du chat | P1 | BLOCKED | Modèle local indisponible dans ce runtime ; `REAL_MODEL_QUALITY_NOT_VERIFIED`. |
 
 ## Frontière transactionnelle
@@ -40,8 +40,8 @@ entités (plan, run, handoff, audit). Le résultat PostgreSQL de ces tests doit
 La première CI du refactoring a révélé des réponses HTTP 500 dans les routes
 historiques de création : les valeurs nullable/default chargées depuis la base
 manquaient à la sérialisation après le changement de frontière transactionnelle.
-Le plan et le run sont rechargés avant de revenir au caller ; la nouvelle CI
-doit confirmer la correction sans masquer les erreurs.
+Le plan et le run sont rechargés avant de revenir au caller ; la CI
+#40246050058 confirme la correction des routes historiques.
 
 ## Seconde décision humaine
 
@@ -68,11 +68,33 @@ attendait l'erreur de tâche `BACKLOG` avant d'ajouter les grants dispatch,
 alors que le serveur refuse correctement l'absence de grant en premier. Le
 scénario a été réordonné pour tester les deux frontières séparément.
 
+## Création non exécutante depuis le cadrage
+
+La route `/{launch_authorization_id}/workflow` exige une confirmation distincte,
+une clé UUID idempotente et une réauthentification locale. Elle refuse tout profil
+autre que `test` et vérifie `current_database() = novalton_test`. Sous verrous,
+elle revalide la spécification courante, le plan approuvé, la compilation
+recalculée, l'état projet/tâche, l'empreinte et l'expiration/révocation de la
+décision, les trois grants, la génération de l'activation, le modèle local
+configuré et une entrée de catalogue `AVAILABLE`/`LOCAL`. L'absence d'un seul
+élément refuse la création. La migration 0049 ajoute une liaison facultative
+sur la décision, avec unicité par compilation et par run. Le graphe fixe, le
+run `CREATED`, le handoff, les audits et la liaison partagent un commit. Une
+répétition avec la même clé renvoie le run ; une clé différente est refusée.
+La route ne contacte aucun fournisseur.
+
+Les chemins d'avance directe et d'enqueue historiques refusent explicitement
+les runs liés au cadrage avec `launch_execution_unverified`. Ce verrou demeure
+jusqu'à une validation distincte de l'autorité par étape, de la révocation, du
+modèle routé et des limites de dépense. La révocation d'une décision après
+création ne peut donc pas déclencher une exécution de ce run. Les autres
+chemins historiques ne changent pas. Cette tranche ne démontre pas E.
+
 ## États d'exécution
 
 | État | Preuve 12E |
 |---|---|
-| `WORKFLOW_CREATED` | Route historique seulement, à tester sur cette branche ; aucune liaison au cadrage. |
+| `WORKFLOW_CREATED` | Graphe historique confirmé par CI ; création liée au cadrage en attente de la nouvelle CI. |
 | `WORKFLOW_EXECUTED` | Non démontré depuis le cadrage. |
 | `QA_PASSED` | Non démontré depuis le cadrage. |
 | `PRODUCTION_ACCEPTED` | Interdit dans cette mission. |

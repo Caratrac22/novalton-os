@@ -4,6 +4,7 @@ import asyncio
 import logging
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.exceptions import ApplicationError
@@ -18,6 +19,7 @@ from novalton_api.modules.agents.contracts import (
 )
 from novalton_api.modules.agents.models import AgentRun
 from novalton_api.modules.agents.schemas import AgentRunStatus
+from novalton_api.modules.launch.models import LaunchAuthorization
 from novalton_api.modules.orchestrator import challenge_repository, specializations
 from novalton_api.modules.orchestrator.schemas import OrchestrationOutcome, OrchestrationResult
 from novalton_api.modules.qa_worker.contracts import (
@@ -699,6 +701,19 @@ async def advance(
     workflow_run_id: UUID,
 ) -> OrchestrationResult:
     """Translate a lost cancellation race to the durable cancelled outcome."""
+    # A cadrage-bound run is only a durable creation proof until the execution
+    # fence validates revocation, generation, model routing and budget per step.
+    bound = await session.scalar(
+        select(LaunchAuthorization.id).where(
+            LaunchAuthorization.workflow_run_id == workflow_run_id,
+            LaunchAuthorization.tenant_id == tenant_id,
+            LaunchAuthorization.workspace_id == workspace_id,
+        )
+    )
+    if bound is not None:
+        raise ApplicationError(
+            "launch_execution_unverified", "Test execution is unavailable", status_code=409
+        )
     try:
         result = await _advance_active(
             session,

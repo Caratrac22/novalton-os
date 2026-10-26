@@ -9,9 +9,11 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -30,6 +32,20 @@ class LaunchAuthorization(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="fk_launch_project_scope",
         ),
         UniqueConstraint("owner_id", "request_id", name="uq_launch_owner_request"),
+        UniqueConstraint("workflow_run_id", name="uq_launch_workflow_run"),
+        Index(
+            "uq_launch_compilation_workflow",
+            "compilation_id",
+            unique=True,
+            postgresql_where=text("workflow_run_id IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "(workflow_plan_id IS NULL AND workflow_run_id IS NULL AND "
+            "launch_request_id IS NULL AND dispatch_generation IS NULL) OR "
+            "(workflow_plan_id IS NOT NULL AND workflow_run_id IS NOT NULL AND "
+            "launch_request_id IS NOT NULL AND dispatch_generation > 0)",
+            name="ck_launch_workflow_binding_complete",
+        ),
         CheckConstraint(
             "source_version > 0 AND proposal_version > 0 AND version > 0", name="ck_launch_versions"
         ),
@@ -90,3 +106,11 @@ class LaunchAuthorization(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    workflow_plan_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("workflow_plans.id", ondelete="RESTRICT")
+    )
+    workflow_run_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("workflow_runs.id", ondelete="RESTRICT")
+    )
+    launch_request_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    dispatch_generation: Mapped[int | None] = mapped_column(Integer)

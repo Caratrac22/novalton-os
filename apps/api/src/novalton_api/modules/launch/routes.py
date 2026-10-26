@@ -1,4 +1,4 @@
-"""Human test-launch decision only. No endpoint in this router creates a run."""
+"""Human test decision and atomic, non-executing workflow creation."""
 
 import hashlib
 import json
@@ -8,9 +8,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from novalton_api.core.config import get_settings
 from novalton_api.core.database import get_async_session
 from novalton_api.core.exceptions import ApplicationError
 from novalton_api.modules.audit.schemas import AuditRecordCreate
@@ -19,12 +20,16 @@ from novalton_api.modules.cadrage.compilation import compile_document
 from novalton_api.modules.cadrage.models import CadrageCompilation, CadragePlan
 from novalton_api.modules.cadrage.plan import get_plan
 from novalton_api.modules.cadrage.service import current_specification, get_conversation
+from novalton_api.modules.durable_dispatch.models import DispatchActivation
 from novalton_api.modules.durable_dispatch.operator import OperatorAuthority
 from novalton_api.modules.durable_dispatch.saas_access import require_saas_access
 from novalton_api.modules.financial.routes import reauth
 from novalton_api.modules.launch.models import LaunchAuthorization
+from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.tasks.models import Task
+from novalton_api.modules.workflows.schemas import DevelopmentWorkflowCreate
+from novalton_api.modules.workflows.service import create_development_workflow
 
 router = APIRouter(
     prefix="/tenants/{tenant_id}/workspaces/{workspace_id}/projects/{project_id}/conversations/{conversation_id}/plans/{plan_id}/compilations/{compilation_id}/launch-authorizations",
@@ -49,6 +54,13 @@ class AuthorizeInput(BaseModel):
 
 class RevokeInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+    current_password: str = Field(min_length=1, max_length=128)
+
+
+class CreateWorkflowInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    confirmation: Literal["CREATE_DISPOSABLE_TEST_WORKFLOW"]
+    request_id: UUID = Field(strict=False)
     current_password: str = Field(min_length=1, max_length=128)
 
 
@@ -120,7 +132,10 @@ def public(row: LaunchAuthorization) -> dict[str, object]:
         "approved_at": row.approved_at,
         "expires_at": row.expires_at,
         "revoked_at": row.revoked_at,
-        "workflow_created": False,
+        "workflow_created": row.workflow_run_id is not None,
+        "workflow_plan_id": row.workflow_plan_id,
+        "workflow_run_id": row.workflow_run_id,
+        "dispatch_generation": row.dispatch_generation,
     }
 
 
@@ -289,6 +304,189 @@ async def authorize(
             actor_id=str(owner.user_id),
             outcome="success",
             metadata={"launch_policy_id": str(row.id), "version": 1},
+        ),
+        commit=False,
+    )
+    await session.commit()
+    return public(row)
+
+
+@router.post("/{launch_authorization_id}/workflow", status_code=201)
+async def create_authorized_workflow(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    project_id: UUID,
+    conversation_id: UUID,
+    plan_id: UUID,
+    compilation_id: UUID,
+    launch_authorization_id: UUID,
+    data: CreateWorkflowInput,
+    session: Session,
+    operator: Human,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    """Create graph, run, handoff, audit and binding in one transaction; never execute."""
+    settings = get_settings()
+    if (
+        settings.environment != "test"
+        or (await session.scalar(select(text("current_database()")))) != "novalton_test"
+    ):
+        raise ApplicationError("disposable_test_required", "Profil de test requis", status_code=403)
+    owner = _owner(operator)
+    for permission in PERMISSIONS:
+        await owner.require_human(
+            session, permission, tenant_id=tenant_id, workspace_id=workspace_id, exclusive=True
+        )
+    await reauth(session, owner, authorization, data.current_password)
+    plan, compilation = await _scoped(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        conversation_id=conversation_id,
+        plan_id=plan_id,
+        compilation_id=compilation_id,
+        owner_id=owner.user_id,
+        lock=True,
+    )
+    task = await session.scalar(
+        select(Task)
+        .where(Task.id == compilation.task_id, Task.project_id == project_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    project = await session.scalar(
+        select(Project)
+        .where(Project.id == project_id, Project.workspace_id == workspace_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    row = await session.scalar(
+        select(LaunchAuthorization)
+        .where(
+            LaunchAuthorization.id == launch_authorization_id,
+            LaunchAuthorization.owner_id == owner.user_id,
+            LaunchAuthorization.tenant_id == tenant_id,
+            LaunchAuthorization.workspace_id == workspace_id,
+            LaunchAuthorization.project_id == project_id,
+            LaunchAuthorization.plan_id == plan_id,
+            LaunchAuthorization.compilation_id == compilation_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        raise _missing()
+    from novalton_api.modules.cadrage.models import CadrageConversation
+
+    conversation = await session.get(CadrageConversation, conversation_id)
+    spec = await current_specification(session, conversation)
+    expected_status, expected_document = compile_document(plan.document)
+    if (
+        row.revoked_at is not None
+        or row.expires_at <= datetime.now(UTC)
+        or row.environment != "DISPOSABLE_TEST"
+        or row.provider_id != "local"
+        or row.financial_authorization_id is not None
+        or row.task_id != compilation.task_id
+        or row.source_version != plan.source_version
+        or row.proposal_version != compilation.proposal_version
+        or row.permissions != PERMISSIONS
+        or plan.status != "APPROVED"
+        or plan.decided_by != owner.user_id
+        or spec is None
+        or spec.id != plan.specification_id
+        or spec.version != plan.source_version
+        or compilation.source_version != plan.source_version
+        or compilation.status != "PROPOSED"
+        or expected_status != "PROPOSED"
+        or compilation.document != expected_document
+        or project is None
+        or project.status != "ACTIVE"
+        or task is None
+        or task.status not in {"READY", "IN_PROGRESS"}
+        or settings.local_model_base_url is None
+        or settings.local_model_id != row.model_id
+    ):
+        raise _conflict()
+    fingerprint = _fingerprint(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        plan=plan,
+        compilation=compilation,
+        data=AuthorizeInput(
+            confirmation="AUTHORIZE_DISPOSABLE_TEST_LAUNCH",
+            request_id=row.request_id,
+            environment="DISPOSABLE_TEST",
+            provider_id="local",
+            model_id=row.model_id,
+            max_model_calls=row.max_model_calls,
+            max_duration_seconds=row.max_duration_seconds,
+            current_password=data.current_password,
+        ),
+    )
+    if row.fingerprint != fingerprint:
+        raise _conflict()
+    if row.workflow_run_id is not None:
+        if row.launch_request_id != data.request_id:
+            raise _conflict()
+        return public(row)
+    activation = await session.scalar(
+        select(DispatchActivation)
+        .where(
+            DispatchActivation.tenant_id == tenant_id,
+            DispatchActivation.workspace_id == workspace_id,
+        )
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    model = await session.scalar(
+        select(ModelDefinition)
+        .where(
+            ModelDefinition.provider_id == "local_cadrage",
+            ModelDefinition.provider_model_id == row.model_id,
+        )
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    if (
+        not settings.durable_dispatch_enabled
+        or activation is None
+        or not activation.enabled
+        or model is None
+        or model.status != "AVAILABLE"
+        or model.execution_target_class != "LOCAL"
+    ):
+        raise _conflict()
+    inputs = compilation.document["inputs"]
+    graph, run = await create_development_workflow(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        task_id=compilation.task_id,
+        data=DevelopmentWorkflowCreate(**inputs),
+        commit=False,
+    )
+    row.workflow_plan_id = graph.id
+    row.workflow_run_id = run.id
+    row.launch_request_id = data.request_id
+    row.dispatch_generation = activation.generation
+    await append_record(
+        session,
+        data=AuditRecordCreate(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=compilation.task_id,
+            resource_type="project",
+            resource_id=project_id,
+            action="launch.workflow.created",
+            actor_type="local_user",
+            actor_id=str(owner.user_id),
+            outcome="success",
+            metadata={"launch_policy_id": str(row.id), "workflow_run_id": str(run.id)},
         ),
         commit=False,
     )

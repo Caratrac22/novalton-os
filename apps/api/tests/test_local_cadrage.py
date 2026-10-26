@@ -24,6 +24,7 @@ from novalton_api.infrastructure.providers.openai_compatible import (
 )
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.main import create_app
+from novalton_api.modules.agents.models import AgentDefinition
 from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.cadrage import service as cadrage_service
 from novalton_api.modules.cadrage.compilation import compile_document
@@ -34,14 +35,18 @@ from novalton_api.modules.cadrage.models import (
     CadragePlan,
     CadrageSpecification,
 )
+from novalton_api.modules.developer_manager import service as manager_service
+from novalton_api.modules.developer_worker import service as developer_service
 from novalton_api.modules.durable_dispatch.identity import (
     HumanOperator,
     TenantOperatorMembership,
     WorkspaceOperatorPermission,
 )
+from novalton_api.modules.durable_dispatch.models import DispatchActivation
 from novalton_api.modules.durable_dispatch.sessions import authenticate_session
 from novalton_api.modules.financial.models import FinancialAuthorization, FinancialReservation
 from novalton_api.modules.financial.service import reserve as reserve_financial
+from novalton_api.modules.launch import routes as launch_routes
 from novalton_api.modules.launch.models import LaunchAuthorization
 from novalton_api.modules.local_auth.bootstrap import (
     BootstrapDenied,
@@ -50,12 +55,21 @@ from novalton_api.modules.local_auth.bootstrap import (
 )
 from novalton_api.modules.local_auth.models import LocalCredential, LocalLoginThrottle, LocalSession
 from novalton_api.modules.local_auth.service import hash_password
+from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.provider_keys.models import ProviderKey
+from novalton_api.modules.qa_worker import service as qa_service
 from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tenants.models import Tenant
-from novalton_api.modules.workflows.models import WorkflowRun
+from novalton_api.modules.workflows.models import (
+    WorkflowPlan,
+    WorkflowRun,
+    WorkflowStep,
+    WorkflowStepDependency,
+    WorkflowStepHandoff,
+    WorkflowStepRun,
+)
 from novalton_api.modules.workspaces.models import Workspace
 
 
@@ -95,6 +109,30 @@ async def wipe(session, scope: Scope) -> None:
     await session.execute(delete(RuntimeEvent).where(RuntimeEvent.tenant_id == scope.tenant))
     await session.execute(
         delete(LaunchAuthorization).where(LaunchAuthorization.tenant_id == scope.tenant)
+    )
+    run_ids = select(WorkflowRun.id).where(WorkflowRun.tenant_id == scope.tenant)
+    plan_ids = select(WorkflowPlan.id).where(WorkflowPlan.tenant_id == scope.tenant)
+    await session.execute(
+        delete(WorkflowStepHandoff).where(WorkflowStepHandoff.workflow_run_id.in_(run_ids))
+    )
+    await session.execute(
+        delete(WorkflowStepRun).where(WorkflowStepRun.workflow_run_id.in_(run_ids))
+    )
+    await session.execute(delete(WorkflowRun).where(WorkflowRun.tenant_id == scope.tenant))
+    await session.execute(
+        delete(WorkflowStepDependency).where(WorkflowStepDependency.workflow_plan_id.in_(plan_ids))
+    )
+    await session.execute(delete(WorkflowStep).where(WorkflowStep.workflow_plan_id.in_(plan_ids)))
+    await session.execute(delete(WorkflowPlan).where(WorkflowPlan.tenant_id == scope.tenant))
+    await session.execute(delete(AgentDefinition).where(AgentDefinition.tenant_id == scope.tenant))
+    await session.execute(
+        delete(DispatchActivation).where(DispatchActivation.tenant_id == scope.tenant)
+    )
+    await session.execute(
+        delete(ModelDefinition).where(
+            ModelDefinition.provider_id == "local_cadrage",
+            ModelDefinition.provider_model_id == f"launch-{scope.login}",
+        )
     )
     await session.execute(
         delete(FinancialReservation).where(
@@ -718,8 +756,13 @@ def test_approved_plan_compilation_is_idempotent_scoped_and_revoked(initialized)
         assert client.get(check_url, headers={"Authorization": "Bearer invalid"}).status_code == 401
 
 
-def test_separate_launch_decision_is_scoped_revocable_and_never_creates_run(initialized):
+def test_separate_launch_decision_creates_inert_workflow_and_revokes(initialized, monkeypatch):
     scope, password, _ = initialized
+    model_id = f"launch-{scope.login}"
+    monkeypatch.setenv("NOVALTON_LOCAL_MODEL_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("NOVALTON_LOCAL_MODEL_ID", model_id)
+    monkeypatch.setenv("NOVALTON_DURABLE_DISPATCH_ENABLED", "true")
+    get_settings.cache_clear()
     with TestClient(create_app()) as client:
         token = client.post(
             "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
@@ -770,7 +813,7 @@ def test_separate_launch_decision_is_scoped_revocable_and_never_creates_run(init
             "request_id": str(uuid4()),
             "environment": "DISPOSABLE_TEST",
             "provider_id": "local",
-            "model_id": "local-test",
+            "model_id": model_id,
             "max_model_calls": 3,
             "max_duration_seconds": 180,
             "current_password": password,
@@ -829,6 +872,122 @@ def test_separate_launch_decision_is_scoped_revocable_and_never_creates_run(init
             )
 
         assert db_call(no_run) is None
+        launch_url = url + f"/{created.json()['id']}/workflow"
+        launch_request = {
+            "confirmation": "CREATE_DISPOSABLE_TEST_WORKFLOW",
+            "request_id": str(uuid4()),
+            "current_password": password,
+        }
+        assert client.post(launch_url, headers=auth, json=launch_request).status_code == 409
+
+        async def enable_local(session):
+            session.add(
+                DispatchActivation(
+                    tenant_id=scope.tenant,
+                    workspace_id=scope.workspace,
+                    enabled=True,
+                    generation=1,
+                )
+            )
+            session.add(
+                ModelDefinition(
+                    provider_id="local_cadrage",
+                    provider_model_id=model_id,
+                    display_name="Disposable local test",
+                    status="AVAILABLE",
+                    execution_target_class="LOCAL",
+                    free_allowlisted=True,
+                )
+            )
+            for service in (manager_service, developer_service, qa_service):
+                prefix = (
+                    "DEVELOPER_MANAGER"
+                    if service is manager_service
+                    else ("DEVELOPER_WORKER" if service is developer_service else "QA_WORKER")
+                )
+                session.add(
+                    AgentDefinition(
+                        tenant_id=scope.tenant,
+                        workspace_id=scope.workspace,
+                        name=getattr(service, f"{prefix}_NAME"),
+                        slug=getattr(service, f"{prefix}_SLUG"),
+                        version=developer_service.DEVELOPER_WORKER_VERSION
+                        if service is developer_service
+                        else 1,
+                        status="ENABLED",
+                        category=getattr(service, f"{prefix}_CATEGORY"),
+                        mission=getattr(service, f"{prefix}_MISSION"),
+                        capabilities=getattr(service, f"{prefix}_CAPABILITIES"),
+                        permissions=developer_service.DEVELOPER_WORKER_PERMISSIONS
+                        if service is developer_service
+                        else [],
+                    )
+                )
+            await session.commit()
+
+        db_call(enable_local)
+        assert (
+            client.post(
+                launch_url,
+                headers=auth,
+                json=launch_request | {"confirmation": "YES"},
+            ).status_code
+            == 422
+        )
+        original_append = launch_routes.append_record
+
+        async def reject_binding_audit(session, *, data, commit=False):
+            if data.action == "launch.workflow.created":
+                raise RuntimeError("injected binding audit failure")
+            return await original_append(session, data=data, commit=commit)
+
+        monkeypatch.setattr(launch_routes, "append_record", reject_binding_audit)
+        with pytest.raises(RuntimeError, match="injected binding audit failure"):
+            client.post(launch_url, headers=auth, json=launch_request)
+        monkeypatch.setattr(launch_routes, "append_record", original_append)
+        assert db_call(no_run) is None
+
+        async def no_binding(session):
+            return await session.scalar(
+                select(LaunchAuthorization.workflow_run_id).where(
+                    LaunchAuthorization.id == UUID(created.json()["id"])
+                )
+            )
+
+        assert db_call(no_binding) is None
+        launched = client.post(launch_url, headers=auth, json=launch_request)
+        assert launched.status_code == 201, launched.text
+        run_id = launched.json()["workflow_run_id"]
+        assert launched.json()["workflow_created"] is True
+        assert (
+            client.post(launch_url, headers=auth, json=launch_request).json()["workflow_run_id"]
+            == run_id
+        )
+        assert (
+            client.post(
+                launch_url, headers=auth, json=launch_request | {"request_id": str(uuid4())}
+            ).status_code
+            == 409
+        )
+        assert (
+            client.post(path(scope) + f"/workflow-runs/{run_id}/advance", headers=auth).status_code
+            == 409
+        )
+
+        async def created_graph(session):
+            return (
+                await session.scalar(
+                    select(WorkflowRun.status).where(WorkflowRun.id == UUID(run_id))
+                ),
+                await session.scalar(
+                    select(WorkflowStepHandoff.id).where(
+                        WorkflowStepHandoff.workflow_run_id == UUID(run_id)
+                    )
+                ),
+            )
+
+        status, handoff_id = db_call(created_graph)
+        assert status == "CREATED" and handoff_id is not None
         revoked = client.post(
             url + f"/{created.json()['id']}/revoke",
             headers=auth,
