@@ -20,6 +20,7 @@ from novalton_api.modules.cadrage.compilation import compile_document
 from novalton_api.modules.cadrage.models import CadrageCompilation, CadragePlan
 from novalton_api.modules.cadrage.plan import get_plan
 from novalton_api.modules.cadrage.service import current_specification, get_conversation
+from novalton_api.modules.durable_dispatch.identity import TenantOperatorMembership
 from novalton_api.modules.durable_dispatch.models import DispatchActivation
 from novalton_api.modules.durable_dispatch.operator import OperatorAuthority
 from novalton_api.modules.durable_dispatch.saas_access import require_saas_access
@@ -68,6 +69,35 @@ def _owner(operator: OperatorAuthority | None) -> OperatorAuthority:
     if operator is None:
         raise ApplicationError("saas_auth_required", "Session required", status_code=401)
     return operator
+
+
+async def _exclusive_human(
+    session: AsyncSession,
+    operator: OperatorAuthority | None,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    permissions: list[str],
+) -> OperatorAuthority:
+    owner = _owner(operator)
+    # require_saas_access takes shared locks in the request transaction. Two
+    # concurrent mutations cannot both upgrade them to exclusive locks. Release
+    # the read transaction, then recheck the complete authority under exclusive
+    # locks before any decision is read or written.
+    await session.rollback()
+    for permission in permissions:
+        await owner.require_human(
+            session, permission, tenant_id=tenant_id, workspace_id=workspace_id, exclusive=True
+        )
+    role = await session.scalar(
+        select(TenantOperatorMembership.role).where(
+            TenantOperatorMembership.user_id == owner.user_id,
+            TenantOperatorMembership.tenant_id == tenant_id,
+        )
+    )
+    if role == "VIEWER":
+        raise ApplicationError("saas_forbidden", "Workspace access denied", status_code=403)
+    return owner
 
 
 def _missing() -> ApplicationError:
@@ -187,15 +217,13 @@ async def authorize(
     operator: Human,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, object]:
-    owner = _owner(operator)
-    for permission in PERMISSIONS:
-        await owner.require_human(
-            session,
-            permission,
-            tenant_id=tenant_id,
-            workspace_id=workspace_id,
-            exclusive=True,
-        )
+    owner = await _exclusive_human(
+        session,
+        operator,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        permissions=PERMISSIONS,
+    )
     await reauth(session, owner, authorization, data.current_password)
     plan, compilation = await _scoped(
         session,
@@ -332,11 +360,13 @@ async def create_authorized_workflow(
         or (await session.scalar(select(text("current_database()")))) != "novalton_test"
     ):
         raise ApplicationError("disposable_test_required", "Profil de test requis", status_code=403)
-    owner = _owner(operator)
-    for permission in PERMISSIONS:
-        await owner.require_human(
-            session, permission, tenant_id=tenant_id, workspace_id=workspace_id, exclusive=True
-        )
+    owner = await _exclusive_human(
+        session,
+        operator,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        permissions=PERMISSIONS,
+    )
     await reauth(session, owner, authorization, data.current_password)
     plan, compilation = await _scoped(
         session,
@@ -549,13 +579,12 @@ async def revoke(
     operator: Human,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, object]:
-    owner = _owner(operator)
-    await owner.require_human(
+    owner = await _exclusive_human(
         session,
-        "workspace.write",
+        operator,
         tenant_id=tenant_id,
         workspace_id=workspace_id,
-        exclusive=True,
+        permissions=["workspace.write"],
     )
     await reauth(session, owner, authorization, data.current_password)
     await _scoped(

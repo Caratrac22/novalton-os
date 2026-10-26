@@ -88,6 +88,12 @@ vérifie le rollback du run et de la liaison. Il envoie ensuite deux requêtes
 concurrentes de même clé et vérifie l'unicité du run, puis refuse une autre clé
 et l'avance directe. Cette vérification concurrente attend sa nouvelle CI.
 
+Le premier essai concurrent a exposé un verrouillage croisé : la dépendance
+HTTP conservait un verrou partagé sur les grants avant que la route ne demande
+un verrou exclusif. Les mutations de lancement terminent cette transaction de
+lecture, puis revalident session, grants et rôle sous verrous exclusifs avant
+la réauthentification et toute écriture. La correction attend sa nouvelle CI.
+
 Les chemins d'avance directe et d'enqueue historiques refusent explicitement
 les runs liés au cadrage avec `launch_execution_unverified`. Ce verrou demeure
 jusqu'à une validation distincte de l'autorité par étape, de la révocation, du
