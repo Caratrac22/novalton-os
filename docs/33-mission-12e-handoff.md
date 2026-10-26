@@ -83,6 +83,11 @@ run `CREATED`, le handoff, les audits et la liaison partagent un commit. Une
 répétition avec la même clé renvoie le run ; une clé différente est refusée.
 La route ne contacte aucun fournisseur.
 
+Le test PostgreSQL provoque un échec de l'audit après écriture du graphe et
+vérifie le rollback du run et de la liaison. Il envoie ensuite deux requêtes
+concurrentes de même clé et vérifie l'unicité du run, puis refuse une autre clé
+et l'avance directe. Cette vérification concurrente attend sa nouvelle CI.
+
 Les chemins d'avance directe et d'enqueue historiques refusent explicitement
 les runs liés au cadrage avec `launch_execution_unverified`. Ce verrou demeure
 jusqu'à une validation distincte de l'autorité par étape, de la révocation, du
@@ -107,3 +112,17 @@ l'absence de run et de liaison ; la nouvelle CI reste à relever.
 La révision financière 12D reste une estimation et non un plafond de facture.
 `BILLING_UNVERIFIED` et le refus d'exécution facturable subsistent. Aucun appel
 payant, publication externe, merge ou déploiement de production.
+
+## Inventaire des points de génération
+
+| Chemin | Autorité effective dans cette tranche |
+|---|---|
+| Chat de cadrage (`cadrage/generation.py`) | Appel direct à `local_cadrage`, lorsque configuré ; distinct du workflow. |
+| Avance orchestrée et agents (`orchestrator`, `agents/execution.py`) | Le routeur sélectionne un fournisseur du registre de l'application ; les runs issus du cadrage sont refusés avant l'avance. |
+| Routes directes Manager, Developer et QA | Chemins historiques séparés de la décision de lancement ; aucun droit de dépense ne découle du BYOK. |
+| Registre standard (`main.py`) | Seul `local_cadrage` peut être enregistré par configuration ; fournisseur distant absent de ce registre. |
+
+Une injection explicite d'un autre registre hors du démarrage standard n'est
+pas qualifiée pour une dépense. La rotation/restauration BYOK et les limites
+facturables restent donc ouvertes ; aucun test 12E ne contacte un fournisseur
+payant.

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -954,8 +955,17 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(initialized
             )
 
         assert db_call(no_binding) is None
-        launched = client.post(launch_url, headers=auth, json=launch_request)
-        assert launched.status_code == 201, launched.text
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(
+                pool.map(
+                    lambda _: client.post(launch_url, headers=auth, json=launch_request), range(2)
+                )
+            )
+        assert all(response.status_code == 201 for response in responses), [
+            response.text for response in responses
+        ]
+        assert responses[0].json()["workflow_run_id"] == responses[1].json()["workflow_run_id"]
+        launched = responses[0]
         run_id = launched.json()["workflow_run_id"]
         assert launched.json()["workflow_created"] is True
         assert (
