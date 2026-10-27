@@ -1589,7 +1589,7 @@ def test_byok_full_postgresql_restore_with_separate_keyring(initialized, monkeyp
                 connection = await asyncpg.connect(restore_url)
                 try:
                     return await connection.fetchrow(
-                        "SELECT key_id, nonce, ciphertext, revoked_at FROM provider_keys "
+                        "SELECT key_id, nonce, ciphertext, revoked_at FROM personal_provider_keys "
                         "WHERE owner_id = $1 AND tenant_id = $2",
                         scope.owner,
                         scope.tenant,
@@ -1643,7 +1643,8 @@ def test_byok_full_postgresql_restore_with_separate_keyring(initialized, monkeyp
                 connection = await asyncpg.connect(restore_url)
                 try:
                     return await connection.fetchrow(
-                        "SELECT key_id, nonce, ciphertext FROM provider_keys WHERE owner_id = $1",
+                        "SELECT key_id, nonce, ciphertext FROM personal_provider_keys "
+                        "WHERE owner_id = $1",
                         scope.owner,
                     )
                 finally:

@@ -673,6 +673,11 @@ def run(browser, origin, second):
         "return [...document.querySelectorAll('button')].some(button => "
         "button.textContent.includes('Lancer le test autorisé') && !button.disabled)"
     )
+    browser.navigate(origin + "/settings")
+    browser.wait(
+        "return document.body.innerText.includes('Clés personnelles')",
+        "settings before logout",
+    )
     browser.click_text("Se déconnecter")
     browser.wait("return location.pathname === '/login'", "local logout")
     browser.navigate(origin + "/projects")
