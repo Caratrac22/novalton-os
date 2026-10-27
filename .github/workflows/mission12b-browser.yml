@@ -5,7 +5,7 @@ permissions:
   contents: read
 jobs:
   graphical:
-    if: github.head_ref == 'feature/mission12b-intelligent-cadrage-byok' || github.head_ref == 'feature/mission12c-governed-launch-ai-quality' || github.head_ref == 'feature/mission12d-governed-execution-financial-authorization'
+    if: github.head_ref == 'feature/mission12b-intelligent-cadrage-byok' || github.head_ref == 'feature/mission12c-governed-launch-ai-quality' || github.head_ref == 'feature/mission12d-governed-execution-financial-authorization' || github.head_ref == 'feature/mission12e-atomic-governed-launch'
     runs-on: ubuntu-24.04
     services:
       postgres:

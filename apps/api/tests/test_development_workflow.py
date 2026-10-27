@@ -40,6 +40,7 @@ from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tenants.models import Tenant
 from novalton_api.modules.tools.models import ToolCall
+from novalton_api.modules.workflows import service as workflow_service
 from novalton_api.modules.workflows.models import (
     WorkflowPlan,
     WorkflowRun,
@@ -48,7 +49,7 @@ from novalton_api.modules.workflows.models import (
     WorkflowStepHandoff,
     WorkflowStepRun,
 )
-from novalton_api.modules.workflows.schemas import WorkflowStepRunStatus
+from novalton_api.modules.workflows.schemas import DevelopmentWorkflowCreate, WorkflowStepRunStatus
 from novalton_api.modules.workspaces.models import Workspace
 
 
@@ -358,6 +359,98 @@ def scope() -> Scope:
     value = asyncio.run(_seed())
     yield value
     asyncio.run(_cleanup(value))
+
+
+def test_development_creation_rolls_back_plan_run_handoff_and_audit(
+    scope: Scope, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def rejected_handoff(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("injected handoff failure")
+
+    monkeypatch.setattr(workflow_service.repository, "add_handoff", rejected_handoff)
+
+    async def scenario() -> tuple[int, int, int, int]:
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                with pytest.raises(RuntimeError, match="injected handoff failure"):
+                    await workflow_service.create_development_workflow(
+                        session,
+                        tenant_id=scope.tenant_id,
+                        workspace_id=scope.workspace_id,
+                        project_id=scope.project_id,
+                        task_id=scope.task_id,
+                        data=DevelopmentWorkflowCreate(
+                            objective="Bounded test assignment",
+                            acceptance_criteria=["One verified result"],
+                        ),
+                    )
+                await session.rollback()
+            async with database.session_factory() as session:
+                counts = []
+                for model in (WorkflowPlan, WorkflowRun, WorkflowStepHandoff, AuditRecord):
+                    statement = select(func.count()).select_from(model)
+                    if model is WorkflowStepHandoff:
+                        statement = statement.where(
+                            WorkflowStepHandoff.workflow_plan_id.in_(
+                                select(WorkflowPlan.id).where(
+                                    WorkflowPlan.tenant_id == scope.tenant_id
+                                )
+                            )
+                        )
+                    else:
+                        statement = statement.where(model.tenant_id == scope.tenant_id)
+                    counts.append(int(await session.scalar(statement) or 0))
+                return tuple(counts)
+        finally:
+            await database.dispose()
+
+    assert asyncio.run(scenario()) == (0, 0, 0, 0)
+
+
+def test_caller_owned_development_transaction_rolls_back_complete_graph(scope: Scope) -> None:
+    async def scenario() -> None:
+        database = Database.from_settings(Settings.from_environment())
+        try:
+            async with database.session_factory() as session:
+                plan, run = await workflow_service.create_development_workflow(
+                    session,
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    project_id=scope.project_id,
+                    task_id=scope.task_id,
+                    data=DevelopmentWorkflowCreate(
+                        objective="Bounded transaction test",
+                        acceptance_criteria=["One verified result"],
+                    ),
+                    commit=False,
+                )
+                handoff_id = await session.scalar(
+                    select(WorkflowStepHandoff.id).where(
+                        WorkflowStepHandoff.workflow_run_id == run.id
+                    )
+                )
+                assert handoff_id is not None
+                assert len(await workflow_service.plan_graph(session, plan)) == 2
+                plan_id, run_id = plan.id, run.id
+                await session.rollback()
+            async with database.session_factory() as session:
+                assert await session.get(WorkflowPlan, plan_id) is None
+                assert await session.get(WorkflowRun, run_id) is None
+                assert await session.get(WorkflowStepHandoff, handoff_id) is None
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(AuditRecord)
+                        .where(AuditRecord.tenant_id == scope.tenant_id)
+                    )
+                    == 0
+                )
+        finally:
+            await database.dispose()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(

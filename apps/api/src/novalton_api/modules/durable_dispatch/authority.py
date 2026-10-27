@@ -18,6 +18,8 @@ from novalton_api.modules.durable_dispatch.models import (
     TaskDispatch,
 )
 from novalton_api.modules.durable_dispatch.operator import require_active_dispatch_operator
+from novalton_api.modules.launch.execution import bound_authorization, require_execution
+from novalton_api.modules.launch.execution import denied as launch_denied
 from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.workflows.models import WorkflowStepRun
 
@@ -96,6 +98,8 @@ async def binding_for_reservation(
     if row.max_model_calls == 0:
         raise denied("dispatch_model_budget_exhausted")
     if claim is None:
+        if await bound_authorization(session, workflow_run_id) is not None:
+            raise launch_denied()
         if row.status == "LEASED":
             raise denied("dispatch_claim_required")
         return row
@@ -117,6 +121,11 @@ async def binding_for_reservation(
         or row.lease_expires_at <= now
     ):
         raise denied("dispatch_claim_lost")
+    launch = await bound_authorization(session, workflow_run_id)
+    if launch is not None:
+        if claim is None:
+            raise launch_denied()
+        await require_execution(session, launch, dispatch=row)
     return row
 
 
@@ -142,6 +151,11 @@ async def reserve_model(
     row = await binding_for_reservation(session, workflow_run_id)
     if row is None:
         return None
+    launch = await bound_authorization(session, workflow_run_id)
+    if launch is not None:
+        if model is None:
+            raise launch_denied()
+        await require_execution(session, launch, dispatch=row, model=model)
     if row.model_call_count >= row.max_model_calls:
         raise denied("dispatch_model_budget_exhausted")
     if not price_known and not row.allow_unknown_cost:

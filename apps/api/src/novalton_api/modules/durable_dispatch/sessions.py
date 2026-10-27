@@ -33,12 +33,13 @@ async def authenticate_session(
     token: str,
     tenant_id: UUID,
     workspace_id: UUID,
+    lock_local_session: bool = True,
 ) -> OperatorAuthority:
     """Use only configured RS256 verification; a browser assertion is never an identity."""
     if token.startswith("nvl_"):
         from novalton_api.modules.local_auth.service import get_session
 
-        local = await get_session(session, token, lock=True)
+        local = await get_session(session, token, lock=lock_local_session)
         human = await session.get(HumanOperator, local.user_id)
         if human is None or not human.active:
             raise _unauthorized()

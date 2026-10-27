@@ -37,6 +37,8 @@ from novalton_api.modules.durable_dispatch.operator import (
     require_configured_activator,
 )
 from novalton_api.modules.durable_dispatch.schemas import DispatchRequest
+from novalton_api.modules.launch.execution import enqueue_decision, require_execution
+from novalton_api.modules.launch.models import LaunchAuthorization
 from novalton_api.modules.orchestrator import service as orchestrator_service
 from novalton_api.modules.orchestrator.schemas import OrchestrationResult
 from novalton_api.modules.workflows.cancellation import lock_workflow
@@ -145,6 +147,26 @@ async def enqueue(
     )
     if run is None:
         raise ApplicationError("resource_not_found", "Resource not found", status_code=404)
+    launch = await session.scalar(
+        select(LaunchAuthorization)
+        .where(LaunchAuthorization.workflow_run_id == run.id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    if launch is not None:
+        if enqueue_decision.get() != launch.id or operator.user_id != launch.owner_id:
+            raise denied("launch_execution_unverified")
+        await require_execution(session, launch, require_claim=False)
+        if (
+            data.max_attempts != 3
+            or data.max_model_calls != launch.max_model_calls
+            or data.allow_unknown_cost
+            or data.max_estimated_exposure is not None
+            or data.dependencies
+            or data.priority != 0
+            or data.deadline > launch.approved_at + timedelta(seconds=launch.max_duration_seconds)
+        ):
+            raise denied("launch_execution_unverified")
     configured = await repository.activation(
         session, tenant_id=tenant_id, workspace_id=workspace_id, exclusive=True
     )

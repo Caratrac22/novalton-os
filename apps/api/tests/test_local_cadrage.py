@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -14,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import delete, select, update
+from test_development_workflow import QueueProvider, _manager, _qa, _worker
 
 from novalton_api.core.config import Settings, get_settings
 from novalton_api.core.database import Database
@@ -24,6 +26,7 @@ from novalton_api.infrastructure.providers.openai_compatible import (
 )
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.main import create_app
+from novalton_api.modules.agents.models import AgentDefinition, AgentRun
 from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.cadrage import service as cadrage_service
 from novalton_api.modules.cadrage.compilation import compile_document
@@ -34,14 +37,25 @@ from novalton_api.modules.cadrage.models import (
     CadragePlan,
     CadrageSpecification,
 )
+from novalton_api.modules.developer_manager import service as manager_service
+from novalton_api.modules.developer_worker import service as developer_service
+from novalton_api.modules.durable_dispatch import service as dispatch_service
 from novalton_api.modules.durable_dispatch.identity import (
     HumanOperator,
     TenantOperatorMembership,
     WorkspaceOperatorPermission,
 )
+from novalton_api.modules.durable_dispatch.models import (
+    DispatchActivation,
+    DispatchAttempt,
+    TaskDispatch,
+)
+from novalton_api.modules.durable_dispatch.operator import authenticate_operator
 from novalton_api.modules.durable_dispatch.sessions import authenticate_session
 from novalton_api.modules.financial.models import FinancialAuthorization, FinancialReservation
 from novalton_api.modules.financial.service import reserve as reserve_financial
+from novalton_api.modules.launch import routes as launch_routes
+from novalton_api.modules.launch.models import LaunchAuthorization
 from novalton_api.modules.local_auth.bootstrap import (
     BootstrapDenied,
     bootstrap_owner,
@@ -49,10 +63,26 @@ from novalton_api.modules.local_auth.bootstrap import (
 )
 from novalton_api.modules.local_auth.models import LocalCredential, LocalLoginThrottle, LocalSession
 from novalton_api.modules.local_auth.service import hash_password
+from novalton_api.modules.model_catalog.models import ModelDefinition
+from novalton_api.modules.model_usage.models import ModelRun
+from novalton_api.modules.orchestrator.models import AgentChallengeResolution
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.provider_keys.models import ProviderKey
+from novalton_api.modules.provider_keys.rotate import rotate_records
+from novalton_api.modules.provider_keys.vault import Keyring, VaultUnavailable
+from novalton_api.modules.qa_worker import service as qa_service
 from novalton_api.modules.runtime_events.models import RuntimeEvent
+from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tenants.models import Tenant
+from novalton_api.modules.tools.models import ToolCall
+from novalton_api.modules.workflows.models import (
+    WorkflowPlan,
+    WorkflowRun,
+    WorkflowStep,
+    WorkflowStepDependency,
+    WorkflowStepHandoff,
+    WorkflowStepRun,
+)
 from novalton_api.modules.workspaces.models import Workspace
 
 
@@ -90,6 +120,50 @@ def settings_for_new_scope() -> tuple[Settings, str]:
 
 async def wipe(session, scope: Scope) -> None:
     await session.execute(delete(RuntimeEvent).where(RuntimeEvent.tenant_id == scope.tenant))
+    await session.execute(
+        delete(AgentChallengeResolution).where(AgentChallengeResolution.tenant_id == scope.tenant)
+    )
+    await session.execute(
+        delete(DispatchAttempt).where(
+            DispatchAttempt.dispatch_id.in_(
+                select(TaskDispatch.id).where(TaskDispatch.tenant_id == scope.tenant)
+            )
+        )
+    )
+    await session.execute(delete(TaskDispatch).where(TaskDispatch.tenant_id == scope.tenant))
+    await session.execute(
+        delete(LaunchAuthorization).where(LaunchAuthorization.tenant_id == scope.tenant)
+    )
+    run_ids = select(WorkflowRun.id).where(WorkflowRun.tenant_id == scope.tenant)
+    plan_ids = select(WorkflowPlan.id).where(WorkflowPlan.tenant_id == scope.tenant)
+    await session.execute(
+        delete(WorkflowStepHandoff).where(WorkflowStepHandoff.workflow_run_id.in_(run_ids))
+    )
+    await session.execute(
+        delete(WorkflowStepRun).where(WorkflowStepRun.workflow_run_id.in_(run_ids))
+    )
+    await session.execute(delete(ToolCall).where(ToolCall.tenant_id == scope.tenant))
+    await session.execute(
+        update(AgentRun).where(AgentRun.tenant_id == scope.tenant).values(model_run_id=None)
+    )
+    await session.execute(delete(ModelRun).where(ModelRun.tenant_id == scope.tenant))
+    await session.execute(delete(AgentRun).where(AgentRun.tenant_id == scope.tenant))
+    await session.execute(delete(WorkflowRun).where(WorkflowRun.tenant_id == scope.tenant))
+    await session.execute(
+        delete(WorkflowStepDependency).where(WorkflowStepDependency.workflow_plan_id.in_(plan_ids))
+    )
+    await session.execute(delete(WorkflowStep).where(WorkflowStep.workflow_plan_id.in_(plan_ids)))
+    await session.execute(delete(WorkflowPlan).where(WorkflowPlan.tenant_id == scope.tenant))
+    await session.execute(delete(AgentDefinition).where(AgentDefinition.tenant_id == scope.tenant))
+    await session.execute(
+        delete(DispatchActivation).where(DispatchActivation.tenant_id == scope.tenant)
+    )
+    await session.execute(
+        delete(ModelDefinition).where(
+            ModelDefinition.provider_id == "local_cadrage",
+            ModelDefinition.provider_model_id == f"launch-{scope.login}",
+        )
+    )
     await session.execute(
         delete(FinancialReservation).where(
             FinancialReservation.authorization_id.in_(
@@ -712,6 +786,423 @@ def test_approved_plan_compilation_is_idempotent_scoped_and_revoked(initialized)
         assert client.get(check_url, headers={"Authorization": "Bearer invalid"}).status_code == 401
 
 
+@pytest.mark.parametrize("mode", ["qa_pass", "revoke_mid", "cancel_mid"])
+def test_separate_launch_decision_creates_inert_workflow_and_revokes(
+    initialized, monkeypatch, mode
+):
+    scope, password, _ = initialized
+    model_id = f"launch-{scope.login}"
+    monkeypatch.setenv("NOVALTON_LOCAL_MODEL_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("NOVALTON_LOCAL_MODEL_ID", model_id)
+    monkeypatch.setenv("NOVALTON_DURABLE_DISPATCH_ENABLED", "true")
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_USER_ID", str(scope.owner))
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_TENANT_ID", str(scope.tenant))
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_WORKSPACE_ID", str(scope.workspace))
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_ID", scope.login)
+    operator_key = "disposable-test-dispatch-key-only"
+    monkeypatch.setenv(
+        "NOVALTON_DISPATCH_OPERATOR_KEY_SHA256", hashlib.sha256(operator_key.encode()).hexdigest()
+    )
+    monkeypatch.setenv(
+        "NOVALTON_DISPATCH_OPERATOR_PERMISSIONS",
+        "activation.configure,dispatch.enqueue,dispatch.read,dispatch.cancel,dispatch.resolve",
+    )
+    monkeypatch.setenv("NOVALTON_MODEL_ROUTER_FORCE_MODEL", f"local_cadrage::{model_id}")
+    get_settings.cache_clear()
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+        ).json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        project = client.post(
+            path(scope) + "/projects",
+            headers=auth,
+            json={"name": "Launch test", "slug": "launch-test", "description": None},
+        ).json()
+        task = client.post(
+            path(scope) + f"/projects/{project['id']}/tasks",
+            headers=auth,
+            json={"title": "Borne jetable"},
+        ).json()
+        base = path(scope) + f"/projects/{project['id']}/conversations"
+        conversation = client.post(base, headers=auth, json={"title": "Décision"}).json()["id"]
+        specs = base + f"/{conversation}/specifications"
+        document = {
+            "expected_version": 0,
+            "summary": "Un formulaire jetable",
+            "items": [
+                {"topic": key, "value": value, "provenance": "USER", "state": "CONFIRMED"}
+                for key, value in (
+                    ("objective", "Créer un formulaire"),
+                    ("execution.kind", "development"),
+                    ("acceptance.1", "Les champs sont vérifiés"),
+                )
+            ],
+        }
+        assert client.put(specs, headers=auth, json=document).status_code == 200
+        plan_url = base + f"/{conversation}/plans"
+        plan = client.post(
+            plan_url, headers=auth, json={"expected_specification_version": 1}
+        ).json()
+        decision = plan_url + f"/{plan['id']}/decision"
+        assert (
+            client.post(decision, headers=auth, json={"decision": "READY_FOR_REVIEW"}).status_code
+            == 200
+        )
+        assert client.post(decision, headers=auth, json={"decision": "APPROVED"}).status_code == 200
+        compilation = client.post(
+            plan_url + f"/{plan['id']}/compilations", headers=auth, json={"task_id": task["id"]}
+        ).json()
+        url = plan_url + f"/{plan['id']}/compilations/{compilation['id']}/launch-authorizations"
+        request = {
+            "confirmation": "AUTHORIZE_DISPOSABLE_TEST_LAUNCH",
+            "request_id": str(uuid4()),
+            "environment": "DISPOSABLE_TEST",
+            "provider_id": "local",
+            "model_id": model_id,
+            "max_model_calls": 3,
+            "max_duration_seconds": 180,
+            "current_password": password,
+        }
+        assert client.post(url, json=request).status_code == 401
+        assert client.post(url, headers=auth, json=request).status_code == 403
+
+        async def grant(session):
+            for permission in ("activation.configure", "dispatch.enqueue", "dispatch.cancel"):
+                session.add(
+                    WorkspaceOperatorPermission(
+                        user_id=scope.owner,
+                        tenant_id=scope.tenant,
+                        workspace_id=scope.workspace,
+                        permission=permission,
+                        active=True,
+                    )
+                )
+            await session.commit()
+
+        db_call(grant)
+        assert client.post(url, headers=auth, json=request).status_code == 409  # BACKLOG
+
+        async def ready(session):
+            await session.execute(
+                update(Task).where(Task.id == UUID(task["id"])).values(status="READY")
+            )
+            await session.commit()
+
+        db_call(ready)
+        assert client.post(
+            url, headers=auth, json=request | {"current_password": "wrong"}
+        ).status_code in {401, 403}
+        assert (
+            client.post(url, headers=auth, json=request | {"confirmation": "YES"}).status_code
+            == 422
+        )
+        created = client.post(url, headers=auth, json=request)
+        assert created.status_code == 201, created.text
+        assert created.json()["workflow_created"] is False
+        assert created.json()["financial_authorization_id"] is None
+        assert client.post(url, headers=auth, json=request).json()["id"] == created.json()["id"]
+        assert (
+            client.post(url, headers=auth, json=request | {"model_id": "changed"}).status_code
+            == 409
+        )
+        assert client.get(url, headers=auth).json()["items"][0]["id"] == created.json()["id"]
+        assert (
+            client.get(url.replace(str(compilation["id"]), str(uuid4())), headers=auth).status_code
+            == 404
+        )
+
+        async def no_run(session):
+            return await session.scalar(
+                select(WorkflowRun.id).where(WorkflowRun.tenant_id == scope.tenant)
+            )
+
+        assert db_call(no_run) is None
+        launch_url = url + f"/{created.json()['id']}/workflow"
+        launch_request = {
+            "confirmation": "CREATE_DISPOSABLE_TEST_WORKFLOW",
+            "request_id": str(uuid4()),
+            "current_password": password,
+        }
+        assert client.post(launch_url, headers=auth, json=launch_request).status_code == 409
+
+        async def enable_local(session):
+            session.add(
+                DispatchActivation(
+                    tenant_id=scope.tenant,
+                    workspace_id=scope.workspace,
+                    enabled=True,
+                    generation=1,
+                )
+            )
+            session.add(
+                ModelDefinition(
+                    provider_id="local_cadrage",
+                    provider_model_id=model_id,
+                    display_name="Disposable local test",
+                    status="AVAILABLE",
+                    execution_target_class="LOCAL",
+                    free_allowlisted=True,
+                    context_window=128_000,
+                    reasoning=True,
+                    coding=True,
+                    structured_output=True,
+                    contract_enforcement_grade="PROVIDER_ENFORCED",
+                    enforcement_metadata_source="disposable_test",
+                    input_price_per_million=Decimal(0),
+                    output_price_per_million=Decimal(0),
+                    currency="USD",
+                )
+            )
+            for service in (manager_service, developer_service, qa_service):
+                prefix = (
+                    "DEVELOPER_MANAGER"
+                    if service is manager_service
+                    else ("DEVELOPER_WORKER" if service is developer_service else "QA_WORKER")
+                )
+                session.add(
+                    AgentDefinition(
+                        tenant_id=scope.tenant,
+                        workspace_id=scope.workspace,
+                        name=getattr(service, f"{prefix}_NAME"),
+                        slug=getattr(service, f"{prefix}_SLUG"),
+                        version=developer_service.DEVELOPER_WORKER_VERSION
+                        if service is developer_service
+                        else 1,
+                        status="ENABLED",
+                        category=getattr(service, f"{prefix}_CATEGORY"),
+                        mission=getattr(service, f"{prefix}_MISSION"),
+                        capabilities=getattr(service, f"{prefix}_CAPABILITIES"),
+                        permissions=developer_service.DEVELOPER_WORKER_PERMISSIONS
+                        if service is developer_service
+                        else [],
+                    )
+                )
+            await session.commit()
+
+        db_call(enable_local)
+        assert (
+            client.post(
+                launch_url,
+                headers=auth,
+                json=launch_request | {"confirmation": "YES"},
+            ).status_code
+            == 422
+        )
+        original_append = launch_routes.append_record
+
+        async def reject_binding_audit(session, *, data, commit=False):
+            if data.action == "launch.workflow.created":
+                raise RuntimeError("injected binding audit failure")
+            return await original_append(session, data=data, commit=commit)
+
+        monkeypatch.setattr(launch_routes, "append_record", reject_binding_audit)
+        assert client.post(launch_url, headers=auth, json=launch_request).status_code == 500
+        monkeypatch.setattr(launch_routes, "append_record", original_append)
+        assert db_call(no_run) is None
+
+        async def no_binding(session):
+            return await session.scalar(
+                select(LaunchAuthorization.workflow_run_id).where(
+                    LaunchAuthorization.id == UUID(created.json()["id"])
+                )
+            )
+
+        assert db_call(no_binding) is None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(
+                pool.map(
+                    lambda _: client.post(launch_url, headers=auth, json=launch_request), range(2)
+                )
+            )
+        assert all(response.status_code == 201 for response in responses), [
+            response.text for response in responses
+        ]
+        assert responses[0].json()["workflow_run_id"] == responses[1].json()["workflow_run_id"]
+        launched = responses[0]
+        run_id = launched.json()["workflow_run_id"]
+        assert launched.json()["workflow_created"] is True
+        assert (
+            client.post(launch_url, headers=auth, json=launch_request).json()["workflow_run_id"]
+            == run_id
+        )
+        assert (
+            client.post(
+                launch_url, headers=auth, json=launch_request | {"request_id": str(uuid4())}
+            ).status_code
+            == 409
+        )
+        assert (
+            client.post(path(scope) + f"/workflow-runs/{run_id}/advance", headers=auth).status_code
+            == 409
+        )
+
+        async def created_graph(session):
+            return (
+                await session.scalar(
+                    select(WorkflowRun.status).where(WorkflowRun.id == UUID(run_id))
+                ),
+                await session.scalar(
+                    select(WorkflowStepHandoff.id).where(
+                        WorkflowStepHandoff.workflow_run_id == UUID(run_id)
+                    )
+                ),
+            )
+
+        status, handoff_id = db_call(created_graph)
+        assert status == "CREATED" and handoff_id is not None
+        dispatch_url = url + f"/{created.json()['id']}/dispatch"
+        dispatch_request = {
+            "confirmation": "ENQUEUE_DISPOSABLE_TEST_WORKFLOW",
+            "request_id": str(uuid4()),
+            "current_password": password,
+        }
+        assert client.post(dispatch_url, json=dispatch_request).status_code == 401
+        assert (
+            client.post(
+                dispatch_url, headers=auth, json=dispatch_request | {"confirmation": "YES"}
+            ).status_code
+            == 422
+        )
+        queued = client.post(dispatch_url, headers=auth, json=dispatch_request)
+        assert queued.status_code == 201, queued.text
+        assert queued.json()["status"] == "READY"
+        assert client.get(
+            f"/api/v1/tenants/{uuid4()}/workspaces/{scope.workspace}/projects/{project['id']}/"
+            f"conversations/{conversation}/plans/{plan['id']}/compilations/{compilation['id']}/"
+            f"launch-authorizations/{created.json()['id']}/dispatch",
+            headers=auth,
+        ).status_code in {403, 404}
+        repeated = client.post(dispatch_url, headers=auth, json=dispatch_request)
+        assert (
+            repeated.status_code == 201
+            and repeated.json()["dispatch_id"] == queued.json()["dispatch_id"]
+        )
+        assert (
+            client.post(
+                dispatch_url, headers=auth, json=dispatch_request | {"request_id": str(uuid4())}
+            ).status_code
+            == 409
+        )
+
+        provider = QueueProvider([_manager(), _worker(), _qa("PASS")])
+        provider.provider_id = "local_cadrage"
+        for expected in (
+            ("DEVELOPER_MANAGER",)
+            if mode != "qa_pass"
+            else ("DEVELOPER_MANAGER", "DEVELOPER_WORKER", "QA_WORKER")
+        ):
+            result = db_call(
+                lambda session: dispatch_service.run_once(
+                    session,
+                    registry=ProviderRegistry((provider,)),
+                    tenant_id=scope.tenant,
+                    workspace_id=scope.workspace,
+                    owner=uuid4(),
+                )
+            )
+            assert result is not None, expected
+        if mode == "qa_pass":
+            assert len(provider.calls) == 3
+            assert (
+                db_call(
+                    lambda session: dispatch_service.run_once(
+                        session,
+                        registry=ProviderRegistry((provider,)),
+                        tenant_id=scope.tenant,
+                        workspace_id=scope.workspace,
+                        owner=uuid4(),
+                    )
+                )
+                is None
+            )
+
+        async def completed(session):
+            return (
+                await session.scalar(
+                    select(WorkflowRun.status).where(WorkflowRun.id == UUID(run_id))
+                ),
+                await session.scalar(
+                    select(TaskDispatch.status).where(
+                        TaskDispatch.id == UUID(queued.json()["dispatch_id"])
+                    )
+                ),
+                list(
+                    await session.scalars(
+                        select(ModelRun.status).where(ModelRun.tenant_id == scope.tenant)
+                    )
+                ),
+            )
+
+        if mode == "qa_pass":
+            run_status, dispatch_status, model_statuses = db_call(completed)
+            assert run_status == "COMPLETED" and dispatch_status == "DONE"
+            assert model_statuses == ["SUCCEEDED"] * 3
+            tracked = client.get(dispatch_url, headers=auth)
+            assert tracked.status_code == 200 and tracked.json()["qa_verdict"] == "PASS"
+            assert [step["status"] for step in tracked.json()["steps"]] == ["COMPLETED"] * 3
+            assert (
+                client.get(
+                    dispatch_url.replace(str(created.json()["id"]), str(uuid4())), headers=auth
+                ).status_code
+                == 404
+            )
+        if mode == "cancel_mid":
+            cancelled = db_call(
+                lambda session: dispatch_service.cancel_dispatch(
+                    session,
+                    operator=authenticate_operator(operator_key),
+                    tenant_id=scope.tenant,
+                    workspace_id=scope.workspace,
+                    dispatch_id=UUID(queued.json()["dispatch_id"]),
+                )
+            )
+            assert cancelled.status == "CANCELLED"
+            assert (
+                db_call(
+                    lambda session: dispatch_service.run_once(
+                        session,
+                        registry=ProviderRegistry((provider,)),
+                        tenant_id=scope.tenant,
+                        workspace_id=scope.workspace,
+                        owner=uuid4(),
+                    )
+                )
+                is None
+            )
+            assert len(provider.calls) == 1
+        revoked = client.post(
+            url + f"/{created.json()['id']}/revoke",
+            headers=auth,
+            json={"current_password": password},
+        )
+        assert revoked.status_code == 200 and revoked.json()["version"] == 2
+        if mode == "revoke_mid":
+            with pytest.raises(ApplicationError) as failure:
+                db_call(
+                    lambda session: dispatch_service.run_once(
+                        session,
+                        registry=ProviderRegistry((provider,)),
+                        tenant_id=scope.tenant,
+                        workspace_id=scope.workspace,
+                        owner=uuid4(),
+                    )
+                )
+            assert failure.value.code == "launch_execution_unverified"
+            run_status, dispatch_status, model_statuses = db_call(completed)
+            assert run_status == "RUNNING" and dispatch_status == "BLOCKED"
+            assert model_statuses == ["SUCCEEDED"] and len(provider.calls) == 1
+        assert client.post(dispatch_url, headers=auth, json=dispatch_request).status_code == 409
+        assert client.post(url, headers=auth, json=request).status_code == 409
+        document["expected_version"] = 1
+        document["summary"] = "Cahier mis à jour"
+        assert client.put(specs, headers=auth, json=document).status_code == 200
+        assert (
+            client.post(url, headers=auth, json=request | {"request_id": str(uuid4())}).status_code
+            == 409
+        )
+
+
 def test_personal_provider_key_is_encrypted_isolated_and_revocable(initialized, monkeypatch):
     scope, password, _ = initialized
     monkeypatch.setenv(
@@ -775,6 +1266,67 @@ def test_personal_provider_key_is_encrypted_isolated_and_revocable(initialized, 
             == 204
         )
         assert client.get(path(scope) + "/provider-keys", headers=auth).json()["items"] == []
+
+
+def test_byok_rotation_and_backup_restore_require_both_key_versions(initialized, monkeypatch):
+    scope, password, _ = initialized
+    old = base64.b64encode(b"a" * 32).decode()
+    new = base64.b64encode(b"b" * 32).decode()
+    monkeypatch.setenv("NOVALTON_BYOK_KEYRING", json.dumps({"v1": old}))
+    monkeypatch.setenv("NOVALTON_BYOK_ACTIVE_KEY_ID", "v1")
+    secret = "synthetic-rotation-only-no-provider-call"
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+        ).json()["token"]
+        saved = client.put(
+            path(scope) + "/provider-keys/openrouter",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"secret": secret, "current_password": password},
+        )
+        assert saved.status_code == 200 and secret not in saved.text
+
+    async def backup(session):
+        row = await session.scalar(select(ProviderKey).where(ProviderKey.owner_id == scope.owner))
+        assert row is not None
+        return row.key_id, row.nonce, row.ciphertext
+
+    old_record = db_call(backup)
+    monkeypatch.setenv("NOVALTON_BYOK_KEYRING", json.dumps({"v1": old, "v2": new}))
+    monkeypatch.setenv("NOVALTON_BYOK_ACTIVE_KEY_ID", "v2")
+    ring = Keyring.from_environment()
+
+    async def rotate(session):
+        async with session.begin():
+            assert await rotate_records(session, ring) == 1
+
+    db_call(rotate)
+    current_record = db_call(backup)
+    assert current_record[0] == "v2" and current_record[2] != old_record[2]
+    scope_args = dict(
+        owner=scope.owner, tenant=scope.tenant, workspace=scope.workspace, provider="openrouter"
+    )
+    assert ring.decrypt(*current_record, **scope_args) == secret
+    assert ring.decrypt(*old_record, **scope_args) == secret
+    with pytest.raises(VaultUnavailable):
+        ring.decrypt(*current_record, **(scope_args | {"workspace": uuid4()}))
+    with pytest.raises(VaultUnavailable):
+        Keyring("v1", {"v1": b"a" * 32}).decrypt(*current_record, **scope_args)
+
+    async def restore_backup(session):
+        async with session.begin():
+            row = await session.scalar(
+                select(ProviderKey).where(ProviderKey.owner_id == scope.owner).with_for_update()
+            )
+            assert row is not None
+            row.key_id, row.nonce, row.ciphertext = old_record
+
+    db_call(restore_backup)
+    assert db_call(backup) == old_record
+    assert ring.decrypt(*db_call(backup), **scope_args) == secret
+    with pytest.raises(VaultUnavailable):
+        db_call(lambda session: rotate_records(session, Keyring("v2", {"v2": b"b" * 32})))
+    assert db_call(backup) == old_record
 
 
 def test_sensitive_key_reauthentication_is_rate_limited(initialized, monkeypatch):

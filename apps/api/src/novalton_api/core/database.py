@@ -61,6 +61,7 @@ from novalton_api.modules.git_changesets.models import GitCommitAction  # noqa: 
 from novalton_api.modules.github_publications.models import (  # noqa: E402, I001
     GitHubPublicationAction,  # noqa: E402, F401
 )
+from novalton_api.modules.launch.models import LaunchAuthorization  # noqa: E402, F401
 from novalton_api.modules.local_auth.models import (  # noqa: E402, F401
     LocalCredential,
     LocalLoginThrottle,

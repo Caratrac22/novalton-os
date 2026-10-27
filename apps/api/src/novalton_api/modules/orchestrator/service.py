@@ -4,6 +4,7 @@ import asyncio
 import logging
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.core.exceptions import ApplicationError
@@ -18,6 +19,8 @@ from novalton_api.modules.agents.contracts import (
 )
 from novalton_api.modules.agents.models import AgentRun
 from novalton_api.modules.agents.schemas import AgentRunStatus
+from novalton_api.modules.launch.execution import require_execution
+from novalton_api.modules.launch.models import LaunchAuthorization
 from novalton_api.modules.orchestrator import challenge_repository, specializations
 from novalton_api.modules.orchestrator.schemas import OrchestrationOutcome, OrchestrationResult
 from novalton_api.modules.qa_worker.contracts import (
@@ -699,6 +702,18 @@ async def advance(
     workflow_run_id: UUID,
 ) -> OrchestrationResult:
     """Translate a lost cancellation race to the durable cancelled outcome."""
+    bound = await session.scalar(
+        select(LaunchAuthorization)
+        .where(
+            LaunchAuthorization.workflow_run_id == workflow_run_id,
+            LaunchAuthorization.tenant_id == tenant_id,
+            LaunchAuthorization.workspace_id == workspace_id,
+        )
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    if bound is not None:
+        await require_execution(session, bound)
     try:
         result = await _advance_active(
             session,
