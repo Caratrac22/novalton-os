@@ -4,12 +4,16 @@ import asyncio
 import base64
 import hashlib
 import json
+import shutil
+import subprocess
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -1515,6 +1519,134 @@ def test_byok_rotation_and_backup_restore_require_both_key_versions(initialized,
     with pytest.raises(VaultUnavailable):
         db_call(lambda session: rotate_records(session, Keyring("v2", {"v2": b"b" * 32})))
     assert db_call(backup) == old_record
+
+
+def test_byok_full_postgresql_restore_with_separate_keyring(initialized, monkeypatch):
+    if any(
+        shutil.which(command) is None for command in ("pg_dump", "pg_restore", "createdb", "dropdb")
+    ):
+        pytest.skip("PostgreSQL backup utilities unavailable")
+    scope, password, settings = initialized
+    assert settings.environment == "test"
+    assert settings.database_url == settings.test_database_url
+    assert urlsplit(settings.database_url).path == "/novalton_test"
+    old_key = b"r" * 32
+    new_key = b"s" * 32
+    monkeypatch.setenv(
+        "NOVALTON_BYOK_KEYRING", json.dumps({"before": base64.b64encode(old_key).decode()})
+    )
+    monkeypatch.setenv("NOVALTON_BYOK_ACTIVE_KEY_ID", "before")
+    secret = "synthetic-full-restore-no-provider-call"
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+        ).json()["token"]
+        response = client.put(
+            path(scope) + "/provider-keys/openrouter",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"secret": secret, "current_password": password},
+        )
+        assert response.status_code == 200 and secret not in response.text
+
+    url = urlsplit(settings.database_url)
+    admin_url = urlunsplit(url._replace(path="/postgres"))
+    restore_name = "novalton_restore_" + uuid4().hex
+    restore_url = urlunsplit(url._replace(path="/" + restore_name))
+
+    def command(*arguments):
+        # Never include the backup or synthetic key material in CI output.
+        result = subprocess.run(arguments, capture_output=True, check=False, timeout=45)
+        assert result.returncode == 0, (arguments[0], result.returncode)
+
+    with tempfile.TemporaryDirectory(prefix="novalton-byok-restore-") as folder:
+        archive = folder + "/snapshot.dump"
+        command("pg_dump", "--format=custom", "--file", archive, "--dbname", settings.database_url)
+        command("createdb", "--maintenance-db", admin_url, restore_name)
+        try:
+            command("pg_restore", "--no-owner", "--no-privileges", "--dbname", restore_url, archive)
+
+            async def restored():
+                import asyncpg
+
+                connection = await asyncpg.connect(restore_url)
+                try:
+                    return await connection.fetchrow(
+                        "SELECT key_id, nonce, ciphertext, revoked_at FROM provider_keys "
+                        "WHERE owner_id = $1 AND tenant_id = $2",
+                        scope.owner,
+                        scope.tenant,
+                    )
+                finally:
+                    await connection.close()
+
+            record = asyncio.run(restored())
+            assert record is not None and record["key_id"] == "before"
+            scope_args = dict(
+                owner=scope.owner,
+                tenant=scope.tenant,
+                workspace=scope.workspace,
+                provider="openrouter",
+            )
+            old_ring = Keyring("before", {"before": old_key})
+            assert (
+                old_ring.decrypt(
+                    record["key_id"], record["nonce"], record["ciphertext"], **scope_args
+                )
+                == secret
+            )
+            with pytest.raises(VaultUnavailable):
+                Keyring("after", {"after": new_key}).decrypt(
+                    record["key_id"], record["nonce"], record["ciphertext"], **scope_args
+                )
+            monkeypatch.setenv(
+                "NOVALTON_BYOK_KEYRING",
+                json.dumps(
+                    {
+                        "before": base64.b64encode(old_key).decode(),
+                        "after": base64.b64encode(new_key).decode(),
+                    }
+                ),
+            )
+            monkeypatch.setenv("NOVALTON_BYOK_ACTIVE_KEY_ID", "after")
+
+            async def rotate_restored():
+                import asyncpg
+                from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+                engine = create_async_engine(
+                    restore_url.replace("postgresql://", "postgresql+asyncpg://")
+                )
+                try:
+                    factory = async_sessionmaker(engine, expire_on_commit=False)
+                    async with factory.begin() as session:
+                        assert await rotate_records(session, Keyring.from_environment()) >= 1
+                finally:
+                    await engine.dispose()
+                connection = await asyncpg.connect(restore_url)
+                try:
+                    return await connection.fetchrow(
+                        "SELECT key_id, nonce, ciphertext FROM provider_keys WHERE owner_id = $1",
+                        scope.owner,
+                    )
+                finally:
+                    await connection.close()
+
+            rotated = asyncio.run(rotate_restored())
+            assert rotated is not None and rotated["key_id"] == "after"
+            assert (
+                Keyring("after", {"after": new_key}).decrypt(
+                    rotated["key_id"], rotated["nonce"], rotated["ciphertext"], **scope_args
+                )
+                == secret
+            )
+            with pytest.raises(VaultUnavailable):
+                old_ring.decrypt(
+                    rotated["key_id"], rotated["nonce"], rotated["ciphertext"], **scope_args
+                )
+            # The original database remains independent of the restored rotation.
+            assert record["revoked_at"] is None
+        finally:
+            command("dropdb", "--maintenance-db", admin_url, restore_name)
 
 
 def test_sensitive_key_reauthentication_is_rate_limited(initialized, monkeypatch):
