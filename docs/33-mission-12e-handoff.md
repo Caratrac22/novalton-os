@@ -14,10 +14,10 @@ commit ; un document versionné ne peut indiquer son propre SHA.
 | B seconde autorisation humaine | P0 | PASS | Décision persistante et révocable ; reauth, grants et versions ; CI #40246050058 SUCCESS. La décision seule ne crée pas de run. |
 | C revalidation de création | P0 | PASS | Recontrôle sous verrou de l'autorisation, de la proposition, des grants, du profil/base de test, de l'activation et du modèle local. Test PostgreSQL et CI #40316187645 SUCCESS. |
 | D liaison cadrage/workflow | P0 | PASS | Un seul run/compilation et liaison durable dans le commit du graphe, handoff et audit ; rollback et idempotence concurrente testés sur PostgreSQL. CI #40316187645 SUCCESS. |
-| E exécution jetable complète | P0 | BLOCKED | Aucun parcours cadrage → Manager → Developer → QA qualifié. |
+| E exécution jetable complète | P0 | IN_PROGRESS | Route de dispatch réauthentifiée, garde par claim et modèle local à tarif zéro ; tests déterministes QA PASS, révocation après Manager et annulation ajoutés ; confirmer sur CI finale avant PASS. |
 | F chemins facturables | P0 | PARTIAL | Fournisseur distant désactivé dans le registre standard ; injection explicite non qualifiée pour la dépense. Cartographie à poursuivre. |
 | G BYOK/restauration | P1 | TODO | Rotation, sauvegarde et restauration non validées pour cette mission. |
-| H interface | P1 | PARTIAL | Formulaire distinct de décision locale et révocation, protégé par Origin sur le proxy cookie Next ; lancement désactivé et aucune progression fictive. Tests web/Chromium de la branche à relever. |
+| H interface | P1 | IN_PROGRESS | Création, dispatch et lecture des états persistés reliés au proxy Next avec Origin vérifié ; lint/typecheck/build locaux passent, Chromium final à relever. |
 | I Chromium hostile | P0 | PARTIAL | Gate graphique du code final #40316187661 SUCCESS ; les scénarios hostiles propres à la nouvelle route de création restent à écrire. |
 | J qualité du chat | P1 | BLOCKED | Modèle local indisponible dans ce runtime ; `REAL_MODEL_QUALITY_NOT_VERIFIED`. |
 
@@ -98,12 +98,21 @@ ces verrous ; la route termine sa transaction de lecture, puis revalide la
 session, les grants et le rôle sous verrous exclusifs avant toute écriture.
 La CI #40316187645 confirme la correction.
 
-Les chemins d'avance directe et d'enqueue historiques refusent explicitement
-les runs liés au cadrage avec `launch_execution_unverified`. Ce verrou demeure
-jusqu'à une validation distincte de l'autorité par étape, de la révocation, du
-modèle routé et des limites de dépense. La révocation d'une décision après
-création ne peut donc pas déclencher une exécution de ce run. Les autres
-chemins historiques ne changent pas. Cette tranche ne démontre pas E.
+L'avance directe reste interdite pour les runs liés au cadrage. Le dispatch
+requiert désormais une nouvelle requête humaine réauthentifiée, une confirmation
+littérale, un UUID idempotent et le contexte interne de la route. La transaction
+vérifie de nouveau le plan, la compilation, la spécification, le projet, la tâche,
+l'empreinte, les grants, la décision, l'activation et le modèle local disponible
+avec les deux tarifs explicitement nuls. Seul le profil `test` sur la base
+`novalton_test` peut accepter cette requête. Le worker prend ensuite un claim
+durable et recontrôle décision, génération, grants, budget et modèle à chaque
+réservation. Un résultat tardif traverse de nouveau les barrières de l'effet.
+Le parcours Manager → Developer → QA est exercé avec un adaptateur déterministe,
+sans appel réseau ni coût, mais cette tranche n'est PASS qu'après la CI finale.
+Le test complémentaire coupe l'autorisation après Manager et vérifie qu'aucun
+appel Developer/QA n'est émis ; un troisième scénario annule le run et refuse
+le claim suivant. Les effets incertains du dispatcher restent couverts par les
+tests historiques, sans preuve spécifique supplémentaire au run de cadrage.
 
 La première CI de la migration 0049 a arrêté le test injecté sur une attente
 erronée : le middleware HTTP a converti l'exception en réponse 500, au lieu
@@ -115,8 +124,8 @@ l'absence de run et de liaison ; la CI #40316187645 est SUCCESS.
 | État | Preuve 12E |
 |---|---|
 | `WORKFLOW_CREATED` | Graphe et liaison depuis le cadrage confirmés sur PostgreSQL par CI #40316187645 ; aucun modèle appelé. |
-| `WORKFLOW_EXECUTED` | Non démontré depuis le cadrage. |
-| `QA_PASSED` | Non démontré depuis le cadrage. |
+| `WORKFLOW_EXECUTED` | Scénario déterministe en attente de confirmation sur le HEAD final exact. |
+| `QA_PASSED` | Verdict `PASS` et trois ModelRuns attendus dans le test PostgreSQL ; CI finale à relever. |
 | `PRODUCTION_ACCEPTED` | Interdit dans cette mission. |
 
 La révision financière 12D reste une estimation et non un plafond de facture.
@@ -128,7 +137,7 @@ payant, publication externe, merge ou déploiement de production.
 | Chemin | Autorité effective dans cette tranche |
 |---|---|
 | Chat de cadrage (`cadrage/generation.py`) | Appel direct à `local_cadrage`, lorsque configuré ; distinct du workflow. |
-| Avance orchestrée et agents (`orchestrator`, `agents/execution.py`) | Le routeur sélectionne un fournisseur du registre de l'application ; les runs issus du cadrage sont refusés avant l'avance. |
+| Avance orchestrée et agents (`orchestrator`, `agents/execution.py`) | Les runs de cadrage exigent un claim durable actif et le modèle catalogué `local_cadrage` avec prix USD zéro. |
 | Routes directes Manager, Developer et QA | Chemins historiques séparés de la décision de lancement ; aucun droit de dépense ne découle du BYOK. |
 | Registre standard (`main.py`) | Seul `local_cadrage` peut être enregistré par configuration ; fournisseur distant absent de ce registre. |
 

@@ -22,7 +22,7 @@ from novalton_api.modules.cadrage.plan import get_plan
 from novalton_api.modules.cadrage.service import current_specification, get_conversation
 from novalton_api.modules.durable_dispatch import service as dispatch_service
 from novalton_api.modules.durable_dispatch.identity import TenantOperatorMembership
-from novalton_api.modules.durable_dispatch.models import DispatchActivation
+from novalton_api.modules.durable_dispatch.models import DispatchActivation, TaskDispatch
 from novalton_api.modules.durable_dispatch.operator import OperatorAuthority
 from novalton_api.modules.durable_dispatch.saas_access import require_saas_access
 from novalton_api.modules.durable_dispatch.schemas import DispatchRequest
@@ -31,7 +31,9 @@ from novalton_api.modules.launch.execution import enqueue_decision, require_exec
 from novalton_api.modules.launch.models import LaunchAuthorization
 from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.projects.models import Project
+from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tasks.models import Task
+from novalton_api.modules.workflows.models import WorkflowRun, WorkflowStep, WorkflowStepRun
 from novalton_api.modules.workflows.schemas import DevelopmentWorkflowCreate
 from novalton_api.modules.workflows.service import create_development_workflow
 
@@ -665,6 +667,102 @@ async def dispatch_authorized_workflow(
         "dispatch_id": dispatch.id,
         "workflow_run_id": row.workflow_run_id,
         "status": dispatch.status,
+    }
+
+
+@router.get("/{launch_authorization_id}/dispatch")
+async def dispatch_status(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    project_id: UUID,
+    conversation_id: UUID,
+    plan_id: UUID,
+    compilation_id: UUID,
+    launch_authorization_id: UUID,
+    session: Session,
+    operator: Human,
+) -> dict[str, object]:
+    owner = _owner(operator)
+    await owner.require_human(
+        session, "workspace.write", tenant_id=tenant_id, workspace_id=workspace_id
+    )
+    await _scoped(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        conversation_id=conversation_id,
+        plan_id=plan_id,
+        compilation_id=compilation_id,
+        owner_id=owner.user_id,
+        lock=False,
+    )
+    row = await session.scalar(
+        select(LaunchAuthorization).where(
+            LaunchAuthorization.id == launch_authorization_id,
+            LaunchAuthorization.owner_id == owner.user_id,
+            LaunchAuthorization.tenant_id == tenant_id,
+            LaunchAuthorization.workspace_id == workspace_id,
+            LaunchAuthorization.project_id == project_id,
+            LaunchAuthorization.plan_id == plan_id,
+            LaunchAuthorization.compilation_id == compilation_id,
+        )
+    )
+    if row is None:
+        raise _missing()
+    dispatch = (
+        await session.scalar(
+            select(TaskDispatch).where(
+                TaskDispatch.workflow_run_id == row.workflow_run_id,
+                TaskDispatch.tenant_id == tenant_id,
+                TaskDispatch.workspace_id == workspace_id,
+            )
+        )
+        if row.workflow_run_id is not None
+        else None
+    )
+    run = (
+        await session.scalar(select(WorkflowRun).where(WorkflowRun.id == row.workflow_run_id))
+        if row.workflow_run_id is not None
+        else None
+    )
+    steps = (
+        (
+            await session.execute(
+                select(WorkflowStep.step_key, WorkflowStepRun.status)
+                .join(WorkflowStepRun, WorkflowStepRun.workflow_step_id == WorkflowStep.id)
+                .where(WorkflowStepRun.workflow_run_id == row.workflow_run_id)
+                .order_by(WorkflowStep.position)
+            )
+        ).all()
+        if run is not None
+        else []
+    )
+    verdict = (
+        await session.scalar(
+            select(RuntimeEvent.payload["qa_verdict"].astext)
+            .where(
+                RuntimeEvent.tenant_id == tenant_id,
+                RuntimeEvent.workspace_id == workspace_id,
+                RuntimeEvent.project_id == project_id,
+                RuntimeEvent.event_type == "workflow.step.completed",
+                RuntimeEvent.payload["workflow_run_id"].astext == str(row.workflow_run_id),
+                RuntimeEvent.payload["qa_verdict"].astext.is_not(None),
+            )
+            .order_by(RuntimeEvent.occurred_at.desc(), RuntimeEvent.id.desc())
+            .limit(1)
+        )
+        if run is not None
+        else None
+    )
+    return {
+        "dispatch_id": dispatch.id if dispatch else None,
+        "dispatch_status": dispatch.status if dispatch else None,
+        "stop_reason": dispatch.stop_reason if dispatch else None,
+        "workflow_run_id": row.workflow_run_id,
+        "workflow_status": run.status if run else None,
+        "steps": [{"step_key": key, "status": status} for key, status in steps],
+        "qa_verdict": verdict,
     }
 
 

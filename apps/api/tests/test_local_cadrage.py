@@ -50,6 +50,7 @@ from novalton_api.modules.durable_dispatch.models import (
     DispatchAttempt,
     TaskDispatch,
 )
+from novalton_api.modules.durable_dispatch.operator import authenticate_operator
 from novalton_api.modules.durable_dispatch.sessions import authenticate_session
 from novalton_api.modules.financial.models import FinancialAuthorization, FinancialReservation
 from novalton_api.modules.financial.service import reserve as reserve_financial
@@ -64,6 +65,7 @@ from novalton_api.modules.local_auth.models import LocalCredential, LocalLoginTh
 from novalton_api.modules.local_auth.service import hash_password
 from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_usage.models import ModelRun
+from novalton_api.modules.orchestrator.models import AgentChallengeResolution
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.provider_keys.models import ProviderKey
 from novalton_api.modules.qa_worker import service as qa_service
@@ -116,6 +118,9 @@ def settings_for_new_scope() -> tuple[Settings, str]:
 
 async def wipe(session, scope: Scope) -> None:
     await session.execute(delete(RuntimeEvent).where(RuntimeEvent.tenant_id == scope.tenant))
+    await session.execute(
+        delete(AgentChallengeResolution).where(AgentChallengeResolution.tenant_id == scope.tenant)
+    )
     await session.execute(
         delete(DispatchAttempt).where(
             DispatchAttempt.dispatch_id.in_(
@@ -779,7 +784,10 @@ def test_approved_plan_compilation_is_idempotent_scoped_and_revoked(initialized)
         assert client.get(check_url, headers={"Authorization": "Bearer invalid"}).status_code == 401
 
 
-def test_separate_launch_decision_creates_inert_workflow_and_revokes(initialized, monkeypatch):
+@pytest.mark.parametrize("mode", ["qa_pass", "revoke_mid", "cancel_mid"])
+def test_separate_launch_decision_creates_inert_workflow_and_revokes(
+    initialized, monkeypatch, mode
+):
     scope, password, _ = initialized
     model_id = f"launch-{scope.login}"
     monkeypatch.setenv("NOVALTON_LOCAL_MODEL_BASE_URL", "http://127.0.0.1:11434/v1")
@@ -858,7 +866,7 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(initialized
         assert client.post(url, headers=auth, json=request).status_code == 403
 
         async def grant(session):
-            for permission in ("activation.configure", "dispatch.enqueue"):
+            for permission in ("activation.configure", "dispatch.enqueue", "dispatch.cancel"):
                 session.add(
                     WorkspaceOperatorPermission(
                         user_id=scope.owner,
@@ -1057,6 +1065,12 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(initialized
         queued = client.post(dispatch_url, headers=auth, json=dispatch_request)
         assert queued.status_code == 201, queued.text
         assert queued.json()["status"] == "READY"
+        assert client.get(
+            f"/api/v1/tenants/{uuid4()}/workspaces/{scope.workspace}/projects/{project['id']}/"
+            f"conversations/{conversation}/plans/{plan['id']}/compilations/{compilation['id']}/"
+            f"launch-authorizations/{created.json()['id']}/dispatch",
+            headers=auth,
+        ).status_code in {403, 404}
         repeated = client.post(dispatch_url, headers=auth, json=dispatch_request)
         assert (
             repeated.status_code == 201
@@ -1071,7 +1085,11 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(initialized
 
         provider = QueueProvider([_manager(), _worker(), _qa("PASS")])
         provider.provider_id = "local_cadrage"
-        for expected in ("DEVELOPER_MANAGER", "DEVELOPER_WORKER", "QA_WORKER"):
+        for expected in (
+            ("DEVELOPER_MANAGER",)
+            if mode != "qa_pass"
+            else ("DEVELOPER_MANAGER", "DEVELOPER_WORKER", "QA_WORKER")
+        ):
             result = db_call(
                 lambda session: dispatch_service.run_once(
                     session,
@@ -1082,19 +1100,20 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(initialized
                 )
             )
             assert result is not None, expected
-        assert len(provider.calls) == 3
-        assert (
-            db_call(
-                lambda session: dispatch_service.run_once(
-                    session,
-                    registry=ProviderRegistry((provider,)),
-                    tenant_id=scope.tenant,
-                    workspace_id=scope.workspace,
-                    owner=uuid4(),
+        if mode == "qa_pass":
+            assert len(provider.calls) == 3
+            assert (
+                db_call(
+                    lambda session: dispatch_service.run_once(
+                        session,
+                        registry=ProviderRegistry((provider,)),
+                        tenant_id=scope.tenant,
+                        workspace_id=scope.workspace,
+                        owner=uuid4(),
+                    )
                 )
+                is None
             )
-            is None
-        )
 
         async def completed(session):
             return (
@@ -1113,15 +1132,65 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(initialized
                 ),
             )
 
-        run_status, dispatch_status, model_statuses = db_call(completed)
-        assert run_status == "COMPLETED" and dispatch_status == "DONE"
-        assert model_statuses == ["SUCCEEDED"] * 3
+        if mode == "qa_pass":
+            run_status, dispatch_status, model_statuses = db_call(completed)
+            assert run_status == "COMPLETED" and dispatch_status == "DONE"
+            assert model_statuses == ["SUCCEEDED"] * 3
+            tracked = client.get(dispatch_url, headers=auth)
+            assert tracked.status_code == 200 and tracked.json()["qa_verdict"] == "PASS"
+            assert [step["status"] for step in tracked.json()["steps"]] == ["COMPLETED"] * 3
+            assert (
+                client.get(
+                    dispatch_url.replace(str(created.json()["id"]), str(uuid4())), headers=auth
+                ).status_code
+                == 404
+            )
+        if mode == "cancel_mid":
+            cancelled = db_call(
+                lambda session: dispatch_service.cancel_dispatch(
+                    session,
+                    operator=authenticate_operator(operator_key),
+                    tenant_id=scope.tenant,
+                    workspace_id=scope.workspace,
+                    dispatch_id=UUID(queued.json()["dispatch_id"]),
+                )
+            )
+            assert cancelled.status == "CANCELLED"
+            assert (
+                db_call(
+                    lambda session: dispatch_service.run_once(
+                        session,
+                        registry=ProviderRegistry((provider,)),
+                        tenant_id=scope.tenant,
+                        workspace_id=scope.workspace,
+                        owner=uuid4(),
+                    )
+                )
+                is None
+            )
+            assert len(provider.calls) == 1
         revoked = client.post(
             url + f"/{created.json()['id']}/revoke",
             headers=auth,
             json={"current_password": password},
         )
         assert revoked.status_code == 200 and revoked.json()["version"] == 2
+        if mode == "revoke_mid":
+            with pytest.raises(ApplicationError) as failure:
+                db_call(
+                    lambda session: dispatch_service.run_once(
+                        session,
+                        registry=ProviderRegistry((provider,)),
+                        tenant_id=scope.tenant,
+                        workspace_id=scope.workspace,
+                        owner=uuid4(),
+                    )
+                )
+            assert failure.value.code == "launch_execution_unverified"
+            run_status, dispatch_status, model_statuses = db_call(completed)
+            assert run_status == "RUNNING" and dispatch_status == "BLOCKED"
+            assert model_statuses == ["SUCCEEDED"] and len(provider.calls) == 1
+        assert client.post(dispatch_url, headers=auth, json=dispatch_request).status_code == 409
         assert client.post(url, headers=auth, json=request).status_code == 409
         document["expected_version"] = 1
         document["summary"] = "Cahier mis à jour"

@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Task = { id: string; title: string; status: string };
 type Proposal = { id: string; status: string; document: {
@@ -7,7 +7,8 @@ type Proposal = { id: string; status: string; document: {
   diagnostics: string[]; required_permissions: string[]; cost: string; environment: string;
 } };
 type Preflight = { ready_for_simulation: boolean; ready_for_launch: boolean; diagnostics: string[]; external_effects: boolean };
-type LaunchDecision = { id: string; expires_at: string; revoked_at: string | null; workflow_created: boolean };
+type LaunchDecision = { id: string; expires_at: string; revoked_at: string | null; workflow_created: boolean; workflow_run_id: string | null };
+type LaunchStatus = { dispatch_id: string | null; dispatch_status: string | null; stop_reason: string | null; workflow_status: string | null; steps: { step_key: string; status: string }[]; qa_verdict: string | null };
 
 const diagnosticLabels: Record<string, string> = {
   plan_obsolete_or_not_approved: "Le plan a changé ou son approbation n’est plus valable.",
@@ -34,7 +35,26 @@ export function ExecutionPreparation({ projectId, conversationId, planId }: {
   const [password, setPassword] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [decision, setDecision] = useState<LaunchDecision | null>(null);
+  const [launchStatus, setLaunchStatus] = useState<LaunchStatus | null>(null);
+  const [launchConfirmed, setLaunchConfirmed] = useState(false);
+  const workflowRequest = useRef<string | null>(null);
+  const dispatchRequest = useRef<string | null>(null);
   const base = `/api/projects/${projectId}/conversations/${conversationId}/plans/${planId}/compilations`;
+  const launchBase = proposal && decision ? `${base}/${proposal.id}/launch-authorizations/${decision.id}` : null;
+  useEffect(() => {
+    if (!launchBase || !decision?.workflow_created) return;
+    let current = true;
+    const refresh = async () => {
+      try {
+        const response = await fetch(`${launchBase}/dispatch`, { cache: "no-store" });
+        if (!response.ok) throw new Error("Suivi indisponible ou accès retiré.");
+        if (current) setLaunchStatus(await response.json() as LaunchStatus);
+      } catch { if (current) setError("Suivi indisponible ou accès retiré."); }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 5000);
+    return () => { current = false; window.clearInterval(timer); };
+  }, [launchBase, decision?.workflow_created]);
   useEffect(() => {
     let current = true;
     void fetch(`/api/projects/${projectId}/tasks`, { cache: "no-store" })
@@ -46,7 +66,8 @@ export function ExecutionPreparation({ projectId, conversationId, planId }: {
     return () => { current = false; };
   }, [projectId]);
   async function prepare() {
-    setBusy(true); setError(""); setProposal(null); setPreflight(null); setDecision(null);
+    setBusy(true); setError(""); setProposal(null); setPreflight(null); setDecision(null); setLaunchStatus(null);
+    workflowRequest.current = null; dispatchRequest.current = null;
     try {
       const response = await fetch(base, { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ task_id: taskId }) });
@@ -97,11 +118,42 @@ export function ExecutionPreparation({ projectId, conversationId, planId }: {
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Service indisponible."); }
     finally { setBusy(false); }
   }
+  async function createTestWorkflow() {
+    if (!launchBase || !decision || !password || decision.revoked_at || !launchConfirmed) return;
+    setBusy(true); setError("");
+    try {
+      workflowRequest.current ??= crypto.randomUUID();
+      const response = await fetch(`${launchBase}/workflow`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation: "CREATE_DISPOSABLE_TEST_WORKFLOW", request_id: workflowRequest.current, current_password: password }),
+      });
+      if (!response.ok) throw new Error("Création refusée : le plan, les grants ou le profil de test ont changé.");
+      setDecision(await response.json() as LaunchDecision); setPassword(""); setLaunchConfirmed(false);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Service indisponible."); }
+    finally { setBusy(false); }
+  }
+  async function dispatchTest() {
+    if (!launchBase || !decision?.workflow_created || !password || decision.revoked_at || !launchConfirmed) return;
+    setBusy(true); setError("");
+    try {
+      dispatchRequest.current ??= crypto.randomUUID();
+      const response = await fetch(`${launchBase}/dispatch`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation: "ENQUEUE_DISPOSABLE_TEST_WORKFLOW", request_id: dispatchRequest.current, current_password: password }),
+      });
+      if (!response.ok) throw new Error("Lancement refusé : l’autorisation, le modèle local ou la capacité du worker n’est plus valable.");
+      const queued = await response.json() as { dispatch_id: string; status: string };
+      setLaunchStatus((old) => ({ dispatch_id: queued.dispatch_id, dispatch_status: queued.status,
+        stop_reason: null, workflow_status: old?.workflow_status ?? "CREATED", steps: old?.steps ?? [], qa_verdict: null }));
+      setPassword(""); setLaunchConfirmed(false);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Service indisponible."); }
+    finally { setBusy(false); }
+  }
   return <section className="execution-preparation" aria-label="Préparation de l’exécution">
     <h3>Préparer l’exécution</h3>
     <p>Le plan approuvé sert à construire une proposition à examiner. La préparation et la simulation ne lancent aucun agent.</p>
     <label htmlFor="execution-task">Tâche de ce projet</label>
-    <select id="execution-task" value={taskId} onChange={(event) => { setTaskId(event.target.value); setProposal(null); setPreflight(null); setDecision(null); }}>
+    <select id="execution-task" value={taskId} onChange={(event) => { setTaskId(event.target.value); setProposal(null); setPreflight(null); setDecision(null); setLaunchStatus(null); }}>
       <option value="">Choisir une tâche existante</option>
       {tasks.map((task) => <option key={task.id} value={task.id}>{task.title} · {task.status}</option>)}
     </select>
@@ -130,12 +182,21 @@ export function ExecutionPreparation({ projectId, conversationId, planId }: {
         <button type="button" disabled={busy || !confirmed || !modelId.trim() || !password} onClick={() => void authorizeTest()}>Autoriser le test</button>
       </>}
       {decision && <div role="status">
-        <p>Décision {decision.revoked_at ? "révoquée" : "enregistrée"} · expiration : {new Date(decision.expires_at).toLocaleString("fr-FR")} · workflow créé : non.</p>
+        <p>Décision {decision.revoked_at ? "révoquée" : "enregistrée"} · expiration : {new Date(decision.expires_at).toLocaleString("fr-FR")} · workflow créé : {decision.workflow_created ? "oui" : "non"}.</p>
         {!decision.revoked_at && <button type="button" disabled={busy || !password} onClick={() => void revokeTest()}>Révoquer cette décision</button>}
+        {!decision.revoked_at && !launchStatus?.dispatch_id && <>
+          <label><input type="checkbox" checked={launchConfirmed} onChange={(event) => setLaunchConfirmed(event.target.checked)} /> Je confirme la création puis le lancement jetable sous cette autorisation.</label>
+          {!decision.workflow_created ? <button type="button" disabled={busy || !password || !launchConfirmed} onClick={() => void createTestWorkflow()}>Créer le workflow de test</button>
+            : <button type="button" disabled={busy || !password || !launchConfirmed} onClick={() => void dispatchTest()}>Lancer le test autorisé</button>}
+        </>}
+        {launchStatus && <div><p>Workflow : {launchStatus.workflow_status ?? "absent"} · dispatch : {launchStatus.dispatch_status ?? "absent"}.</p>
+          {launchStatus.steps.length > 0 && <ol>{launchStatus.steps.map((step) => <li key={step.step_key}>{step.step_key} : {step.status}</li>)}</ol>}
+          {launchStatus.qa_verdict && <p>Verdict QA : {launchStatus.qa_verdict}</p>}
+          {launchStatus.stop_reason && <p>Arrêt : {launchStatus.stop_reason}</p>}
+          {launchStatus.dispatch_id && <p>Preuve de dispatch : {launchStatus.dispatch_id}</p>}
+        </div>}
       </div>}
     </div>}
-    <button type="button" disabled aria-describedby="launch-unavailable">Autoriser le lancement</button>
-    <p id="launch-unavailable">Lancement indisponible : les capacités, le fournisseur, la revalidation transactionnelle et le budget ne sont pas encore vérifiés.</p>
     {error && <p role="alert">{error}</p>}
   </section>;
 }
