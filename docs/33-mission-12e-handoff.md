@@ -16,7 +16,7 @@ commit ; un document versionné ne peut indiquer son propre SHA.
 | D liaison cadrage/workflow | P0 | PASS | Un seul run/compilation et liaison durable dans le commit du graphe, handoff et audit ; rollback et idempotence concurrente testés sur PostgreSQL. CI #40316187645 SUCCESS. |
 | E exécution jetable complète | P0 | IN_PROGRESS | Route de dispatch réauthentifiée, garde par claim et modèle local à tarif zéro ; tests déterministes QA PASS, révocation après Manager et annulation ajoutés ; confirmer sur CI finale avant PASS. |
 | F chemins facturables | P0 | PARTIAL | Fournisseur distant désactivé dans le registre standard ; injection explicite non qualifiée pour la dépense. Cartographie à poursuivre. |
-| G BYOK/restauration | P1 | TODO | Rotation, sauvegarde et restauration non validées pour cette mission. |
+| G BYOK/restauration | P1 | IN_PROGRESS | Test de rotation AES-GCM v1→v2, restauration d'un enregistrement chiffré v1, refus sans ancienne clé et isolation AAD ajouté ; confirmer sur CI finale. Restauration d'un backup PostgreSQL complet non démontrée. |
 | H interface | P1 | IN_PROGRESS | Création, dispatch et lecture des états persistés reliés au proxy Next avec Origin vérifié ; lint/typecheck/build locaux passent, Chromium final à relever. |
 | I Chromium hostile | P0 | PARTIAL | Gate graphique du code final #40316187661 SUCCESS ; les scénarios hostiles propres à la nouvelle route de création restent à écrire. |
 | J qualité du chat | P1 | BLOCKED | Modèle local indisponible dans ce runtime ; `REAL_MODEL_QUALITY_NOT_VERIFIED`. |

@@ -68,6 +68,8 @@ from novalton_api.modules.model_usage.models import ModelRun
 from novalton_api.modules.orchestrator.models import AgentChallengeResolution
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.provider_keys.models import ProviderKey
+from novalton_api.modules.provider_keys.rotate import rotate_records
+from novalton_api.modules.provider_keys.vault import Keyring, VaultUnavailable
 from novalton_api.modules.qa_worker import service as qa_service
 from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tasks.models import Task
@@ -1264,6 +1266,67 @@ def test_personal_provider_key_is_encrypted_isolated_and_revocable(initialized, 
             == 204
         )
         assert client.get(path(scope) + "/provider-keys", headers=auth).json()["items"] == []
+
+
+def test_byok_rotation_and_backup_restore_require_both_key_versions(initialized, monkeypatch):
+    scope, password, _ = initialized
+    old = base64.b64encode(b"a" * 32).decode()
+    new = base64.b64encode(b"b" * 32).decode()
+    monkeypatch.setenv("NOVALTON_BYOK_KEYRING", json.dumps({"v1": old}))
+    monkeypatch.setenv("NOVALTON_BYOK_ACTIVE_KEY_ID", "v1")
+    secret = "synthetic-rotation-only-no-provider-call"
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+        ).json()["token"]
+        saved = client.put(
+            path(scope) + "/provider-keys/openrouter",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"secret": secret, "current_password": password},
+        )
+        assert saved.status_code == 200 and secret not in saved.text
+
+    async def backup(session):
+        row = await session.scalar(select(ProviderKey).where(ProviderKey.owner_id == scope.owner))
+        assert row is not None
+        return row.key_id, row.nonce, row.ciphertext
+
+    old_record = db_call(backup)
+    monkeypatch.setenv("NOVALTON_BYOK_KEYRING", json.dumps({"v1": old, "v2": new}))
+    monkeypatch.setenv("NOVALTON_BYOK_ACTIVE_KEY_ID", "v2")
+    ring = Keyring.from_environment()
+
+    async def rotate(session):
+        async with session.begin():
+            assert await rotate_records(session, ring) == 1
+
+    db_call(rotate)
+    current_record = db_call(backup)
+    assert current_record[0] == "v2" and current_record[2] != old_record[2]
+    scope_args = dict(
+        owner=scope.owner, tenant=scope.tenant, workspace=scope.workspace, provider="openrouter"
+    )
+    assert ring.decrypt(*current_record, **scope_args) == secret
+    assert ring.decrypt(*old_record, **scope_args) == secret
+    with pytest.raises(VaultUnavailable):
+        ring.decrypt(*current_record, **(scope_args | {"workspace": uuid4()}))
+    with pytest.raises(VaultUnavailable):
+        Keyring("v1", {"v1": b"a" * 32}).decrypt(*current_record, **scope_args)
+
+    async def restore_backup(session):
+        async with session.begin():
+            row = await session.scalar(
+                select(ProviderKey).where(ProviderKey.owner_id == scope.owner).with_for_update()
+            )
+            assert row is not None
+            row.key_id, row.nonce, row.ciphertext = old_record
+
+    db_call(restore_backup)
+    assert db_call(backup) == old_record
+    assert ring.decrypt(*db_call(backup), **scope_args) == secret
+    with pytest.raises(VaultUnavailable):
+        db_call(lambda session: rotate_records(session, Keyring("v2", {"v2": b"b" * 32})))
+    assert db_call(backup) == old_record
 
 
 def test_sensitive_key_reauthentication_is_rate_limited(initialized, monkeypatch):
