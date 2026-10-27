@@ -20,11 +20,14 @@ from novalton_api.modules.cadrage.compilation import compile_document
 from novalton_api.modules.cadrage.models import CadrageCompilation, CadragePlan
 from novalton_api.modules.cadrage.plan import get_plan
 from novalton_api.modules.cadrage.service import current_specification, get_conversation
+from novalton_api.modules.durable_dispatch import service as dispatch_service
 from novalton_api.modules.durable_dispatch.identity import TenantOperatorMembership
 from novalton_api.modules.durable_dispatch.models import DispatchActivation
 from novalton_api.modules.durable_dispatch.operator import OperatorAuthority
 from novalton_api.modules.durable_dispatch.saas_access import require_saas_access
+from novalton_api.modules.durable_dispatch.schemas import DispatchRequest
 from novalton_api.modules.financial.routes import reauth
+from novalton_api.modules.launch.execution import enqueue_decision, require_execution
 from novalton_api.modules.launch.models import LaunchAuthorization
 from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.projects.models import Project
@@ -61,6 +64,13 @@ class RevokeInput(BaseModel):
 class CreateWorkflowInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     confirmation: Literal["CREATE_DISPOSABLE_TEST_WORKFLOW"]
+    request_id: UUID = Field(strict=False)
+    current_password: str = Field(min_length=1, max_length=128)
+
+
+class DispatchWorkflowInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    confirmation: Literal["ENQUEUE_DISPOSABLE_TEST_WORKFLOW"]
     request_id: UUID = Field(strict=False)
     current_password: str = Field(min_length=1, max_length=128)
 
@@ -522,6 +532,140 @@ async def create_authorized_workflow(
     )
     await session.commit()
     return public(row)
+
+
+@router.post("/{launch_authorization_id}/dispatch", status_code=201)
+async def dispatch_authorized_workflow(
+    tenant_id: UUID,
+    workspace_id: UUID,
+    project_id: UUID,
+    conversation_id: UUID,
+    plan_id: UUID,
+    compilation_id: UUID,
+    launch_authorization_id: UUID,
+    data: DispatchWorkflowInput,
+    session: Session,
+    operator: Human,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    """Explicit test-only dispatch; worker advances under a separate durable claim."""
+    owner = await _exclusive_human(
+        session, operator, tenant_id=tenant_id, workspace_id=workspace_id, permissions=PERMISSIONS
+    )
+    await reauth(session, owner, authorization, data.current_password)
+    plan, compilation = await _scoped(
+        session,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        conversation_id=conversation_id,
+        plan_id=plan_id,
+        compilation_id=compilation_id,
+        owner_id=owner.user_id,
+        lock=True,
+    )
+    row = await session.scalar(
+        select(LaunchAuthorization)
+        .where(
+            LaunchAuthorization.id == launch_authorization_id,
+            LaunchAuthorization.owner_id == owner.user_id,
+            LaunchAuthorization.tenant_id == tenant_id,
+            LaunchAuthorization.workspace_id == workspace_id,
+            LaunchAuthorization.project_id == project_id,
+            LaunchAuthorization.plan_id == plan_id,
+            LaunchAuthorization.compilation_id == compilation_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        raise _missing()
+    from novalton_api.modules.cadrage.models import CadrageConversation
+
+    conversation = await session.get(CadrageConversation, conversation_id)
+    spec = await current_specification(session, conversation)
+    expected_status, expected_document = compile_document(plan.document)
+    task = await session.scalar(
+        select(Task).where(Task.id == compilation.task_id).with_for_update()
+    )
+    project = await session.scalar(
+        select(Project).where(Project.id == project_id).with_for_update()
+    )
+    if (
+        row.workflow_run_id is None
+        or row.task_id != compilation.task_id
+        or row.source_version != plan.source_version
+        or row.proposal_version != compilation.proposal_version
+        or plan.status != "APPROVED"
+        or plan.decided_by != owner.user_id
+        or spec is None
+        or spec.id != plan.specification_id
+        or spec.version != plan.source_version
+        or compilation.source_version != plan.source_version
+        or compilation.status != "PROPOSED"
+        or expected_status != "PROPOSED"
+        or compilation.document != expected_document
+        or task is None
+        or task.project_id != project_id
+        or task.status not in {"READY", "IN_PROGRESS"}
+        or project is None
+        or project.workspace_id != workspace_id
+        or project.status != "ACTIVE"
+        or row.fingerprint
+        != _fingerprint(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            plan=plan,
+            compilation=compilation,
+            data=AuthorizeInput(
+                confirmation="AUTHORIZE_DISPOSABLE_TEST_LAUNCH",
+                request_id=row.request_id,
+                environment="DISPOSABLE_TEST",
+                provider_id="local",
+                model_id=row.model_id,
+                max_model_calls=row.max_model_calls,
+                max_duration_seconds=row.max_duration_seconds,
+                current_password=data.current_password,
+            ),
+        )
+    ):
+        raise _conflict()
+    await require_execution(session, row, require_claim=False)
+    model = await session.scalar(
+        select(ModelDefinition)
+        .where(
+            ModelDefinition.provider_id == "local_cadrage",
+            ModelDefinition.provider_model_id == row.model_id,
+        )
+        .with_for_update(read=True)
+    )
+    if model is None:
+        raise _conflict()
+    await require_execution(session, row, model=model, require_claim=False)
+    deadline = min(row.expires_at, row.approved_at + timedelta(seconds=row.max_duration_seconds))
+    token = enqueue_decision.set(row.id)
+    try:
+        dispatch = await dispatch_service.enqueue(
+            session,
+            operator=owner,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            data=DispatchRequest(
+                workflow_run_id=row.workflow_run_id,
+                request_key=f"launch:{data.request_id}",
+                deadline=deadline,
+                max_attempts=3,
+                max_model_calls=row.max_model_calls,
+            ),
+        )
+    finally:
+        enqueue_decision.reset(token)
+    return {
+        "dispatch_id": dispatch.id,
+        "workflow_run_id": row.workflow_run_id,
+        "status": dispatch.status,
+    }
 
 
 @router.get("")

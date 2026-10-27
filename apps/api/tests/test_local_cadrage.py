@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import delete, select, update
+from test_development_workflow import QueueProvider, _manager, _qa, _worker
 
 from novalton_api.core.config import Settings, get_settings
 from novalton_api.core.database import Database
@@ -25,7 +26,7 @@ from novalton_api.infrastructure.providers.openai_compatible import (
 )
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.main import create_app
-from novalton_api.modules.agents.models import AgentDefinition
+from novalton_api.modules.agents.models import AgentDefinition, AgentRun
 from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.cadrage import service as cadrage_service
 from novalton_api.modules.cadrage.compilation import compile_document
@@ -38,12 +39,17 @@ from novalton_api.modules.cadrage.models import (
 )
 from novalton_api.modules.developer_manager import service as manager_service
 from novalton_api.modules.developer_worker import service as developer_service
+from novalton_api.modules.durable_dispatch import service as dispatch_service
 from novalton_api.modules.durable_dispatch.identity import (
     HumanOperator,
     TenantOperatorMembership,
     WorkspaceOperatorPermission,
 )
-from novalton_api.modules.durable_dispatch.models import DispatchActivation
+from novalton_api.modules.durable_dispatch.models import (
+    DispatchActivation,
+    DispatchAttempt,
+    TaskDispatch,
+)
 from novalton_api.modules.durable_dispatch.sessions import authenticate_session
 from novalton_api.modules.financial.models import FinancialAuthorization, FinancialReservation
 from novalton_api.modules.financial.service import reserve as reserve_financial
@@ -57,12 +63,14 @@ from novalton_api.modules.local_auth.bootstrap import (
 from novalton_api.modules.local_auth.models import LocalCredential, LocalLoginThrottle, LocalSession
 from novalton_api.modules.local_auth.service import hash_password
 from novalton_api.modules.model_catalog.models import ModelDefinition
+from novalton_api.modules.model_usage.models import ModelRun
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.provider_keys.models import ProviderKey
 from novalton_api.modules.qa_worker import service as qa_service
 from novalton_api.modules.runtime_events.models import RuntimeEvent
 from novalton_api.modules.tasks.models import Task
 from novalton_api.modules.tenants.models import Tenant
+from novalton_api.modules.tools.models import ToolCall
 from novalton_api.modules.workflows.models import (
     WorkflowPlan,
     WorkflowRun,
@@ -109,6 +117,14 @@ def settings_for_new_scope() -> tuple[Settings, str]:
 async def wipe(session, scope: Scope) -> None:
     await session.execute(delete(RuntimeEvent).where(RuntimeEvent.tenant_id == scope.tenant))
     await session.execute(
+        delete(DispatchAttempt).where(
+            DispatchAttempt.dispatch_id.in_(
+                select(TaskDispatch.id).where(TaskDispatch.tenant_id == scope.tenant)
+            )
+        )
+    )
+    await session.execute(delete(TaskDispatch).where(TaskDispatch.tenant_id == scope.tenant))
+    await session.execute(
         delete(LaunchAuthorization).where(LaunchAuthorization.tenant_id == scope.tenant)
     )
     run_ids = select(WorkflowRun.id).where(WorkflowRun.tenant_id == scope.tenant)
@@ -119,6 +135,12 @@ async def wipe(session, scope: Scope) -> None:
     await session.execute(
         delete(WorkflowStepRun).where(WorkflowStepRun.workflow_run_id.in_(run_ids))
     )
+    await session.execute(delete(ToolCall).where(ToolCall.tenant_id == scope.tenant))
+    await session.execute(
+        update(AgentRun).where(AgentRun.tenant_id == scope.tenant).values(model_run_id=None)
+    )
+    await session.execute(delete(ModelRun).where(ModelRun.tenant_id == scope.tenant))
+    await session.execute(delete(AgentRun).where(AgentRun.tenant_id == scope.tenant))
     await session.execute(delete(WorkflowRun).where(WorkflowRun.tenant_id == scope.tenant))
     await session.execute(
         delete(WorkflowStepDependency).where(WorkflowStepDependency.workflow_plan_id.in_(plan_ids))
@@ -763,6 +785,19 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(initialized
     monkeypatch.setenv("NOVALTON_LOCAL_MODEL_BASE_URL", "http://127.0.0.1:11434/v1")
     monkeypatch.setenv("NOVALTON_LOCAL_MODEL_ID", model_id)
     monkeypatch.setenv("NOVALTON_DURABLE_DISPATCH_ENABLED", "true")
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_USER_ID", str(scope.owner))
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_TENANT_ID", str(scope.tenant))
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_WORKSPACE_ID", str(scope.workspace))
+    monkeypatch.setenv("NOVALTON_DISPATCH_OPERATOR_ID", scope.login)
+    operator_key = "disposable-test-dispatch-key-only"
+    monkeypatch.setenv(
+        "NOVALTON_DISPATCH_OPERATOR_KEY_SHA256", hashlib.sha256(operator_key.encode()).hexdigest()
+    )
+    monkeypatch.setenv(
+        "NOVALTON_DISPATCH_OPERATOR_PERMISSIONS",
+        "activation.configure,dispatch.enqueue,dispatch.read,dispatch.cancel,dispatch.resolve",
+    )
+    monkeypatch.setenv("NOVALTON_MODEL_ROUTER_FORCE_MODEL", f"local_cadrage::{model_id}")
     get_settings.cache_clear()
     with TestClient(create_app()) as client:
         token = client.post(
@@ -898,6 +933,15 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(initialized
                     status="AVAILABLE",
                     execution_target_class="LOCAL",
                     free_allowlisted=True,
+                    context_window=128_000,
+                    reasoning=True,
+                    coding=True,
+                    structured_output=True,
+                    contract_enforcement_grade="PROVIDER_ENFORCED",
+                    enforcement_metadata_source="disposable_test",
+                    input_price_per_million=Decimal(0),
+                    output_price_per_million=Decimal(0),
+                    currency="USD",
                 )
             )
             for service in (manager_service, developer_service, qa_service):
@@ -997,6 +1041,81 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(initialized
 
         status, handoff_id = db_call(created_graph)
         assert status == "CREATED" and handoff_id is not None
+        dispatch_url = url + f"/{created.json()['id']}/dispatch"
+        dispatch_request = {
+            "confirmation": "ENQUEUE_DISPOSABLE_TEST_WORKFLOW",
+            "request_id": str(uuid4()),
+            "current_password": password,
+        }
+        assert client.post(dispatch_url, json=dispatch_request).status_code == 401
+        assert (
+            client.post(
+                dispatch_url, headers=auth, json=dispatch_request | {"confirmation": "YES"}
+            ).status_code
+            == 422
+        )
+        queued = client.post(dispatch_url, headers=auth, json=dispatch_request)
+        assert queued.status_code == 201, queued.text
+        assert queued.json()["status"] == "READY"
+        repeated = client.post(dispatch_url, headers=auth, json=dispatch_request)
+        assert (
+            repeated.status_code == 201
+            and repeated.json()["dispatch_id"] == queued.json()["dispatch_id"]
+        )
+        assert (
+            client.post(
+                dispatch_url, headers=auth, json=dispatch_request | {"request_id": str(uuid4())}
+            ).status_code
+            == 409
+        )
+
+        provider = QueueProvider([_manager(), _worker(), _qa("PASS")])
+        provider.provider_id = "local_cadrage"
+        for expected in ("DEVELOPER_MANAGER", "DEVELOPER_WORKER", "QA_WORKER"):
+            result = db_call(
+                lambda session: dispatch_service.run_once(
+                    session,
+                    registry=ProviderRegistry((provider,)),
+                    tenant_id=scope.tenant,
+                    workspace_id=scope.workspace,
+                    owner=uuid4(),
+                )
+            )
+            assert result is not None, expected
+        assert len(provider.calls) == 3
+        assert (
+            db_call(
+                lambda session: dispatch_service.run_once(
+                    session,
+                    registry=ProviderRegistry((provider,)),
+                    tenant_id=scope.tenant,
+                    workspace_id=scope.workspace,
+                    owner=uuid4(),
+                )
+            )
+            is None
+        )
+
+        async def completed(session):
+            return (
+                await session.scalar(
+                    select(WorkflowRun.status).where(WorkflowRun.id == UUID(run_id))
+                ),
+                await session.scalar(
+                    select(TaskDispatch.status).where(
+                        TaskDispatch.id == UUID(queued.json()["dispatch_id"])
+                    )
+                ),
+                list(
+                    await session.scalars(
+                        select(ModelRun.status).where(ModelRun.tenant_id == scope.tenant)
+                    )
+                ),
+            )
+
+        run_status, dispatch_status, model_statuses = db_call(completed)
+        assert run_status == "COMPLETED" and dispatch_status == "DONE"
+        assert model_statuses == ["SUCCEEDED"] * 3
         revoked = client.post(
             url + f"/{created.json()['id']}/revoke",
             headers=auth,
