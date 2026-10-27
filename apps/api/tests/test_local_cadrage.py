@@ -4,7 +4,9 @@ import asyncio
 import base64
 import hashlib
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -786,7 +788,22 @@ def test_approved_plan_compilation_is_idempotent_scoped_and_revoked(initialized)
         assert client.get(check_url, headers={"Authorization": "Bearer invalid"}).status_code == 401
 
 
-@pytest.mark.parametrize("mode", ["qa_pass", "revoke_mid", "cancel_mid"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "qa_pass",
+        "revoke_mid",
+        "cancel_mid",
+        "grant_mid",
+        "activation_mid",
+        "budget_mid",
+        "crash_after_reservation",
+        "timeout",
+        "late_revoke",
+        "late_cancel",
+        "late_lease",
+    ],
+)
 def test_separate_launch_decision_creates_inert_workflow_and_revokes(
     initialized, monkeypatch, mode
 ):
@@ -1064,8 +1081,18 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(
             ).status_code
             == 422
         )
-        queued = client.post(dispatch_url, headers=auth, json=dispatch_request)
-        assert queued.status_code == 201, queued.text
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            dispatch_responses = list(
+                pool.map(
+                    lambda _: client.post(dispatch_url, headers=auth, json=dispatch_request),
+                    range(2),
+                )
+            )
+        assert all(response.status_code == 201 for response in dispatch_responses), [
+            response.text for response in dispatch_responses
+        ]
+        assert len({response.json()["dispatch_id"] for response in dispatch_responses}) == 1
+        queued = dispatch_responses[0]
         assert queued.json()["status"] == "READY"
         assert client.get(
             f"/api/v1/tenants/{uuid4()}/workspaces/{scope.workspace}/projects/{project['id']}/"
@@ -1078,6 +1105,18 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(
             repeated.status_code == 201
             and repeated.json()["dispatch_id"] == queued.json()["dispatch_id"]
         )
+
+        async def enqueue_audits(session):
+            return list(
+                await session.scalars(
+                    select(AuditRecord).where(
+                        AuditRecord.tenant_id == scope.tenant,
+                        AuditRecord.action == "dispatch.task.enqueue",
+                    )
+                )
+            )
+
+        assert len(db_call(enqueue_audits)) == 1
         assert (
             client.post(
                 dispatch_url, headers=auth, json=dispatch_request | {"request_id": str(uuid4())}
@@ -1087,12 +1126,9 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(
 
         provider = QueueProvider([_manager(), _worker(), _qa("PASS")])
         provider.provider_id = "local_cadrage"
-        for expected in (
-            ("DEVELOPER_MANAGER",)
-            if mode != "qa_pass"
-            else ("DEVELOPER_MANAGER", "DEVELOPER_WORKER", "QA_WORKER")
-        ):
-            result = db_call(
+
+        def tick():
+            return db_call(
                 lambda session: dispatch_service.run_once(
                     session,
                     registry=ProviderRegistry((provider,)),
@@ -1101,7 +1137,155 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(
                     owner=uuid4(),
                 )
             )
+
+        async def bound_state(session):
+            row = await session.get(TaskDispatch, UUID(queued.json()["dispatch_id"]))
+            attempts = list(
+                await session.scalars(
+                    select(DispatchAttempt).where(DispatchAttempt.dispatch_id == row.id)
+                )
+            )
+            models = list(
+                await session.scalars(select(ModelRun).where(ModelRun.tenant_id == scope.tenant))
+            )
+            return row.status, row.stop_reason, attempts, models
+
+        if mode in {"crash_after_reservation", "timeout"}:
+
+            class WorkerLost(BaseException):
+                pass
+
+            async def interrupted(model_request):
+                provider.calls.append(model_request)
+                if mode == "crash_after_reservation":
+                    raise WorkerLost()
+                raise TimeoutError("synthetic provider timeout")
+
+            provider.complete = interrupted
+            if mode == "crash_after_reservation":
+                with pytest.raises(WorkerLost):
+                    tick()
+                state, _, attempts, models = db_call(bound_state)
+                assert state == "LEASED" and len(attempts) == len(models) == 1
+                assert attempts[0].workflow_step_run_id is not None
+                assert models[0].status == "RUNNING"
+
+                async def expire(session):
+                    await session.execute(
+                        update(TaskDispatch)
+                        .where(TaskDispatch.id == UUID(queued.json()["dispatch_id"]))
+                        .values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+                    )
+                    await session.commit()
+
+                db_call(expire)
+            else:
+                with suppress(ApplicationError):
+                    tick()
+            assert tick() is None
+            state, _, attempts, models = db_call(bound_state)
+            assert state == "BLOCKED" and len(provider.calls) == 1
+            assert len(attempts) == len(models) == 1
+            assert client.get(dispatch_url, headers=auth).json()["qa_verdict"] is None
+            return
+
+        if mode in {"late_revoke", "late_cancel", "late_lease"}:
+            entered, released = threading.Event(), threading.Event()
+            original = provider.complete
+
+            async def delayed(model_request):
+                entered.set()
+                assert await asyncio.to_thread(released.wait, 15)
+                return await original(model_request)
+
+            provider.complete = delayed
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(tick)
+                assert entered.wait(15)
+                try:
+                    if mode == "late_revoke":
+                        response = client.post(
+                            url + f"/{created.json()['id']}/revoke",
+                            headers=auth,
+                            json={"current_password": password},
+                        )
+                        assert response.status_code == 200
+                    elif mode == "late_cancel":
+                        result = db_call(
+                            lambda session: dispatch_service.cancel_dispatch(
+                                session,
+                                operator=authenticate_operator(operator_key),
+                                tenant_id=scope.tenant,
+                                workspace_id=scope.workspace,
+                                dispatch_id=UUID(queued.json()["dispatch_id"]),
+                            )
+                        )
+                        assert result.status == "CANCELLED"
+                    else:
+
+                        async def lose_lease(session):
+                            await session.execute(
+                                update(TaskDispatch)
+                                .where(TaskDispatch.id == UUID(queued.json()["dispatch_id"]))
+                                .values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+                            )
+                            await session.commit()
+
+                        db_call(lose_lease)
+                finally:
+                    released.set()
+                with suppress(ApplicationError):
+                    future.result(timeout=20)
+            assert tick() is None
+            state, _, attempts, models = db_call(bound_state)
+            assert state in {"BLOCKED", "CANCELLED"} and len(provider.calls) == 1
+            assert len(attempts) == len(models) == 1
+            assert client.get(dispatch_url, headers=auth).json()["qa_verdict"] is None
+            return
+
+        for expected in (
+            ("DEVELOPER_MANAGER",)
+            if mode != "qa_pass"
+            else ("DEVELOPER_MANAGER", "DEVELOPER_WORKER", "QA_WORKER")
+        ):
+            result = tick()
             assert result is not None, expected
+        if mode in {"grant_mid", "activation_mid", "budget_mid"}:
+
+            async def remove_authority(session):
+                if mode == "grant_mid":
+                    await session.execute(
+                        update(WorkspaceOperatorPermission)
+                        .where(
+                            WorkspaceOperatorPermission.user_id == scope.owner,
+                            WorkspaceOperatorPermission.permission == "dispatch.enqueue",
+                        )
+                        .values(active=False, revoked_at=datetime.now(UTC))
+                    )
+                elif mode == "activation_mid":
+                    await session.execute(
+                        update(DispatchActivation)
+                        .where(
+                            DispatchActivation.tenant_id == scope.tenant,
+                        )
+                        .values(enabled=False, generation=2)
+                    )
+                else:
+                    await session.execute(
+                        update(TaskDispatch)
+                        .where(TaskDispatch.id == UUID(queued.json()["dispatch_id"]))
+                        .values(max_model_calls=1)
+                    )
+                await session.commit()
+
+            db_call(remove_authority)
+            try:
+                assert tick() is None
+            except ApplicationError as failure:
+                assert failure.code == "launch_execution_unverified"
+            assert tick() is None
+            state, _, _, _ = db_call(bound_state)
+            assert state == "BLOCKED" and len(provider.calls) == 1
         if mode == "qa_pass":
             assert len(provider.calls) == 3
             assert (
@@ -1192,8 +1376,12 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(
             run_status, dispatch_status, model_statuses = db_call(completed)
             assert run_status == "RUNNING" and dispatch_status == "BLOCKED"
             assert model_statuses == ["SUCCEEDED"] and len(provider.calls) == 1
-        assert client.post(dispatch_url, headers=auth, json=dispatch_request).status_code == 409
-        assert client.post(url, headers=auth, json=request).status_code == 409
+        denied_status = 403 if mode == "grant_mid" else 409
+        assert (
+            client.post(dispatch_url, headers=auth, json=dispatch_request).status_code
+            == denied_status
+        )
+        assert client.post(url, headers=auth, json=request).status_code == denied_status
         document["expected_version"] = 1
         document["summary"] = "Cahier mis à jour"
         assert client.put(specs, headers=auth, json=document).status_code == 200
