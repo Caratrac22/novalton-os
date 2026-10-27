@@ -519,8 +519,8 @@ def run(browser, origin, second):
         f"projects/{project}/conversations/{conversation}/plans/{plan_id}/"
         f"compilations/{compilation_id}/launch-authorizations"
     )
-    # A stale or blocked proposal cannot be turned into an authority by direct
-    # HTTP even when the owner supplies valid credentials and a fresh request.
+    # The blocked proposal cannot be turned into an authority by direct HTTP
+    # even when the owner supplies valid credentials and a fresh request.
     primary_tenant = os.environ.get(
         "NOVALTON_TENANT_ID", "89cfc055-366e-5bcb-b65f-4f367185bf6d"
     )
@@ -640,6 +640,39 @@ def run(browser, origin, second):
                 "return document.body.innerText.includes('Clés personnelles')",
                 "return to settings",
             )
+    # A new specification supersedes the approved snapshot. The direct API
+    # must reject the exact old plan and proposal IDs after this mutation.
+    assert (
+        direct_api(
+            owner_token,
+            primary_tenant,
+            primary_workspace,
+            f"projects/{project}/conversations/{conversation}/specifications",
+            method="PUT",
+            body={"expected_version": 1, "summary": "Version obsolète", "items": []},
+        )
+        == 200
+    )
+    assert (
+        direct_api(
+            owner_token,
+            primary_tenant,
+            primary_workspace,
+            launch_path,
+            method="POST",
+            body=authorization_body | {"request_id": str(uuid4())},
+        )
+        == 409
+    )
+    browser.navigate(f"{origin}/projects/{project}/chat?conversation={conversation}")
+    browser.wait(
+        "return document.body.innerText.includes('état : SUPERSEDED')",
+        "obsolete plan displayed without launch action",
+    )
+    assert not browser.script(
+        "return [...document.querySelectorAll('button')].some(button => "
+        "button.textContent.includes('Lancer le test autorisé') && !button.disabled)"
+    )
     browser.click_text("Se déconnecter")
     browser.wait("return location.pathname === '/login'", "local logout")
     browser.navigate(origin + "/projects")
