@@ -374,9 +374,10 @@ def run(browser, origin, second):
             "return document.body.innerText.includes('Proposition : BLOCKED')",
             "generic plan refused compilation",
         )
-        assert browser.script(
-            "return !!document.querySelector('button[aria-describedby=\"launch-unavailable\"]:disabled')"
-        ), "launch must remain unavailable"
+        assert not browser.script(
+            "return [...document.querySelectorAll('button')].some(button => "
+            "button.textContent.includes('Lancer le test autorisé') && !button.disabled)"
+        ), "blocked proposal must not expose an executable launch"
     browser.navigate(f"{origin}/projects/{project}/chat?conversation={conversation}")
     browser.wait(
         "return document.body.innerText.includes('état : APPROVED') && "
