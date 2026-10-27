@@ -1287,6 +1287,24 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(
                 assert tick() is None
             except ApplicationError as failure:
                 assert failure.code in {"launch_execution_unverified", "dispatch_disabled"}
+            if mode == "activation_mid":
+                with pytest.raises(ApplicationError) as failure:
+                    tick()
+                assert failure.value.code == "dispatch_disabled"
+                assert len(provider.calls) == 1
+
+                async def reactivate(session):
+                    await session.execute(
+                        update(DispatchActivation)
+                        .where(DispatchActivation.tenant_id == scope.tenant)
+                        .values(enabled=True, generation=3)
+                    )
+                    await session.commit()
+
+                db_call(reactivate)
+                with pytest.raises(ApplicationError) as failure:
+                    tick()
+                assert failure.value.code == "launch_execution_unverified"
             assert tick() is None
             state, _, _, _ = db_call(bound_state)
             assert state == "BLOCKED" and len(provider.calls) == 1
