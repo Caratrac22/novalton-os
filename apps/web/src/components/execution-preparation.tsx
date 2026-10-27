@@ -49,7 +49,12 @@ export function ExecutionPreparation({ projectId, conversationId, planId }: {
         const response = await fetch(`${launchBase}/dispatch`, { cache: "no-store" });
         if (!response.ok) throw new Error("Suivi indisponible ou accès retiré.");
         if (current) setLaunchStatus(await response.json() as LaunchStatus);
-      } catch { if (current) setError("Suivi indisponible ou accès retiré."); }
+      } catch {
+        if (current) {
+          setLaunchStatus(null);
+          setError("Suivi indisponible ou accès retiré.");
+        }
+      }
     };
     void refresh();
     const timer = window.setInterval(() => void refresh(), 5000);

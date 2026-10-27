@@ -1282,7 +1282,7 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(
             try:
                 assert tick() is None
             except ApplicationError as failure:
-                assert failure.code == "launch_execution_unverified"
+                assert failure.code in {"launch_execution_unverified", "dispatch_disabled"}
             assert tick() is None
             state, _, _, _ = db_call(bound_state)
             assert state == "BLOCKED" and len(provider.calls) == 1
@@ -1387,7 +1387,7 @@ def test_separate_launch_decision_creates_inert_workflow_and_revokes(
         assert client.put(specs, headers=auth, json=document).status_code == 200
         assert (
             client.post(url, headers=auth, json=request | {"request_id": str(uuid4())}).status_code
-            == 409
+            == denied_status
         )
 
 

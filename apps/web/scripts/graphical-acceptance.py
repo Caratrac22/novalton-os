@@ -4,8 +4,8 @@ Uses ChromeDriver bundled with the GitHub runner, without a browser download.
 Only synthetic credentials and project data are created. No agent is launched.
 """
 
-import base64
 import asyncio
+import base64
 import http.client
 import json
 import os
@@ -201,7 +201,9 @@ def provision_second_identity():
     from novalton_api.core.config import get_settings
     from novalton_api.core.database import Database, verify_database_identity
     from novalton_api.modules.durable_dispatch.identity import (
-        HumanOperator, TenantOperatorMembership, WorkspaceOperatorPermission,
+        HumanOperator,
+        TenantOperatorMembership,
+        WorkspaceOperatorPermission,
     )
     from novalton_api.modules.local_auth.models import LocalCredential
     from novalton_api.modules.local_auth.service import hash_password
@@ -218,25 +220,46 @@ def provision_second_identity():
         db = Database.from_settings(settings)
         try:
             async with db.session_factory.begin() as session:
-                tenant = Tenant(id=uuid4(), name="Other test tenant", slug="graphical-other")
+                tenant = Tenant(
+                    id=uuid4(), name="Other test tenant", slug="graphical-other"
+                )
                 session.add(tenant)
                 await session.flush()
-                workspace = Workspace(id=uuid4(), tenant_id=tenant.id,
-                                      name="Other test workspace", slug="graphical-other")
+                workspace = Workspace(
+                    id=uuid4(),
+                    tenant_id=tenant.id,
+                    name="Other test workspace",
+                    slug="graphical-other",
+                )
                 person = HumanOperator(label=login, active=True)
                 session.add_all([workspace, person])
                 await session.flush()
-                session.add_all([
-                    LocalCredential(user_id=person.id, login=login,
-                                    password_hash=hash_password(password), changed_at=datetime.now(UTC)),
-                    TenantOperatorMembership(user_id=person.id, tenant_id=tenant.id,
-                                             role="OWNER", active=True),
-                ])
+                session.add_all(
+                    [
+                        LocalCredential(
+                            user_id=person.id,
+                            login=login,
+                            password_hash=hash_password(password),
+                            changed_at=datetime.now(UTC),
+                        ),
+                        TenantOperatorMembership(
+                            user_id=person.id,
+                            tenant_id=tenant.id,
+                            role="OWNER",
+                            active=True,
+                        ),
+                    ]
+                )
                 for permission in ("workspace.read", "workspace.write"):
-                    session.add(WorkspaceOperatorPermission(
-                        user_id=person.id, tenant_id=tenant.id,
-                        workspace_id=workspace.id, permission=permission, active=True,
-                    ))
+                    session.add(
+                        WorkspaceOperatorPermission(
+                            user_id=person.id,
+                            tenant_id=tenant.id,
+                            workspace_id=workspace.id,
+                            permission=permission,
+                            active=True,
+                        )
+                    )
                 return str(tenant.id), str(workspace.id)
         finally:
             await db.dispose()
@@ -244,15 +267,18 @@ def provision_second_identity():
     return (*asyncio.run(create()), login, password)
 
 
-def change_second_authority(tenant_id, workspace_id, login, *, grant_active=None, revoke=False):
+def change_second_authority(
+    tenant_id, workspace_id, login, *, grant_active=None, revoke=False
+):
     from datetime import UTC, datetime
-
-    from sqlalchemy import select, update
 
     from novalton_api.core.config import get_settings
     from novalton_api.core.database import Database, verify_database_identity
-    from novalton_api.modules.durable_dispatch.identity import WorkspaceOperatorPermission
+    from novalton_api.modules.durable_dispatch.identity import (
+        WorkspaceOperatorPermission,
+    )
     from novalton_api.modules.local_auth.models import LocalCredential, LocalSession
+    from sqlalchemy import select, update
 
     async def change():
         settings = get_settings()
@@ -261,29 +287,139 @@ def change_second_authority(tenant_id, workspace_id, login, *, grant_active=None
         db = Database.from_settings(settings)
         try:
             async with db.session_factory.begin() as session:
-                person = await session.scalar(select(LocalCredential).where(
-                    LocalCredential.login == login
-                ))
+                person = await session.scalar(
+                    select(LocalCredential).where(LocalCredential.login == login)
+                )
                 assert person is not None
                 if grant_active is not None:
-                    result = await session.execute(update(WorkspaceOperatorPermission).where(
-                        WorkspaceOperatorPermission.user_id == person.user_id,
-                        WorkspaceOperatorPermission.tenant_id == UUID(tenant_id),
-                        WorkspaceOperatorPermission.workspace_id == UUID(workspace_id),
-                        WorkspaceOperatorPermission.permission == "workspace.read",
-                    ).values(active=grant_active,
-                             revoked_at=None if grant_active else datetime.now(UTC)))
+                    result = await session.execute(
+                        update(WorkspaceOperatorPermission)
+                        .where(
+                            WorkspaceOperatorPermission.user_id == person.user_id,
+                            WorkspaceOperatorPermission.tenant_id == UUID(tenant_id),
+                            WorkspaceOperatorPermission.workspace_id
+                            == UUID(workspace_id),
+                            WorkspaceOperatorPermission.permission == "workspace.read",
+                        )
+                        .values(
+                            active=grant_active,
+                            revoked_at=None if grant_active else datetime.now(UTC),
+                        )
+                    )
                     assert result.rowcount == 1
                 if revoke:
-                    result = await session.execute(update(LocalSession).where(
-                        LocalSession.user_id == person.user_id,
-                        LocalSession.revoked_at.is_(None),
-                    ).values(revoked_at=datetime.now(UTC)))
+                    result = await session.execute(
+                        update(LocalSession)
+                        .where(
+                            LocalSession.user_id == person.user_id,
+                            LocalSession.revoked_at.is_(None),
+                        )
+                        .values(revoked_at=datetime.now(UTC))
+                    )
                     assert result.rowcount >= 1
         finally:
             await db.dispose()
 
     asyncio.run(change())
+
+
+def launch_targets(conversation_id):
+    """Resolve actual disposable IDs to test the launch boundary, not random misses."""
+    from novalton_api.core.config import get_settings
+    from novalton_api.core.database import Database, verify_database_identity
+    from novalton_api.modules.cadrage.models import CadrageCompilation, CadragePlan
+    from sqlalchemy import select
+
+    async def read():
+        settings = get_settings()
+        assert settings.environment == "test"
+        await verify_database_identity(settings)
+        db = Database.from_settings(settings)
+        try:
+            async with db.session_factory() as session:
+                plan = await session.scalar(
+                    select(CadragePlan).where(
+                        CadragePlan.conversation_id == UUID(conversation_id)
+                    )
+                )
+                assert plan is not None and plan.status == "APPROVED"
+                proposal = await session.scalar(
+                    select(CadrageCompilation).where(
+                        CadrageCompilation.plan_id == plan.id
+                    )
+                )
+                assert proposal is not None and proposal.status == "BLOCKED"
+                return str(plan.id), str(proposal.id)
+        finally:
+            await db.dispose()
+
+    return asyncio.run(read())
+
+
+def grant_disposable_launch_permissions(tenant_id, workspace_id):
+    """Make the obsolete plan, rather than missing grants, decide the denial."""
+    from novalton_api.core.config import get_settings
+    from novalton_api.core.database import Database, verify_database_identity
+    from novalton_api.modules.durable_dispatch.identity import (
+        WorkspaceOperatorPermission,
+    )
+    from novalton_api.modules.local_auth.models import LocalCredential
+    from sqlalchemy import select
+
+    async def grant():
+        settings = get_settings()
+        assert settings.environment == "test"
+        await verify_database_identity(settings)
+        db = Database.from_settings(settings)
+        try:
+            async with db.session_factory.begin() as session:
+                user_id = await session.scalar(
+                    select(LocalCredential.user_id).where(
+                        LocalCredential.login == LOGIN
+                    )
+                )
+                assert user_id is not None
+                for permission in ("activation.configure", "dispatch.enqueue"):
+                    existing = await session.scalar(
+                        select(WorkspaceOperatorPermission).where(
+                            WorkspaceOperatorPermission.user_id == user_id,
+                            WorkspaceOperatorPermission.tenant_id == UUID(tenant_id),
+                            WorkspaceOperatorPermission.workspace_id
+                            == UUID(workspace_id),
+                            WorkspaceOperatorPermission.permission == permission,
+                        )
+                    )
+                    if existing is None:
+                        session.add(
+                            WorkspaceOperatorPermission(
+                                user_id=user_id,
+                                tenant_id=UUID(tenant_id),
+                                workspace_id=UUID(workspace_id),
+                                permission=permission,
+                                active=True,
+                            )
+                        )
+        finally:
+            await db.dispose()
+
+    asyncio.run(grant())
+
+
+def direct_api(token, tenant, workspace, suffix, *, method="GET", body=None):
+    request = urllib.request.Request(
+        f"http://127.0.0.1:8000/api/v1/tenants/{tenant}/workspaces/{workspace}/{suffix}",
+        method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status
+    except urllib.error.HTTPError as error:
+        return error.code
 
 
 def run(browser, origin, second):
@@ -378,6 +514,61 @@ def run(browser, origin, second):
             "return [...document.querySelectorAll('button')].some(button => "
             "button.textContent.includes('Lancer le test autorisé') && !button.disabled)"
         ), "blocked proposal must not expose an executable launch"
+    plan_id, compilation_id = launch_targets(conversation)
+    launch_path = (
+        f"projects/{project}/conversations/{conversation}/plans/{plan_id}/"
+        f"compilations/{compilation_id}/launch-authorizations"
+    )
+    # A stale or blocked proposal cannot be turned into an authority by direct
+    # HTTP even when the owner supplies valid credentials and a fresh request.
+    primary_tenant = os.environ.get(
+        "NOVALTON_TENANT_ID", "89cfc055-366e-5bcb-b65f-4f367185bf6d"
+    )
+    primary_workspace = os.environ.get(
+        "NOVALTON_WORKSPACE_ID", "b640b64f-8e55-53e8-a5b2-3beff9d5af82"
+    )
+    grant_disposable_launch_permissions(primary_tenant, primary_workspace)
+    owner_login = urllib.request.Request(
+        "http://127.0.0.1:8000/api/v1/local-auth/login",
+        data=json.dumps({"login": LOGIN, "password": PASSWORD}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(owner_login, timeout=10) as response:
+        owner_token = json.load(response)["token"]
+    authorization_body = {
+        "confirmation": "AUTHORIZE_DISPOSABLE_TEST_LAUNCH",
+        "request_id": str(uuid4()),
+        "environment": "DISPOSABLE_TEST",
+        "provider_id": "local",
+        "model_id": "simulated",
+        "max_model_calls": 3,
+        "max_duration_seconds": 180,
+        "current_password": PASSWORD,
+    }
+    assert (
+        direct_api(
+            owner_token,
+            primary_tenant,
+            primary_workspace,
+            launch_path,
+            method="POST",
+            body=authorization_body,
+        )
+        == 409
+    )
+    assert direct_api(
+        owner_token,
+        primary_tenant,
+        primary_workspace,
+        f"{launch_path}/{uuid4()}/dispatch",
+        method="POST",
+        body={
+            "confirmation": "ENQUEUE_DISPOSABLE_TEST_WORKFLOW",
+            "request_id": str(uuid4()),
+            "current_password": PASSWORD,
+        },
+    ) in (403, 404, 409)
     browser.navigate(f"{origin}/projects/{project}/chat?conversation={conversation}")
     browser.wait(
         "return document.body.innerText.includes('état : APPROVED') && "
@@ -415,6 +606,10 @@ def run(browser, origin, second):
                 "!document.body.innerText.includes('Chargement des conversations')",
                 "persisted responsive chat and plan",
             )
+            assert not browser.script(
+                "return [...document.querySelectorAll('button')].some(button => "
+                "button.textContent.includes('Lancer le test autorisé') && !button.disabled)"
+            ), "blocked launch became actionable after responsive reload"
             metrics = browser.script(
                 "return {width: innerWidth, page: document.documentElement.scrollWidth, "
                 "theme: document.documentElement.dataset.theme}"
@@ -475,7 +670,8 @@ def run(browser, origin, second):
     request = urllib.request.Request(
         "http://127.0.0.1:8000/api/v1/local-auth/login",
         data=json.dumps({"login": login2, "password": password2}).encode(),
-        headers={"Content-Type": "application/json"}, method="POST",
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         token2 = json.load(response)["token"]
@@ -484,21 +680,38 @@ def run(browser, origin, second):
         ("GET", f"projects/{project}/conversations/{conversation}/plans", None),
         ("GET", f"projects/{project}/financial-authorizations", None),
         ("POST", f"projects/{project}/conversations", {"title": "foreign mutation"}),
+        ("GET", f"{launch_path}/{uuid4()}/dispatch", None),
+        ("POST", launch_path, authorization_body),
+        (
+            "POST",
+            f"{launch_path}/{uuid4()}/dispatch",
+            {
+                "confirmation": "ENQUEUE_DISPOSABLE_TEST_WORKFLOW",
+                "request_id": str(uuid4()),
+                "current_password": password2,
+            },
+        ),
     ):
-        url = (f"http://127.0.0.1:8000/api/v1/tenants/{tenant2}/workspaces/{workspace2}/"
-               + suffix)
+        url = (
+            f"http://127.0.0.1:8000/api/v1/tenants/{tenant2}/workspaces/{workspace2}/"
+            + suffix
+        )
         req = urllib.request.Request(
-            url, method=method,
+            url,
+            method=method,
             data=json.dumps(body).encode() if body is not None else None,
-            headers={"Authorization": f"Bearer {token2}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {token2}",
+                "Content-Type": "application/json",
+            },
         )
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
-                raise AssertionError(f"Foreign resource allowed: {method} {response.status}")
+                raise AssertionError(
+                    f"Foreign resource allowed: {method} {response.status}"
+                )
         except urllib.error.HTTPError as error:
             assert error.code in (403, 404), (method, error.code)
-    primary_tenant = os.environ.get("NOVALTON_TENANT_ID", "89cfc055-366e-5bcb-b65f-4f367185bf6d")
-    primary_workspace = os.environ.get("NOVALTON_WORKSPACE_ID", "b640b64f-8e55-53e8-a5b2-3beff9d5af82")
     foreign_vault = urllib.request.Request(
         f"http://127.0.0.1:8000/api/v1/tenants/{primary_tenant}/"
         f"workspaces/{primary_workspace}/provider-keys",
@@ -510,20 +723,27 @@ def run(browser, origin, second):
     except urllib.error.HTTPError as error:
         assert error.code == 403, error.code
     browser.navigate(origin + "/settings")
-    browser.wait("return document.body.innerText.includes('Clés personnelles')",
-                 "other tenant settings")
+    browser.wait(
+        "return document.body.innerText.includes('Clés personnelles')",
+        "other tenant settings",
+    )
     change_second_authority(tenant2, workspace2, login2, grant_active=False)
     browser.navigate(origin + "/projects")
-    browser.wait("return document.body.innerText.includes('Vous n’avez pas accès à cet espace.')",
-                 "grant removed while page open")
+    browser.wait(
+        "return document.body.innerText.includes('Vous n’avez pas accès à cet espace.')",
+        "grant removed while page open",
+    )
     change_second_authority(tenant2, workspace2, login2, grant_active=True)
     browser.navigate(origin + "/projects")
-    browser.wait("return document.body.innerText.includes('Aucun projet')",
-                 "grant restored")
+    browser.wait(
+        "return document.body.innerText.includes('Aucun projet')", "grant restored"
+    )
     change_second_authority(tenant2, workspace2, login2, revoke=True)
     browser.navigate(origin + "/projects")
-    browser.wait("return document.body.innerText.includes('Connexion requise')",
-                 "revoked session denied after page reload")
+    browser.wait(
+        "return document.body.innerText.includes('Connexion requise')",
+        "revoked session denied after page reload",
+    )
     revoked_request = urllib.request.Request(
         f"http://127.0.0.1:8000/api/v1/tenants/{tenant2}/workspaces/{workspace2}/projects",
         headers={"Authorization": f"Bearer {token2}"},
@@ -533,12 +753,27 @@ def run(browser, origin, second):
             raise AssertionError(f"Revoked session allowed: {response.status}")
     except urllib.error.HTTPError as error:
         assert error.code == 401, error.code
+    assert (
+        direct_api(
+            token2,
+            tenant2,
+            workspace2,
+            f"{launch_path}/{uuid4()}/dispatch",
+            method="POST",
+            body={
+                "confirmation": "ENQUEUE_DISPOSABLE_TEST_WORKFLOW",
+                "request_id": str(uuid4()),
+                "current_password": password2,
+            },
+        )
+        == 401
+    )
     print(
         json.dumps(
             {
                 "browser": "Chrome headless",
                 "identity": "local disposable owner",
-                "isolation": "second tenant denied by browser and API; grant and session revoked",
+                "isolation": "real launch IDs denied to second tenant; grant and session revoked",
                 "database": "novalton_test",
                 "project_chat_plan": "persisted and approved",
                 "screenshots": 8,
