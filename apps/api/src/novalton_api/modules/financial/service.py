@@ -65,6 +65,7 @@ async def reserve(
     request_id: UUID,
     tokens: int,
     estimated_exposure: Decimal | None,
+    reject_existing: bool = False,
 ) -> FinancialReservation:
     """Caller must commit the reservation before provider I/O and never refund ambiguity.
 
@@ -117,6 +118,10 @@ async def reserve(
         )
     )
     if existing is not None:
+        # A reservation is evidence of possible provider I/O, including a process crash
+        # before a response. A generation caller must never reuse it to send again.
+        if reject_existing:
+            raise denied()
         if existing.tokens != tokens or existing.estimate != estimated_exposure:
             raise denied()
         return existing

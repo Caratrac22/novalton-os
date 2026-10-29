@@ -399,7 +399,20 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          value = json.loads(Path("/var/lib/novalton-verification/recent.json").read_bytes())
+          recent = Path("/var/lib/novalton-verification/recent.json")
+          try:
+              value = json.loads(recent.read_bytes())
+              if not isinstance(value, dict):
+                  value = {}
+          except (OSError, ValueError):
+              value = {}
+          # Capture only field names and types, never raw response content.
+          print(json.dumps({
+              "recent_present": recent.is_file(),
+              "recent_shape": {key: type(value[key]).__name__ for key in sorted(value)
+                               if key in {"state", "failure_code", "checks", "verification",
+                                          "termination", "output_truncated"}},
+          }, sort_keys=True))
           checks = value.get("checks")
           verification = value.get("verification")
           verification_fields = (
@@ -422,6 +435,17 @@ jobs:
               } if isinstance(verification, dict) else "missing",
           }
           print(json.dumps(safe, sort_keys=True))
+          service = subprocess.run(
+              ["/usr/bin/systemctl", "show", "novalton-verification.service",
+               "--property=ActiveState,SubState,Result,NRestarts,MainPID"],
+              check=False, capture_output=True, text=True, env={}, timeout=5,
+          )
+          service_fields = dict(line.split("=", 1) for line in service.stdout.splitlines()
+                                if "=" in line)
+          print(json.dumps({"service_state": {
+              key: service_fields.get(key) for key in
+              ("ActiveState", "SubState", "Result", "NRestarts", "MainPID")
+          }}, sort_keys=True))
           # Read-only, bounded host-policy evidence. Never print raw audit logs.
           policy = {}
           for name in (
