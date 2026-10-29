@@ -19,13 +19,15 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from sqlalchemy import delete, select, update
 from test_development_workflow import QueueProvider, _manager, _qa, _worker
 
 from novalton_api.core.config import Settings, get_settings
 from novalton_api.core.database import Database
 from novalton_api.core.exceptions import ApplicationError
+from novalton_api.infrastructure.providers.contracts import GenerationRequest, Message, MessageRole
+from novalton_api.infrastructure.providers.errors import ProviderCancellationError
 from novalton_api.infrastructure.providers.openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProvider,
@@ -58,6 +60,7 @@ from novalton_api.modules.durable_dispatch.models import (
 )
 from novalton_api.modules.durable_dispatch.operator import authenticate_operator
 from novalton_api.modules.durable_dispatch.sessions import authenticate_session
+from novalton_api.modules.financial.gateway import PaidGenerationGateway
 from novalton_api.modules.financial.models import FinancialAuthorization, FinancialReservation
 from novalton_api.modules.financial.service import reserve as reserve_financial
 from novalton_api.modules.launch import routes as launch_routes
@@ -701,6 +704,274 @@ def test_financial_reservation_serializes_concurrent_requests(initialized):
 
         assert sorted(asyncio.run(race())) == ["denied", "reserved"]
         assert client.get(url, headers=auth).json()["items"][0]["request_count"] == 1
+
+
+def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scope(initialized):
+    scope, password, _ = initialized
+    calls = []
+    secret = "sk-fixture-never-expose"
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "id": "fixture-call",
+                "model": "test-model",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+            },
+        )
+
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig(
+            provider_id="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            api_key=SecretStr(secret),
+        ),
+        transport=httpx.MockTransport(respond),
+    )
+    gateway = PaidGenerationGateway(provider)
+    prompt = GenerationRequest(
+        model_id="test-model",
+        messages=[Message(role=MessageRole.USER, content="fixture prompt")],
+        max_output_tokens=10,
+    )
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+        ).json()["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        project = client.post(
+            path(scope) + "/projects",
+            headers=headers,
+            json={"name": "Gateway", "slug": "gateway", "description": None},
+        ).json()
+        project_id = UUID(project["id"])
+        url = path(scope) + f"/projects/{project_id}/financial-authorizations"
+        grant = client.post(
+            url,
+            headers=headers,
+            json={
+                "confirmation": "AUTHORIZE_ESTIMATED_EXPOSURE",
+                "provider_id": "openrouter",
+                "model_id": "test-model",
+                "currency": "USD",
+                "request_limit": 2,
+                "token_limit": 20,
+                "estimated_limit": "0.02",
+                "expires_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+                "current_password": password,
+            },
+        )
+        assert grant.status_code == 201, grant.text
+        grant_id = UUID(grant.json()["id"])
+        attempt_id = uuid4()
+
+        async def call(
+            authorization_id,
+            tenant_id,
+            request_id,
+            model_request=prompt,
+            gateway_instance=gateway,
+            timeout_seconds=45,
+        ):
+            db = Database.from_settings(Settings.from_environment())
+            try:
+                async with db.session_factory() as session:
+                    operator = await authenticate_session(
+                        session, token=token, tenant_id=scope.tenant, workspace_id=scope.workspace
+                    )
+                    await session.rollback()
+                    return await gateway_instance.complete(
+                        session,
+                        operator=operator,
+                        authorization_id=authorization_id,
+                        tenant_id=tenant_id,
+                        workspace_id=scope.workspace,
+                        project_id=project_id,
+                        request_id=request_id,
+                        request=model_request,
+                        reserved_tokens=10,
+                        estimated_exposure=Decimal("0.01"),
+                        timeout_seconds=timeout_seconds,
+                    )
+            finally:
+                await db.dispose()
+
+        assert asyncio.run(call(grant_id, scope.tenant, attempt_id)).content == "ok"
+        assert len(calls) == 1
+        assert calls[0].url == "https://openrouter.ai/api/v1/chat/completions"
+        for aid, tid, rid in (
+            (grant_id, scope.tenant, attempt_id),  # uncertain effects are never replayed
+            (grant_id, uuid4(), uuid4()),  # foreign tenant
+            (uuid4(), scope.tenant, uuid4()),  # foreign authorization
+        ):
+            with pytest.raises(ApplicationError):
+                asyncio.run(call(aid, tid, rid))
+        with pytest.raises(ApplicationError):
+            asyncio.run(
+                call(
+                    grant_id,
+                    scope.tenant,
+                    uuid4(),
+                    prompt.model_copy(update={"model_id": "unapproved-model"}),
+                )
+            )
+        assert len(calls) == 1
+        timed_calls = []
+
+        async def slow(request):
+            timed_calls.append(request)
+            await asyncio.sleep(0.05)
+            return respond(request)
+
+        slow_provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(
+                provider_id="openrouter",
+                base_url="https://openrouter.ai/api/v1",
+                api_key=SecretStr(secret),
+            ),
+            transport=httpx.MockTransport(slow),
+        )
+        timed_id = uuid4()
+        with pytest.raises((TimeoutError, ProviderCancellationError)):
+            asyncio.run(
+                call(
+                    grant_id,
+                    scope.tenant,
+                    timed_id,
+                    gateway_instance=PaidGenerationGateway(slow_provider),
+                    timeout_seconds=0.001,
+                )
+            )
+        assert len(timed_calls) == 1 and len(calls) == 1
+        with pytest.raises(ApplicationError):
+            asyncio.run(call(grant_id, scope.tenant, timed_id))
+        asyncio.run(slow_provider.aclose())
+        revoked = client.post(
+            url + f"/{grant_id}/revoke",
+            headers=headers,
+            json={"current_password": password},
+        )
+        assert revoked.status_code == 200, revoked.text
+        with pytest.raises(ApplicationError):
+            asyncio.run(call(grant_id, scope.tenant, uuid4()))
+        assert len(calls) == 1
+        assert client.get(url, headers=headers).json()["items"][0]["request_count"] == 2
+    asyncio.run(provider.aclose())
+
+
+def test_paid_gateway_rejects_untrusted_destinations_and_missing_key():
+    for destination, key in (
+        ("https://attacker.example/v1", SecretStr("fixture")),
+        ("http://127.0.0.1:1234/v1", SecretStr("fixture")),
+        ("https://openrouter.ai/api/v1", None),
+    ):
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(provider_id="openrouter", base_url=destination, api_key=key),
+            transport=httpx.MockTransport(lambda _: pytest.fail("unexpected outbound request")),
+        )
+        with pytest.raises(ApplicationError):
+            PaidGenerationGateway(provider)
+        asyncio.run(provider.aclose())
+
+
+def test_paid_gateway_concurrent_same_request_has_only_one_http_attempt(initialized):
+    scope, password, _ = initialized
+    outbound = []
+
+    async def respond(request):
+        outbound.append(request)
+        await asyncio.sleep(0.02)
+        return httpx.Response(
+            200,
+            json={
+                "id": "one",
+                "model": "test-model",
+                "choices": [{"message": {"content": "done"}, "finish_reason": "stop"}],
+            },
+        )
+
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig(
+            provider_id="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            api_key=SecretStr("fixture-only"),
+        ),
+        transport=httpx.MockTransport(respond),
+    )
+    gateway = PaidGenerationGateway(provider)
+    with TestClient(create_app()) as client:
+        token = client.post(
+            "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
+        ).json()["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        project = client.post(
+            path(scope) + "/projects",
+            headers=headers,
+            json={"name": "Race", "slug": "race", "description": None},
+        ).json()
+        project_id = UUID(project["id"])
+        created = client.post(
+            path(scope) + f"/projects/{project_id}/financial-authorizations",
+            headers=headers,
+            json={
+                "confirmation": "AUTHORIZE_ESTIMATED_EXPOSURE",
+                "provider_id": "openrouter",
+                "model_id": "test-model",
+                "currency": "USD",
+                "request_limit": 1,
+                "token_limit": 10,
+                "estimated_limit": "0.01",
+                "expires_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+                "current_password": password,
+            },
+        )
+        assert created.status_code == 201, created.text
+        grant_id = UUID(created.json()["id"])
+        request_id = uuid4()
+        prompt = GenerationRequest(
+            model_id="test-model",
+            messages=[Message(role=MessageRole.USER, content="only once")],
+            max_output_tokens=10,
+        )
+
+        async def race():
+            db = Database.from_settings(Settings.from_environment())
+            try:
+                async with db.session_factory() as session:
+                    operator = await authenticate_session(
+                        session, token=token, tenant_id=scope.tenant, workspace_id=scope.workspace
+                    )
+                    await session.rollback()
+
+                async def one():
+                    async with db.session_factory() as session:
+                        try:
+                            await gateway.complete(
+                                session,
+                                operator=operator,
+                                authorization_id=grant_id,
+                                tenant_id=scope.tenant,
+                                workspace_id=scope.workspace,
+                                project_id=project_id,
+                                request_id=request_id,
+                                request=prompt,
+                                reserved_tokens=10,
+                                estimated_exposure=Decimal("0.01"),
+                            )
+                            return "sent"
+                        except ApplicationError:
+                            return "denied"
+
+                return await asyncio.gather(one(), one())
+            finally:
+                await db.dispose()
+
+        assert sorted(asyncio.run(race())) == ["denied", "sent"]
+        assert len(outbound) == 1
+    asyncio.run(provider.aclose())
 
 
 def test_approved_plan_compilation_is_idempotent_scoped_and_revoked(initialized):
