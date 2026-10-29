@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from novalton_api.infrastructure.providers.contracts import GenerationRequest, GenerationResult
+from novalton_api.infrastructure.providers.errors import ProviderError, ProviderFailure
 from novalton_api.infrastructure.providers.openai_compatible import OpenAICompatibleProvider
 from novalton_api.modules.durable_dispatch.operator import OperatorAuthority
 from novalton_api.modules.financial.service import denied, reserve, scoped_authorization
@@ -64,6 +65,16 @@ class PaidGenerationGateway:
             or reserved_tokens < request.max_output_tokens
             or not 0 < timeout_seconds <= 60
         ):
+            raise denied()
+        options = request.provider_options
+        if self._provider.provider_id == "openrouter" and (
+            options is None
+            or options.upstream_provider is None
+            or options.allow_fallbacks is not False
+            or not options.require_parameters
+        ):
+            # An alias without a qualified upstream can silently route to a
+            # different paid provider. Never reserve or send such a request.
             raise denied()
         # reserve() locks the authorization and enforces scope, identity, model,
         # active grants, expiry and monotonic request/token/estimated quotas.
@@ -118,6 +129,25 @@ class PaidGenerationGateway:
                 or row.currency != "USD"
             ):
                 raise denied()
-            return await asyncio.wait_for(self._provider.complete(request), timeout=timeout_seconds)
+            result = await asyncio.wait_for(
+                self._provider.complete(request), timeout=timeout_seconds
+            )
+            if (
+                result.provider_id != self._provider.provider_id
+                or result.model_id != request.model_id
+                or (
+                    result.provider_resolved_model_id is not None
+                    and result.provider_resolved_model_id != request.model_id
+                )
+                or (
+                    options is not None
+                    and options.upstream_provider is not None
+                    and result.upstream_provider_id != options.upstream_provider
+                )
+            ):
+                raise ProviderError(
+                    ProviderFailure.INVALID_REQUEST, provider_id=self._provider.provider_id
+                )
+            return result
         finally:
             await session.rollback()  # release the lock even on late/failed responses

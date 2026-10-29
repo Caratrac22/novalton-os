@@ -26,7 +26,12 @@ from test_development_workflow import QueueProvider, _manager, _qa, _worker
 from novalton_api.core.config import Settings, get_settings
 from novalton_api.core.database import Database
 from novalton_api.core.exceptions import ApplicationError
-from novalton_api.infrastructure.providers.contracts import GenerationRequest, Message, MessageRole
+from novalton_api.infrastructure.providers.contracts import (
+    GenerationRequest,
+    Message,
+    MessageRole,
+    ProviderRequestOptions,
+)
 from novalton_api.infrastructure.providers.errors import ProviderCancellationError
 from novalton_api.infrastructure.providers.openai_compatible import (
     OpenAICompatibleConfig,
@@ -718,6 +723,9 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
             json={
                 "id": "fixture-call",
                 "model": "test-model",
+                "openrouter_metadata": {
+                    "endpoints": {"available": [{"selected": True, "provider": "testprovider"}]}
+                },
                 "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
             },
@@ -736,6 +744,9 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
         model_id="test-model",
         messages=[Message(role=MessageRole.USER, content="fixture prompt")],
         max_output_tokens=10,
+        provider_options=ProviderRequestOptions(
+            require_parameters=True, allow_fallbacks=False, upstream_provider="testprovider"
+        ),
     )
     with TestClient(create_app()) as client:
         token = client.post(
@@ -798,6 +809,17 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
                     )
             finally:
                 await db.dispose()
+
+        with pytest.raises(ApplicationError):
+            asyncio.run(
+                call(
+                    grant_id,
+                    scope.tenant,
+                    uuid4(),
+                    prompt.model_copy(update={"provider_options": None}),
+                )
+            )
+        assert not calls
 
         assert asyncio.run(call(grant_id, scope.tenant, attempt_id)).content == "ok"
         assert len(calls) == 1
@@ -889,6 +911,9 @@ def test_paid_gateway_concurrent_same_request_has_only_one_http_attempt(initiali
             json={
                 "id": "one",
                 "model": "test-model",
+                "openrouter_metadata": {
+                    "endpoints": {"available": [{"selected": True, "provider": "testprovider"}]}
+                },
                 "choices": [{"message": {"content": "done"}, "finish_reason": "stop"}],
             },
         )
@@ -935,6 +960,9 @@ def test_paid_gateway_concurrent_same_request_has_only_one_http_attempt(initiali
             model_id="test-model",
             messages=[Message(role=MessageRole.USER, content="only once")],
             max_output_tokens=10,
+            provider_options=ProviderRequestOptions(
+                require_parameters=True, allow_fallbacks=False, upstream_provider="testprovider"
+            ),
         )
 
         async def race():

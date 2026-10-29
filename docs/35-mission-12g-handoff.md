@@ -1,6 +1,6 @@
 # Mission 12G — passerelle IA sécurisée
 
-Base vérifiée : PR #107, HEAD `b75a895babda84c1c9a8f150ae2d5a0509b73336`, branche `feature/mission12g-secure-ai-gateway`. PR et HEAD final : voir le rapport de livraison et les checks GitHub attachés au commit. Aucun merge, déploiement, fournisseur payant réel ni activation de production.
+Base vérifiée : PR #107, HEAD `b75a895babda84c1c9a8f150ae2d5a0509b73336`. PR empilée #108, branche `feature/mission12g-secure-ai-gateway`. Premier commit de code `20fd42678b24664cdd147b2e900e844c9a5d44a1` ; les gates initiaux CI `40908552548`, Chromium `40908552617` et I-044A/B `40908552599` sont à vérifier avant livraison. Le HEAD final et ses gates exacts figurent dans la PR et le rapport final. Aucun merge, déploiement, fournisseur payant réel ni activation de production.
 
 ## Registre priorisé
 
@@ -27,7 +27,7 @@ Base vérifiée : PR #107, HEAD `b75a895babda84c1c9a8f150ae2d5a0509b73336`, bran
 | Injection de mémoires | Filtre `LOCAL_ONLY`/`RESTRICTED` déjà appliqué avant sélection distante ; provenance à revalider à la frontière avant activation payante. |
 | Catalogue de modèles | Métadonnées séparées de la génération ; aucune autorisation implicite. |
 
-La passerelle ne constitue pas une activation. Elle accepte seulement un adaptateur OpenAI-compatible exact à l'une des deux destinations fixées dans le code, avec clé déjà fournie par un composant de confiance. `reserve(..., reject_existing=True)` verrouille la politique et brûle durablement l'identifiant avant HTTP. La revalidation du grant, projet et autorisation est sérialisée avec la révocation pendant l'appel. Le quota est une borne sur **l'estimation réservée**, jamais une limite de facture garantie : `BILLING_UNVERIFIED`.
+La passerelle ne constitue pas une activation. Elle accepte seulement un adaptateur OpenAI-compatible exact à l'une des deux destinations fixées dans le code, avec clé déjà fournie par un composant de confiance. OpenRouter exige une cible amont épinglée, `require_parameters` et les fallbacks désactivés ; l'identité de réponse est contrôlée. `reserve(..., reject_existing=True)` verrouille la politique et brûle durablement l'identifiant avant HTTP. La revalidation du grant, projet et autorisation est sérialisée avec la révocation pendant l'appel. Le quota est une borne sur **l'estimation réservée**, jamais une limite de facture garantie : `BILLING_UNVERIFIED`.
 
 ## Validation et limites de livraison
 
