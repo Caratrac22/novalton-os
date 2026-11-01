@@ -32,7 +32,7 @@ from novalton_api.infrastructure.providers.contracts import (
     MessageRole,
     ProviderRequestOptions,
 )
-from novalton_api.infrastructure.providers.errors import ProviderCancellationError
+from novalton_api.infrastructure.providers.errors import ProviderCancellationError, ProviderError
 from novalton_api.infrastructure.providers.openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProvider,
@@ -43,6 +43,7 @@ from novalton_api.modules.agents.models import AgentDefinition, AgentRun
 from novalton_api.modules.audit.models import AuditRecord
 from novalton_api.modules.cadrage import service as cadrage_service
 from novalton_api.modules.cadrage.compilation import compile_document
+from novalton_api.modules.cadrage.generation import generate_reply
 from novalton_api.modules.cadrage.models import (
     CadrageCompilation,
     CadrageConversation,
@@ -65,7 +66,7 @@ from novalton_api.modules.durable_dispatch.models import (
 )
 from novalton_api.modules.durable_dispatch.operator import authenticate_operator
 from novalton_api.modules.durable_dispatch.sessions import authenticate_session
-from novalton_api.modules.financial.gateway import PaidGenerationGateway
+from novalton_api.modules.financial.gateway import PaidGenerationAttempt, PaidGenerationGateway
 from novalton_api.modules.financial.models import FinancialAuthorization, FinancialReservation
 from novalton_api.modules.financial.service import reserve as reserve_financial
 from novalton_api.modules.launch import routes as launch_routes
@@ -79,6 +80,8 @@ from novalton_api.modules.local_auth.models import LocalCredential, LocalLoginTh
 from novalton_api.modules.local_auth.service import hash_password
 from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_usage.models import ModelRun
+from novalton_api.modules.model_usage.schemas import ModelRunStart
+from novalton_api.modules.model_usage.service import start_run as start_model_run
 from novalton_api.modules.orchestrator.models import AgentChallengeResolution
 from novalton_api.modules.projects.models import Project
 from novalton_api.modules.provider_keys.models import ProviderKey
@@ -768,16 +771,28 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
                 "provider_id": "openrouter",
                 "model_id": "test-model",
                 "currency": "USD",
-                "request_limit": 2,
-                "token_limit": 20,
-                "estimated_limit": "0.02",
+                "request_limit": 3,
+                "token_limit": 30,
+                "estimated_limit": "0.03",
                 "expires_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
                 "current_password": password,
             },
         )
         assert grant.status_code == 201, grant.text
         grant_id = UUID(grant.json()["id"])
-        attempt_id = uuid4()
+        attempt_id = db_call(
+            lambda session: start_model_run(
+                session,
+                tenant_id=scope.tenant,
+                workspace_id=scope.workspace,
+                data=ModelRunStart(
+                    provider_id="openrouter",
+                    provider_model_id="test-model",
+                    project_id=project_id,
+                    execution_max_output_tokens=10,
+                ),
+            )
+        ).id
 
         async def call(
             authorization_id,
@@ -786,6 +801,7 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
             model_request=prompt,
             gateway_instance=gateway,
             timeout_seconds=45,
+            through_registry=False,
         ):
             db = Database.from_settings(Settings.from_environment())
             try:
@@ -794,6 +810,23 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
                         session, token=token, tenant_id=scope.tenant, workspace_id=scope.workspace
                     )
                     await session.rollback()
+                    if through_registry:
+                        return await ProviderRegistry((gateway_instance._provider,)).complete(
+                            gateway_instance._provider.provider_id,
+                            model_request,
+                            paid_attempt=PaidGenerationAttempt(
+                                session=session,
+                                operator=operator,
+                                authorization_id=authorization_id,
+                                tenant_id=tenant_id,
+                                workspace_id=scope.workspace,
+                                project_id=project_id,
+                                model_run_id=request_id,
+                                reserved_tokens=10,
+                                estimated_exposure=Decimal("0.01"),
+                                timeout_seconds=timeout_seconds,
+                            ),
+                        )
                     return await gateway_instance.complete(
                         session,
                         operator=operator,
@@ -821,7 +854,14 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
             )
         assert not calls
 
-        assert asyncio.run(call(grant_id, scope.tenant, attempt_id)).content == "ok"
+        with pytest.raises(ApplicationError):
+            asyncio.run(call(grant_id, scope.tenant, uuid4(), through_registry=True))
+        assert not calls
+
+        assert (
+            asyncio.run(call(grant_id, scope.tenant, attempt_id, through_registry=True)).content
+            == "ok"
+        )
         assert len(calls) == 1
         assert calls[0].url == "https://openrouter.ai/api/v1/chat/completions"
         for aid, tid, rid in (
@@ -830,7 +870,7 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
             (uuid4(), scope.tenant, uuid4()),  # foreign authorization
         ):
             with pytest.raises(ApplicationError):
-                asyncio.run(call(aid, tid, rid))
+                asyncio.run(call(aid, tid, rid, through_registry=rid == attempt_id))
         with pytest.raises(ApplicationError):
             asyncio.run(
                 call(
@@ -880,7 +920,7 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
         with pytest.raises(ApplicationError):
             asyncio.run(call(grant_id, scope.tenant, uuid4()))
         assert len(calls) == 1
-        assert client.get(url, headers=headers).json()["items"][0]["request_count"] == 2
+        assert client.get(url, headers=headers).json()["items"][0]["request_count"] == 3
     asyncio.run(provider.aclose())
 
 
@@ -896,6 +936,33 @@ def test_paid_gateway_rejects_untrusted_destinations_and_missing_key():
         )
         with pytest.raises(ApplicationError):
             PaidGenerationGateway(provider)
+        asyncio.run(provider.aclose())
+
+
+def test_injected_https_chat_provider_is_denied_before_http():
+    outbound = []
+
+    def record(request):
+        outbound.append(request)
+        return httpx.Response(200, json={})
+
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig(
+            provider_id="local_cadrage",
+            base_url="https://api.openai.com/v1",
+            api_key=SecretStr("fixture-never-sent"),
+        ),
+        transport=httpx.MockTransport(record),
+    )
+    try:
+        with pytest.raises(ProviderError):
+            asyncio.run(
+                generate_reply(
+                    ProviderRegistry((provider,)), model_id="test-model", title="Test", history=[]
+                )
+            )
+        assert outbound == []
+    finally:
         asyncio.run(provider.aclose())
 
 

@@ -72,12 +72,13 @@ async def generate_reply(
                 content=row.content[:4000],
             )
         )
-    result = await registry.get("local_cadrage").complete(
+    result = await registry.complete(
+        "local_cadrage",
         GenerationRequest(
             model_id=model_id,
             messages=context,
             max_output_tokens=512,
-        )
+        ),
     )
     try:
         payload = json.loads(result.content)

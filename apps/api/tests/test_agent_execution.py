@@ -7,9 +7,10 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from sqlalchemy import delete, func, select, update
 
 from novalton_api.core.config import Settings, get_settings
@@ -26,6 +27,10 @@ from novalton_api.infrastructure.providers.errors import (
     ProviderCancellationError,
     ProviderError,
     ProviderFailure,
+)
+from novalton_api.infrastructure.providers.openai_compatible import (
+    OpenAICompatibleConfig,
+    OpenAICompatibleProvider,
 )
 from novalton_api.infrastructure.providers.registry import ProviderRegistry
 from novalton_api.main import create_app
@@ -938,6 +943,33 @@ def test_provider_backed_execution_captures_usage_and_linkage(
         assert (approvals, policies) == (0, 0)
         assert len(asyncio.run(_model_attempts(scope, UUID(body["agent_run_id"])))) == 1
     finally:
+        asyncio.run(_cleanup(scope))
+
+
+def test_injected_https_agent_provider_cannot_bypass_financial_boundary() -> None:
+    scope = asyncio.run(_seed(provider_id="openrouter"))
+    outbound = []
+
+    def record(request):
+        outbound.append(request)
+        return httpx.Response(200, json={})
+
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig(
+            provider_id="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            api_key=SecretStr("fixture-never-sent"),
+        ),
+        transport=httpx.MockTransport(record),
+    )
+    try:
+        with TestClient(create_app(provider_registry=ProviderRegistry((provider,)))) as client:
+            response = client.post(_url(scope), json=_input(scope))
+        assert response.status_code == 200, response.text
+        assert response.json()["error_code"] == "provider_invalid_request"
+        assert outbound == []
+    finally:
+        asyncio.run(provider.aclose())
         asyncio.run(_cleanup(scope))
 
 
