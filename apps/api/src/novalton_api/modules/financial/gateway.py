@@ -7,6 +7,7 @@ crash, timeout, cancellation or lost response burns that request ID permanently.
 """
 
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -19,12 +20,29 @@ from novalton_api.infrastructure.providers.errors import ProviderError, Provider
 from novalton_api.infrastructure.providers.openai_compatible import OpenAICompatibleProvider
 from novalton_api.modules.durable_dispatch.operator import OperatorAuthority
 from novalton_api.modules.financial.service import denied, reserve, scoped_authorization
+from novalton_api.modules.model_usage.models import ModelRun
 from novalton_api.modules.projects.models import Project
 
 _DESTINATIONS = {
     "openai": "https://api.openai.com/v1",
     "openrouter": "https://openrouter.ai/api/v1",
 }
+
+
+@dataclass(frozen=True)
+class PaidGenerationAttempt:
+    """Server-owned context for one financially reserved generation attempt."""
+
+    session: AsyncSession
+    operator: OperatorAuthority
+    authorization_id: UUID
+    tenant_id: UUID
+    workspace_id: UUID
+    project_id: UUID
+    model_run_id: UUID
+    reserved_tokens: int
+    estimated_exposure: Decimal
+    timeout_seconds: float = 45
 
 
 class PaidGenerationGateway:
@@ -59,6 +77,7 @@ class PaidGenerationGateway:
         reserved_tokens: int,
         estimated_exposure: Decimal,
         timeout_seconds: float = 45,
+        model_run_id: UUID | None = None,
     ) -> GenerationResult:
         if (
             request.max_output_tokens is None
@@ -129,6 +148,32 @@ class PaidGenerationGateway:
                 or row.currency != "USD"
             ):
                 raise denied()
+            if model_run_id is not None:
+                # A paid registry attempt must use an existing, scoped, running
+                # invocation as its request identity. Cancellation or model drift
+                # cannot create a new provider call after the reservation.
+                model_run = await session.scalar(
+                    select(ModelRun)
+                    .where(
+                        ModelRun.id == model_run_id,
+                        ModelRun.tenant_id == tenant_id,
+                        ModelRun.workspace_id == workspace_id,
+                        ModelRun.project_id == project_id,
+                        ModelRun.provider_id == self._provider.provider_id,
+                        ModelRun.provider_model_id == request.model_id,
+                        ModelRun.status == "RUNNING",
+                    )
+                    .with_for_update(read=True)
+                )
+                if (
+                    request_id != model_run_id
+                    or model_run is None
+                    or (
+                        model_run.execution_max_output_tokens is not None
+                        and model_run.execution_max_output_tokens != request.max_output_tokens
+                    )
+                ):
+                    raise denied()
             result = await asyncio.wait_for(
                 self._provider.complete(request), timeout=timeout_seconds
             )

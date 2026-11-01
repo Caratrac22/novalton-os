@@ -768,7 +768,7 @@ async def _continue_with_tool_evidence_once[AgentResultT: AgentResult](
         ):
             try:
                 continuation = await asyncio.wait_for(
-                    provider.complete(generation_request),
+                    registry.complete(initial_model_run.provider_id, generation_request),
                     timeout=_GOVERNED_CONTINUATION_TIMEOUT_SECONDS,
                 )
             except TimeoutError:
@@ -776,7 +776,9 @@ async def _continue_with_tool_evidence_once[AgentResultT: AgentResult](
                     ProviderFailure.TIMEOUT, provider_id=initial_model_run.provider_id
                 ) from None
         else:
-            continuation = await provider.complete(generation_request)
+            continuation = await registry.complete(
+                initial_model_run.provider_id, generation_request
+            )
         if (continuation.provider_id, continuation.model_id) != (
             initial_model_run.provider_id,
             initial_model_run.provider_model_id,
@@ -1234,7 +1236,8 @@ async def execute[AgentResultT: AgentResult](
                 "budget_policy_source": budget.source,
             },
         )
-        generation = await provider.complete(
+        generation = await registry.complete(
+            routed.provider_id,
             _generation_request(
                 definition,
                 data,
@@ -1246,7 +1249,7 @@ async def execute[AgentResultT: AgentResult](
                 provider_options=provider_options,
                 memory_context=provider_memory_context,
                 trusted_tools=trusted_tools,
-            )
+            ),
         )
     except (ProviderCancellationError, asyncio.CancelledError):
         await usage_service.cancel_run(
@@ -1474,7 +1477,8 @@ async def execute[AgentResultT: AgentResult](
             },
         )
         try:
-            recovery_generation = await provider.complete(
+            recovery_generation = await registry.complete(
+                routed.provider_id,
                 _generation_request(
                     definition,
                     data,
@@ -1486,7 +1490,7 @@ async def execute[AgentResultT: AgentResult](
                     provider_options=provider_options,
                     memory_context=provider_memory_context,
                     trusted_tools=trusted_tools,
-                )
+                ),
             )
             if (recovery_generation.provider_id, recovery_generation.model_id) != (
                 routed.provider_id,
@@ -1651,7 +1655,8 @@ async def execute[AgentResultT: AgentResult](
                 },
             )
             try:
-                generation = await provider.complete(
+                generation = await registry.complete(
+                    routed.provider_id,
                     _generation_request(
                         definition,
                         data,
@@ -1664,7 +1669,7 @@ async def execute[AgentResultT: AgentResult](
                         provider_options=provider_options,
                         memory_context=provider_memory_context,
                         trusted_tools=trusted_tools,
-                    )
+                    ),
                 )
                 if (generation.provider_id, generation.model_id) != (
                     routed.provider_id,
