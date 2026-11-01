@@ -1025,6 +1025,7 @@ async def test_registry_blocks_injected_remote_http_before_transport() -> None:
         ("openrouter", "https://openrouter.ai/api/v1"),
         ("local_cadrage", "https://api.openai.com/v1"),
         ("local_cadrage", "http://127.0.0.1:8080/v1"),
+        ("openrouter", "http://127.0.0.1:1234/v1"),
     ):
         provider = OpenAICompatibleProvider(
             config(provider_id=provider_id, base_url=destination),
@@ -1036,6 +1037,15 @@ async def test_registry_blocks_injected_remote_http_before_transport() -> None:
             assert denied.value.failure == ProviderFailure.INVALID_REQUEST
         finally:
             await provider.aclose()
+    alias = OpenAICompatibleProvider(
+        config(provider_id="openrouter", base_url="http://127.0.0.1:1234/v1", api_key=None),
+        transport=httpx.MockTransport(record),
+    )
+    try:
+        with pytest.raises(ProviderError):
+            await ProviderRegistry((alias,)).complete("openrouter", request())
+    finally:
+        await alias.aclose()
     assert calls == []
 
 

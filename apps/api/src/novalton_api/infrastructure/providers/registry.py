@@ -58,7 +58,11 @@ class ProviderRegistry:
         provider = self.get(provider_id)
         if type(provider) is OpenAICompatibleProvider:
             config = provider._config
-            if config.base_url in _LOCAL_ENDPOINTS and config.api_key is None:
+            if (
+                provider_id == "local_cadrage"
+                and config.base_url in _LOCAL_ENDPOINTS
+                and config.api_key is None
+            ):
                 if paid_attempt is not None:
                     raise ProviderError(ProviderFailure.INVALID_REQUEST, provider_id=provider_id)
                 return await provider.complete(request)
