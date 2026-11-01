@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from decimal import Decimal
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -11,6 +12,7 @@ from novalton_api.core.config import Settings, SettingsError
 from novalton_api.core.context import reset_correlation_id, set_correlation_id
 from novalton_api.core.logging import JsonFormatter
 from novalton_api.infrastructure.providers import openai_compatible
+from novalton_api.infrastructure.providers import registry as provider_registry
 from novalton_api.infrastructure.providers.base import ModelProvider
 from novalton_api.infrastructure.providers.contracts import (
     MAX_MESSAGE_CHARACTERS,
@@ -1046,6 +1048,36 @@ async def test_registry_blocks_injected_remote_http_before_transport() -> None:
             await ProviderRegistry((alias,)).complete("openrouter", request())
     finally:
         await alias.aclose()
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_paid_adapter_is_closed_outside_disposable_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def record(http_request: httpx.Request) -> httpx.Response:
+        calls.append(http_request)
+        return httpx.Response(200, json=response_payload())
+
+    provider = OpenAICompatibleProvider(
+        config(provider_id="openai", base_url="https://api.openai.com/v1"),
+        transport=httpx.MockTransport(record),
+    )
+    monkeypatch.setattr(
+        provider_registry, "get_settings", lambda: SimpleNamespace(environment="production")
+    )
+    try:
+        with pytest.raises(ProviderError) as denied:
+            await ProviderRegistry((provider,)).complete(
+                "openai",
+                request(),
+                paid_attempt=object(),  # type: ignore[arg-type]
+            )
+        assert denied.value.failure == ProviderFailure.INVALID_REQUEST
+    finally:
+        await provider.aclose()
     assert calls == []
 
 

@@ -68,6 +68,10 @@ class ProviderRegistry:
                 return await provider.complete(request)
             if paid_attempt is None:
                 raise ProviderError(ProviderFailure.INVALID_REQUEST, provider_id=provider_id)
+            # Deliberately closed until the application can pass durable human
+            # authority and verified provenance for every injected input.
+            if get_settings().environment != "test":
+                raise ProviderError(ProviderFailure.INVALID_REQUEST, provider_id=provider_id)
             from novalton_api.modules.financial.gateway import PaidGenerationGateway
 
             return await PaidGenerationGateway(provider).complete(
