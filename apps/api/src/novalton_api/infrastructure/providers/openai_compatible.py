@@ -60,6 +60,7 @@ class OpenAICompatibleProvider:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._config = config
+        self._transport = transport
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "identity",

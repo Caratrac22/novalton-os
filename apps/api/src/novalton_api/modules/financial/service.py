@@ -2,7 +2,7 @@
 
 Reservations are monotonic because a timeout or lost response can still be
 billed. This is an estimated exposure constraint, not a billing guarantee.
-No current generation path calls this service; paid integration stays closed.
+Only the disposable test generation path calls this service; paid integration stays closed.
 """
 
 from datetime import UTC, datetime
@@ -66,18 +66,27 @@ async def reserve(
     tokens: int,
     estimated_exposure: Decimal | None,
     reject_existing: bool = False,
+    logical_work_id: UUID | None = None,
+    attempt_kind: str | None = None,
+    attempt_index: int | None = None,
+    context_sha256: str | None = None,
 ) -> FinancialReservation:
     """Caller must commit the reservation before provider I/O and never refund ambiguity.
 
     A transaction waiting on this row sees the latest counters or revocation.
     Idempotent retries return their existing reservation only while authorized.
     """
+    identity = (logical_work_id, attempt_kind, attempt_index, context_sha256)
     if (
         tokens <= 0
         or estimated_exposure is None
         or not estimated_exposure.is_finite()
         or estimated_exposure <= 0
         or estimated_exposure.as_tuple().exponent < -10
+        or (
+            any(value is not None for value in identity)
+            and any(value is None for value in identity)
+        )
     ):
         raise denied()
     await operator.require_human(
@@ -139,6 +148,10 @@ async def reserve(
         request_id=request_id,
         tokens=tokens,
         estimate=estimated_exposure,
+        logical_work_id=logical_work_id,
+        attempt_kind=attempt_kind,
+        attempt_index=attempt_index,
+        context_sha256=context_sha256,
     )
     session.add(reservation)
     await session.flush()
