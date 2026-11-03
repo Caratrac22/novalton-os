@@ -97,13 +97,18 @@ async def _remote_memory_message(
             or (row.valid_to is not None and row.valid_to <= datetime.now(UTC))
         ):
             raise denied()
-        provenance = await session.scalar(
-            select(MemoryProvenance.id)
-            .where(MemoryProvenance.memory_id == memory_id)
-            .limit(1)
-            .with_for_update(read=True)
-        )
-        if provenance is None:
+        provenance = (
+            await session.scalars(
+                select(MemoryProvenance)
+                .where(MemoryProvenance.memory_id == memory_id)
+                .with_for_update(read=True)
+            )
+        ).all()
+        if not provenance or any(
+            source.source_type == "DERIVED_FROM_MEMORY" for source in provenance
+        ):
+            # The source memory could be LOCAL_ONLY or RESTRICTED. Until its
+            # complete ancestry is checked, deny the derived statement.
             raise denied()
         projected.append({"memory_id": str(row.id), "statement": row.statement})
     return Message(

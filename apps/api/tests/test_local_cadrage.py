@@ -1034,6 +1034,30 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
                 )
             )
         assert len(calls) == 1
+
+        async def insert_derived(session):
+            session.add(
+                MemoryProvenance(
+                    memory_id=memory_id,
+                    source_type="DERIVED_FROM_MEMORY",
+                    source_reference_id=str(memory_id),
+                )
+            )
+            await session.commit()
+
+        db_call(insert_derived)
+        with pytest.raises(ApplicationError):
+            asyncio.run(
+                call(
+                    grant_id,
+                    scope.tenant,
+                    alternate_run_id,
+                    through_registry=True,
+                    memory_ids=(memory_id,),
+                    logical_id=uuid4(),
+                )
+            )
+        assert len(calls) == 1
         disabled = client.patch(
             key_url,
             headers=headers,
