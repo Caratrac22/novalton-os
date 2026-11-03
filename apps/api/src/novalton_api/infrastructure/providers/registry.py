@@ -74,7 +74,9 @@ class ProviderRegistry:
                 raise ProviderError(ProviderFailure.INVALID_REQUEST, provider_id=provider_id)
             from novalton_api.modules.financial.gateway import PaidGenerationGateway
 
-            return await PaidGenerationGateway(provider).complete(
+            if paid_attempt.keyring is None or config.api_key is not None:
+                raise ProviderError(ProviderFailure.INVALID_REQUEST, provider_id=provider_id)
+            return await PaidGenerationGateway(provider, keyring=paid_attempt.keyring).complete(
                 paid_attempt.session,
                 operator=paid_attempt.operator,
                 authorization_id=paid_attempt.authorization_id,
@@ -87,6 +89,8 @@ class ProviderRegistry:
                 estimated_exposure=paid_attempt.estimated_exposure,
                 timeout_seconds=paid_attempt.timeout_seconds,
                 model_run_id=paid_attempt.model_run_id,
+                logical_work_id=paid_attempt.logical_work_id,
+                memory_ids=paid_attempt.memory_ids,
             )
         if get_settings().environment != "test" or paid_attempt is not None:
             raise ProviderError(ProviderFailure.INVALID_REQUEST, provider_id="registry")

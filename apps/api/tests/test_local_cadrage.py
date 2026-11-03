@@ -78,6 +78,7 @@ from novalton_api.modules.local_auth.bootstrap import (
 )
 from novalton_api.modules.local_auth.models import LocalCredential, LocalLoginThrottle, LocalSession
 from novalton_api.modules.local_auth.service import hash_password
+from novalton_api.modules.memories.models import MemoryProvenance, MemoryRecord
 from novalton_api.modules.model_catalog.models import ModelDefinition
 from novalton_api.modules.model_usage.models import ModelRun
 from novalton_api.modules.model_usage.schemas import ModelRunStart
@@ -136,6 +137,14 @@ def settings_for_new_scope() -> tuple[Settings, str]:
 
 
 async def wipe(session, scope: Scope) -> None:
+    await session.execute(
+        delete(MemoryProvenance).where(
+            MemoryProvenance.memory_id.in_(
+                select(MemoryRecord.id).where(MemoryRecord.workspace_id == scope.workspace)
+            )
+        )
+    )
+    await session.execute(delete(MemoryRecord).where(MemoryRecord.workspace_id == scope.workspace))
     await session.execute(delete(RuntimeEvent).where(RuntimeEvent.tenant_id == scope.tenant))
     await session.execute(
         delete(AgentChallengeResolution).where(AgentChallengeResolution.tenant_id == scope.tenant)
@@ -714,10 +723,16 @@ def test_financial_reservation_serializes_concurrent_requests(initialized):
         assert client.get(url, headers=auth).json()["items"][0]["request_count"] == 1
 
 
-def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scope(initialized):
+def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scope(
+    initialized, monkeypatch
+):
     scope, password, _ = initialized
     calls = []
     secret = "sk-fixture-never-expose"
+    monkeypatch.setenv(
+        "NOVALTON_BYOK_KEYRING", json.dumps({"v1": base64.b64encode(b"x" * 32).decode()})
+    )
+    monkeypatch.setenv("NOVALTON_BYOK_ACTIVE_KEY_ID", "v1")
 
     def respond(request):
         calls.append(request)
@@ -743,6 +758,10 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
         transport=httpx.MockTransport(respond),
     )
     gateway = PaidGenerationGateway(provider)
+    registry_provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig(provider_id="openrouter", base_url="https://openrouter.ai/api/v1"),
+        transport=httpx.MockTransport(respond),
+    )
     prompt = GenerationRequest(
         model_id="test-model",
         messages=[Message(role=MessageRole.USER, content="fixture prompt")],
@@ -756,6 +775,19 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
             "/api/v1/local-auth/login", json={"login": scope.login, "password": password}
         ).json()["token"]
         headers = {"Authorization": f"Bearer {token}"}
+        key_url = path(scope) + "/provider-keys/openrouter"
+        stored = client.put(
+            key_url,
+            headers=headers,
+            json={"secret": secret, "current_password": password},
+        )
+        assert stored.status_code == 200 and secret not in stored.text
+        enabled = client.patch(
+            key_url,
+            headers=headers,
+            json={"enabled": True, "current_password": password},
+        )
+        assert enabled.status_code == 200 and secret not in enabled.text
         project = client.post(
             path(scope) + "/projects",
             headers=headers,
@@ -780,6 +812,7 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
         )
         assert grant.status_code == 201, grant.text
         grant_id = UUID(grant.json()["id"])
+        logical_work_id = uuid4()
         attempt_id = db_call(
             lambda session: start_model_run(
                 session,
@@ -794,6 +827,28 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
             )
         ).id
 
+        async def seed_memory(session):
+            row = MemoryRecord(
+                workspace_id=scope.workspace,
+                project_id=project_id,
+                kind="FACT",
+                knowledge_state="CONFIRMED_FACT",
+                statement="safe fixture memory",
+                confidence=Decimal("1"),
+                importance=3,
+                valid_from=datetime.now(UTC) - timedelta(minutes=1),
+                lifecycle="ACTIVE",
+                sensitivity="INTERNAL",
+                model_access="LOCAL_ONLY",
+            )
+            session.add(row)
+            await session.flush()
+            session.add(MemoryProvenance(memory_id=row.id, source_type="USER_STATEMENT"))
+            await session.commit()
+            return row.id
+
+        memory_id = db_call(seed_memory)
+
         async def call(
             authorization_id,
             tenant_id,
@@ -802,6 +857,8 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
             gateway_instance=gateway,
             timeout_seconds=45,
             through_registry=False,
+            memory_ids=(),
+            logical_id=logical_work_id,
         ):
             db = Database.from_settings(Settings.from_environment())
             try:
@@ -811,8 +868,8 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
                     )
                     await session.rollback()
                     if through_registry:
-                        return await ProviderRegistry((gateway_instance._provider,)).complete(
-                            gateway_instance._provider.provider_id,
+                        return await ProviderRegistry((registry_provider,)).complete(
+                            registry_provider.provider_id,
                             model_request,
                             paid_attempt=PaidGenerationAttempt(
                                 session=session,
@@ -822,8 +879,11 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
                                 workspace_id=scope.workspace,
                                 project_id=project_id,
                                 model_run_id=request_id,
+                                logical_work_id=logical_id,
                                 reserved_tokens=10,
                                 estimated_exposure=Decimal("0.01"),
+                                keyring=Keyring.from_environment(),
+                                memory_ids=memory_ids,
                                 timeout_seconds=timeout_seconds,
                             ),
                         )
@@ -858,12 +918,124 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
             asyncio.run(call(grant_id, scope.tenant, uuid4(), through_registry=True))
         assert not calls
 
+        with pytest.raises(ApplicationError):
+            asyncio.run(
+                call(
+                    grant_id,
+                    scope.tenant,
+                    attempt_id,
+                    through_registry=True,
+                    memory_ids=(memory_id,),
+                )
+            )
+        assert not calls
+
+        async def allow_memory(session):
+            await session.execute(
+                update(MemoryRecord)
+                .where(MemoryRecord.id == memory_id)
+                .values(model_access="LOCAL_AND_REMOTE")
+            )
+            await session.commit()
+
+        db_call(allow_memory)
+
         assert (
-            asyncio.run(call(grant_id, scope.tenant, attempt_id, through_registry=True)).content
+            asyncio.run(
+                call(
+                    grant_id,
+                    scope.tenant,
+                    attempt_id,
+                    through_registry=True,
+                    memory_ids=(memory_id,),
+                )
+            ).content
             == "ok"
         )
         assert len(calls) == 1
         assert calls[0].url == "https://openrouter.ai/api/v1/chat/completions"
+        assert calls[0].headers["Authorization"] == f"Bearer {secret}"
+        sent = json.loads(calls[0].content)
+        assert sent["messages"][-1]["content"].endswith(
+            json.dumps(
+                [{"memory_id": str(memory_id), "statement": "safe fixture memory"}],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        alternate_run_id = db_call(
+            lambda session: start_model_run(
+                session,
+                tenant_id=scope.tenant,
+                workspace_id=scope.workspace,
+                data=ModelRunStart(
+                    provider_id="openrouter",
+                    provider_model_id="test-model",
+                    project_id=project_id,
+                    execution_max_output_tokens=10,
+                ),
+            )
+        ).id
+
+        async def deny_memory(session):
+            await session.execute(
+                update(MemoryRecord)
+                .where(MemoryRecord.id == memory_id)
+                .values(model_access="LOCAL_ONLY")
+            )
+            await session.commit()
+
+        db_call(deny_memory)
+        with pytest.raises(ApplicationError):
+            asyncio.run(
+                call(
+                    grant_id,
+                    scope.tenant,
+                    alternate_run_id,
+                    through_registry=True,
+                    memory_ids=(memory_id,),
+                    logical_id=uuid4(),
+                )
+            )
+        db_call(allow_memory)
+        with pytest.raises(ApplicationError):
+            asyncio.run(call(grant_id, scope.tenant, alternate_run_id, through_registry=True))
+        assert len(calls) == 1
+        disabled = client.patch(
+            key_url,
+            headers=headers,
+            json={"enabled": False, "current_password": password},
+        )
+        assert disabled.status_code == 200
+        with pytest.raises(ApplicationError):
+            asyncio.run(
+                call(
+                    grant_id,
+                    scope.tenant,
+                    alternate_run_id,
+                    through_registry=True,
+                    logical_id=uuid4(),
+                )
+            )
+        assert len(calls) == 1
+        projection = Message(role=MessageRole.USER, content=sent["messages"][-1]["content"])
+        expected_context = GenerationRequest.model_validate(
+            prompt.model_dump(mode="json") | {"messages": [*prompt.messages, projection]}
+        )
+        assert (
+            db_call(
+                lambda session: session.scalar(
+                    select(FinancialReservation.context_sha256).where(
+                        FinancialReservation.request_id == attempt_id
+                    )
+                )
+            )
+            == hashlib.sha256(
+                json.dumps(
+                    expected_context.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+        )
         for aid, tid, rid in (
             (grant_id, scope.tenant, attempt_id),  # uncertain effects are never replayed
             (grant_id, uuid4(), uuid4()),  # foreign tenant
@@ -922,6 +1094,7 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
         assert len(calls) == 1
         assert client.get(url, headers=headers).json()["items"][0]["request_count"] == 3
     asyncio.run(provider.aclose())
+    asyncio.run(registry_provider.aclose())
 
 
 def test_paid_gateway_rejects_untrusted_destinations_and_missing_key():

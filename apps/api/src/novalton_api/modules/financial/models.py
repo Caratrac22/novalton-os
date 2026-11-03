@@ -18,6 +18,7 @@ from sqlalchemy import (
     Numeric,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -93,6 +94,31 @@ class FinancialReservation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("authorization_id", "request_id", name="uq_financial_reservation_request"),
         CheckConstraint("tokens > 0 AND estimate >= 0", name="ck_financial_reservation_amount"),
+        CheckConstraint(
+            "(logical_work_id IS NULL AND attempt_kind IS NULL AND attempt_index IS NULL "
+            "AND context_sha256 IS NULL) OR (logical_work_id IS NOT NULL AND "
+            "attempt_kind IS NOT NULL AND attempt_index IS NOT NULL AND "
+            "context_sha256 IS NOT NULL)",
+            name="ck_financial_reservation_identity_shape",
+        ),
+        CheckConstraint(
+            "context_sha256 IS NULL OR context_sha256 ~ '^[a-f0-9]{64}$'",
+            name="ck_financial_reservation_context_hash",
+        ),
+        Index(
+            "uq_financial_logical_attempt",
+            "logical_work_id",
+            "attempt_kind",
+            "attempt_index",
+            unique=True,
+            postgresql_where=text("logical_work_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_financial_model_request",
+            "request_id",
+            unique=True,
+            postgresql_where=text("logical_work_id IS NOT NULL"),
+        ),
     )
 
     authorization_id: Mapped[UUID] = mapped_column(
@@ -103,3 +129,7 @@ class FinancialReservation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     request_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
     tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     estimate: Mapped[Decimal] = mapped_column(Numeric(20, 10), nullable=False)
+    logical_work_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    attempt_kind: Mapped[str | None] = mapped_column(String(32))
+    attempt_index: Mapped[int | None] = mapped_column(Integer)
+    context_sha256: Mapped[str | None] = mapped_column(String(64))
