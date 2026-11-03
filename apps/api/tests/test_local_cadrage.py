@@ -954,7 +954,9 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
         )
         assert len(calls) == 1
         assert calls[0].url == "https://openrouter.ai/api/v1/chat/completions"
-        assert calls[0].headers["Authorization"] == f"Bearer {secret}"
+        assert hashlib.sha256(calls[0].headers["Authorization"].encode()).digest() == (
+            hashlib.sha256(f"Bearer {secret}".encode()).digest()
+        )
         sent = json.loads(calls[0].content)
         assert sent["messages"][-1]["content"].endswith(
             json.dumps(
@@ -1000,6 +1002,37 @@ def test_paid_gateway_commits_once_and_denies_replay_revocation_and_foreign_scop
         db_call(allow_memory)
         with pytest.raises(ApplicationError):
             asyncio.run(call(grant_id, scope.tenant, alternate_run_id, through_registry=True))
+        assert len(calls) == 1
+        with pytest.raises(ApplicationError):
+            asyncio.run(
+                call(
+                    grant_id,
+                    scope.tenant,
+                    alternate_run_id,
+                    through_registry=True,
+                    memory_ids=(uuid4(),),
+                    logical_id=uuid4(),
+                )
+            )
+
+        async def remove_provenance(session):
+            await session.execute(
+                delete(MemoryProvenance).where(MemoryProvenance.memory_id == memory_id)
+            )
+            await session.commit()
+
+        db_call(remove_provenance)
+        with pytest.raises(ApplicationError):
+            asyncio.run(
+                call(
+                    grant_id,
+                    scope.tenant,
+                    alternate_run_id,
+                    through_registry=True,
+                    memory_ids=(memory_id,),
+                    logical_id=uuid4(),
+                )
+            )
         assert len(calls) == 1
         disabled = client.patch(
             key_url,

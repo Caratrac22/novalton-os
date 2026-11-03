@@ -58,7 +58,9 @@ def downgrade() -> None:
         "ck_financial_reservation_context_hash", "financial_reservations", type_="check"
     )
     op.drop_constraint(
-        "ck_financial_reservation_identity_shape", "financial_reservations", type_="check"
+        "ck_financial_reservation_identity_shape",
+        "financial_reservations",
+        type_="check",
     )
     op.drop_column("financial_reservations", "context_sha256")
     op.drop_column("financial_reservations", "attempt_index")

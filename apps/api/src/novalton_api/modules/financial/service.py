@@ -2,7 +2,7 @@
 
 Reservations are monotonic because a timeout or lost response can still be
 billed. This is an estimated exposure constraint, not a billing guarantee.
-No current generation path calls this service; paid integration stays closed.
+Only the disposable test generation path calls this service; paid integration stays closed.
 """
 
 from datetime import UTC, datetime
